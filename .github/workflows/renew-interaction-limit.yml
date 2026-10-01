@@ -1,0 +1,45 @@
+name: Renew interaction limit
+
+# Keeps the repository's "collaborators only" interaction limit in place, so the public can view the code, issues and
+# project board but cannot open issues or pull requests or comment. GitHub caps an interaction limit at six months; this
+# checks monthly and renews to a fresh six months once 60 days or fewer remain (or if the limit has lapsed).
+
+on:
+  schedule:
+    - cron: "17 9 1 * *"   # 09:17 UTC on the 1st of every month
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Renew when 60 days or fewer remain
+        env:
+          GH_TOKEN: ${{ secrets.INTERACTION_LIMIT_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::Secret INTERACTION_LIMIT_TOKEN is not set (needs Administration: read & write on this repo)."
+            exit 1
+          fi
+          current=$(gh api "repos/${REPO}/interaction-limits" 2>/dev/null || echo '{}')
+          limit=$(echo "$current" | jq -r '.limit // empty')
+          expires=$(echo "$current" | jq -r '.expires_at // empty')
+          renew=false
+          if [ "$limit" != "collaborators_only" ] || [ -z "$expires" ]; then
+            echo "No collaborators_only limit in place (limit='${limit}'); applying one."
+            renew=true
+          else
+            days_left=$(( ( $(date -d "$expires" +%s) - $(date +%s) ) / 86400 ))
+            echo "Current limit: ${limit}, expires ${expires} (${days_left} days left)."
+            if [ "$days_left" -le 60 ]; then renew=true; fi
+          fi
+          if [ "$renew" = true ]; then
+            gh api -X PUT "repos/${REPO}/interaction-limits" -f limit=collaborators_only -f expiry=six_months \
+              --jq '"Renewed: " + .limit + " until " + .expires_at'
+          else
+            echo "More than 60 days left; nothing to do."
+          fi
