@@ -1,0 +1,39 @@
+# Virtual workspace manifest for the Nousix `ferric` engagement.
+#
+# `ferric` (crates/ferric) is the client-side web-framework core delivered by the
+# `ferric-foundation` work-item. The later engagement crates (ferric-router, ferric-http,
+# chirp-types, chirp-server, chirp-frontend) slot in under `crates/*` as they are built.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+repository = "https://github.com/Nousix-LLC/nswe-demo"
+
+# Shared dependency versions — members reference these with `.workspace = true`. Deps stay lean:
+# we are building a framework, not consuming one.
+[workspace.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = "0.3"
+wasm-bindgen-test = "0.3"
+
+# Lints inherited by every member (`[lints] workspace = true`). Kept deliberately light for a
+# long-lived public surface: enforce documentation on public items and clippy's default group,
+# and flag `unsafe` (web-sys/js-sys wrappers are safe; a layer that genuinely needs `unsafe` can
+# `#[allow(unsafe_code)]` locally rather than being hard-blocked).
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+
+# Size-tuned release profile — wasm payloads benefit from small code.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1

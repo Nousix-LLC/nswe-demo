@@ -1,0 +1,41 @@
+[package]
+name = "ferric"
+description = "A small client-side web-application framework in Rust, compiled to WebAssembly."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+# The DOM runtime (src/dom.rs) renders into and patches real DOM and binds click + input events.
+# These features cover element/text/comment node creation and mutation, attributes, and the two
+# required event kinds; the DOM layer may extend this list additively if it needs more.
+web-sys = { workspace = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Node",
+    "Text",
+    "Comment",
+    "CharacterData",
+    "Event",
+    "EventTarget",
+    "InputEvent",
+    "MouseEvent",
+    "console",
+    "NodeList",
+    "DomTokenList",
+    "NamedNodeMap",
+    "Attr",
+] }
+
+# Browser test harness — available to native-gated `wasm_bindgen_test` suites the layer spokes add.
+[dev-dependencies]
+wasm-bindgen-test.workspace = true
