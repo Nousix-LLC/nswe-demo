@@ -1,0 +1,33 @@
+[package]
+name = "ferric-router"
+description = "A client-side router for the `ferric` WebAssembly framework: route table, path matcher with params, History API navigation, and a reactive router-outlet."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The framework this router composes with (signals, vdom, component, mount). Path-dep on the
+# sibling workspace member — the router builds on `ferric`, it does not re-implement reactivity/DOM.
+ferric = { path = "../ferric" }
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+# Browser History API integration (src/router.rs): read `window.location`, push History entries,
+# and listen for `popstate`. These features cover the router's needs; the navigation spoke may
+# extend this list additively if it needs more.
+web-sys = { workspace = true, features = [
+    "Window",
+    "History",
+    "Location",
+    "PopStateEvent",
+    "Event",
+    "EventTarget",
+] }
+
+# Browser test harness — available to the native-gated `wasm_bindgen_test` suites the layer
+# spokes add (gated behind `cfg(all(test, target_arch = "wasm32"))`).
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

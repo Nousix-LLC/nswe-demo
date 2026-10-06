@@ -58,6 +58,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferric-router"
+version = "0.1.0"
+dependencies = [
+ "ferric",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
