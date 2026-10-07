@@ -33,14 +33,16 @@
 //! present, the router builder is re-exported here so the end-to-end integration tests and the
 //! binary construct the server against an [`InMemoryRepository`] through one entry point.
 
+pub mod api;
 pub mod error;
 pub mod repository;
 
+pub use api::{AppState, AuthUser};
 pub use error::ServerError;
 pub use repository::{ChirpRepository, InMemoryRepository};
 
-// NOTE (scaffold handoff): the api-layer spoke adds the transport module here — e.g.
-//   pub mod api;
-//   pub use api::build_router;
-// plus `src/main.rs` as the binary entrypoint. `lib.rs` re-exports the router builder so
-// `tests/` and the binary share one way to construct the app over an `InMemoryRepository`.
+// NOTE (transport-foundations): `pub mod api;` and the `AppState` / `AuthUser` re-exports above
+// are the transport foundations handlers compile against. The `build_router` re-export
+// (`pub use api::build_router;`) and `src/main.rs` are added by the router-and-bootstrap
+// sub-spoke, so `tests/` and the binary share one way to construct the app over an
+// `InMemoryRepository`.

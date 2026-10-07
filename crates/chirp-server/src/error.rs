@@ -31,6 +31,9 @@
 //! | [`Conflict`](ServerError::Conflict)        | `CONFLICT`         | 409 |
 //! | [`Internal`](ServerError::Internal)        | `INTERNAL`         | 500 |
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use chirp_types::api::{ApiError, ErrorCode, FieldError};
 use chirp_types::domain::ValidationError;
 
@@ -127,6 +130,48 @@ fn validation_field(error: &ValidationError) -> &'static str {
         ValidationError::Empty { field }
         | ValidationError::TooLong { field, .. }
         | ValidationError::InvalidCharacter { field, .. } => field,
+    }
+}
+
+/// Renders a [`ServerError`] as an HTTP response — the transport edge of the error seam.
+///
+/// The variant's [`code`](ServerError::code) selects the HTTP status fixed by the subtree
+/// contract's `error_mapping` table, and [`into_api_error`](ServerError::into_api_error) supplies
+/// the JSON body, so every failure surfaces on the wire as an [`ApiError`] with the matching
+/// [`ErrorCode`]:
+///
+/// | [`code`](ServerError::code) | HTTP status |
+/// |-----------------------------|-------------|
+/// | `VALIDATION_ERROR` | `400 Bad Request` |
+/// | `UNAUTHORIZED`     | `401 Unauthorized` |
+/// | `FORBIDDEN`        | `403 Forbidden` |
+/// | `NOT_FOUND`        | `404 Not Found` |
+/// | `CONFLICT`         | `409 Conflict` |
+/// | `INTERNAL`         | `500 Internal Server Error` |
+///
+/// An [`Internal`](ServerError::Internal) error logs its message at `error` level for the
+/// operator but returns a deliberately generic body, so server-side detail never leaks to the
+/// client.
+impl IntoResponse for ServerError {
+    fn into_response(self) -> Response {
+        let status = match self.code() {
+            ErrorCode::ValidationError => StatusCode::BAD_REQUEST,
+            ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+            ErrorCode::Forbidden => StatusCode::FORBIDDEN,
+            ErrorCode::NotFound => StatusCode::NOT_FOUND,
+            ErrorCode::Conflict => StatusCode::CONFLICT,
+            ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        let body = match &self {
+            ServerError::Internal(message) => {
+                tracing::error!(error = %message, "internal server error");
+                ApiError::new(ErrorCode::Internal, "an internal server error occurred")
+            }
+            other => other.into_api_error(),
+        };
+
+        (status, Json(body)).into_response()
     }
 }
 
