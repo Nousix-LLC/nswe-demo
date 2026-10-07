@@ -1,0 +1,32 @@
+[package]
+name = "ferric-http"
+description = "A small async HTTP/JSON client for the browser Fetch API, for the ferric WASM framework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# JSON (de)serialization of request and response bodies. `derive` lets downstream
+# code — and this crate's own doctests/tests — derive `Serialize`/`Deserialize`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The Fetch bridge. These are only exercised on `wasm32-unknown-unknown` at runtime;
+# off-wasm, `web-sys` provides compiling stubs so the pure logic stays natively testable.
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Window",
+    "Headers",
+    "Request",
+    "RequestInit",
+    "Response",
+] }
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true
