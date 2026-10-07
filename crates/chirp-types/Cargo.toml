@@ -1,0 +1,23 @@
+# `chirp-types` — the shared domain model + client↔server API contract for the `chirp` app.
+#
+# Delivered by work-item #7. Imported by BOTH `chirp-server` (#8, axum) and `chirp-frontend`
+# (#9, ferric SPA), so it is deliberately dependency-light: the only runtime dependency is
+# `serde` (for the derive macros). Serialization to a concrete wire format (JSON via
+# `serde_json`, etc.) is the consumer's choice, so `serde_json` is a dev-dependency used only by
+# this crate's round-trip tests. No server or wasm dependencies live here.
+[package]
+name = "chirp-types"
+description = "Shared domain model and client↔server API-contract DTOs for the chirp application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+serde_json.workspace = true
