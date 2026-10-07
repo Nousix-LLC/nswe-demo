@@ -1,0 +1,16 @@
+# wasm toolchain — pinned/recorded versions (infra-bootstrap #10, wasm criterion)
+# Captured from the proving host on the run that produced pkg/chirp.js + pkg/chirp_bg.wasm.
+# The wasm-bindgen CLI version MUST equal the wasm-bindgen crate version (exact-match requirement).
+
+rustc                     = 1.97.1 (8bab26f4f 2026-07-14)
+cargo                     = 1.97.1 (c980f4866 2026-06-30)
+rustup                    = 1.29.0 (28d1352db 2026-03-05)
+wasm-bindgen (CLI)        = 0.2.129
+wasm-bindgen (crate, lock)= 0.2.129          # resolved in Cargo.lock; CLI pinned to match
+wasm32-unknown-unknown    = installed (rustup target)
+workspace MSRV            = 1.82             # [workspace.package] rust-version
+
+# Related resolved crate versions (from Cargo.lock, informational):
+wasm-bindgen-futures      = 0.4.79
+js-sys                    = 0.3.106
+web-sys                   = 0.3.106
