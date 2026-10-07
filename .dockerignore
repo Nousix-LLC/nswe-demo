@@ -1,0 +1,34 @@
+# Keep the build context small and leak-free. The image build needs only the Rust workspace
+# (crates/ + Cargo.toml + Cargo.lock) and deploy/docker/healthcheck.rs; everything below is either
+# irrelevant to the build or must never enter a layer.
+
+# Rust build artifacts — by far the largest directory; rebuilt inside the image anyway.
+target/
+**/target/
+
+# Version control
+.git/
+.gitignore
+
+# CI/CD — owned by the ci-actions work-item, not needed to build the image.
+.github/
+
+# Docs and project prose — not needed to compile (no crate uses include_str! on them).
+*.md
+docs/
+LICENSE
+
+# Container plumbing itself — the Dockerfile/.dockerignore do not belong inside the image.
+Dockerfile
+.dockerignore
+deploy/README.md
+
+# Local scratch, editor, and OS noise
+.env
+.env.*
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
