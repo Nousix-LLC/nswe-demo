@@ -80,7 +80,7 @@ pub use response::Response;
 /// let _client = Client::new();
 /// ```
 ///
-/// Note that this re-exports [`Result`](crate::Result), which shadows [`std::result::Result`]
+/// Note that this re-exports [`Result`], which shadows [`std::result::Result`]
 /// in the importing scope — the usual trade-off for a client-library prelude.
 pub mod prelude {
     pub use crate::{Client, ClientBuilder, Error, Method, RequestBuilder, Response, Result};

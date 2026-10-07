@@ -11,7 +11,7 @@
 //!
 //! The trait exists to make persistence *replaceable*. Because the realistic replacement is an
 //! async database, the seam is async: every operation is an `async fn`. The trait is kept
-//! **object-safe** (via [`async_trait`]) so the transport layer can hold an
+//! **object-safe** (via `async_trait`) so the transport layer can hold an
 //! `Arc<dyn ChirpRepository>` as shared axum state rather than threading a generic backend type
 //! through every handler. All methods take `&self` (shared, not `&mut`): an implementation manages
 //! its own interior mutability, so the repository can live behind a plain `Arc` shared across
@@ -34,9 +34,9 @@
 //! | [`like`](ChirpRepository::like) / [`unlike`](ChirpRepository::unlike) | likes | [`NotFound`](crate::error::ServerError::NotFound) for an absent chirp |
 //!
 //! Authentication is deliberately light for the demo (see the contract's `auth_note`):
-//! [`login`](ChirpRepository::login) issues an opaque [`SessionToken`](chirp_types::api::SessionToken)
+//! [`login`](ChirpRepository::login) issues an opaque [`SessionToken`]
 //! for a known handle and [`resolve_token`](ChirpRepository::resolve_token) maps a presented token
-//! back to its [`UserId`](chirp_types::ids::UserId). Token storage lives behind the trait so the
+//! back to its [`UserId`]. Token storage lives behind the trait so the
 //! api-layer's auth extractor can resolve a bearer token without owning any session state.
 
 pub mod in_memory;
@@ -95,8 +95,8 @@ pub trait ChirpRepository: Send + Sync {
     /// Authenticates by handle and issues a session.
     ///
     /// Authentication is handle-based for this demo: a known username is exchanged for an opaque
-    /// [`SessionToken`](chirp_types::api::SessionToken); there is no password/credential step. The
-    /// returned [`AuthResponse`](chirp_types::api::AuthResponse) carries the user's profile and the
+    /// [`SessionToken`]; there is no password/credential step. The
+    /// returned [`AuthResponse`] carries the user's profile and the
     /// token to present on subsequent authenticated requests.
     ///
     /// # Errors
@@ -104,7 +104,7 @@ pub trait ChirpRepository: Send + Sync {
     /// [`NotFound`](ServerError::NotFound) if no user has the requested handle.
     async fn login(&self, request: LoginRequest) -> Result<AuthResponse, ServerError>;
 
-    /// Resolves a presented bearer token to the authenticated [`UserId`](chirp_types::ids::UserId).
+    /// Resolves a presented bearer token to the authenticated [`UserId`].
     ///
     /// Supports the api-layer's authentication extractor: the session store lives behind the trait,
     /// so the transport layer resolves a token without owning session state.

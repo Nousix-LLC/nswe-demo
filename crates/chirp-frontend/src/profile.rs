@@ -1,10 +1,10 @@
 //! `/user/:id` — the user profile view with follow/like actions.
 //!
-//! Owned by `SUBTASK_profile`; realizes the frozen [`profile_view`] signature from
-//! `contracts/app_api.rs`. It reads the `:id` route parameter, loads the [`User`] via
+//! Owned by `SUBTASK_profile`; realizes the frozen `profile_view` signature from
+//! `contracts/app_api.rs`. It reads the `:id` route parameter, loads the `User` via
 //! [`ApiClient::get_user`](crate::api::ApiClient::get_user) (rendering loading / error / not-found /
-//! loaded states), and offers **follow / unfollow** ([`set_follow`]) and **like**
-//! ([`set_like`]) actions whose results update the on-screen counts reactively.
+//! loaded states), and offers **follow / unfollow** (`set_follow`) and **like**
+//! (`set_like`) actions whose results update the on-screen counts reactively.
 //!
 //! # Reactivity model (why state lives in a `thread_local`, not in view-local signals)
 //!
@@ -18,10 +18,10 @@
 //!
 //! This module therefore keeps the profile's mutable state in a module-local [`thread_local`] store
 //! of **plain data** (which survives re-renders because it is ordinary Rust, not a reactive node),
-//! and drives reactive re-renders through the persistent session signal: [`profile_view`] reads
+//! and drives reactive re-renders through the persistent session signal: `profile_view` reads
 //! `session` every render (also the legitimate check for "is the viewer logged in?"), and async
 //! completions / click handlers update the plain store and then nudge `session` via
-//! [`request_render`] so `ferric` re-renders the app and this view re-reads the store. Nudging a
+//! `request_render` so `ferric` re-renders the app and this view re-reads the store. Nudging a
 //! root signal is panic-free; capturing a per-render signal in a handler would not be.
 //!
 //! Async work is bridged to the UI exactly as the subtree constraints require: a browser task

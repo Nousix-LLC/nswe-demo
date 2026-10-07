@@ -1,13 +1,13 @@
 //! The single UI error type every failure funnels through.
 //!
-//! [`AppError`] is the one error the views branch on. Both a [`ferric_http::Error`] (transport /
-//! network / non-2xx status) and a decodable server [`chirp_types::ApiError`] map into it through
-//! [`AppError::from_http`], so every view renders a coherent loading / error state instead of each
+//! `AppError` is the one error the views branch on. Both a [`ferric_http::Error`] (transport /
+//! network / non-2xx status) and a decodable server `chirp_types::ApiError` map into it through
+//! `AppError::from_http`, so every view renders a coherent loading / error state instead of each
 //! module inventing its own error shape. This module is owned by `SUBTASK_scaffold` and is a real
 //! implementation (not a stub): it is the seam the feature spokes map their failures onto.
 //!
 //! Nothing here panics: `from_http` is total over `ferric_http::Error` (including its
-//! `#[non_exhaustive]` growth), and a non-decodable body degrades to [`AppError::Transport`] rather
+//! `#[non_exhaustive]` growth), and a non-decodable body degrades to `AppError::Transport` rather
 //! than unwrapping.
 
 use chirp_types::prelude::{ApiError, ErrorCode};
@@ -27,14 +27,14 @@ pub enum AppError {
 }
 
 impl AppError {
-    /// Map a [`ferric_http::Error`] into an [`AppError`], decoding a [`chirp_types::ApiError`] out
+    /// Map a [`ferric_http::Error`] into an `AppError`, decoding a `chirp_types::ApiError` out
     /// of a non-2xx `Error::Status { body }` when the body is a valid error document.
     ///
     /// * A [`ferric_http::Error::Network`] becomes [`AppError::Network`].
     /// * A non-2xx [`ferric_http::Error::Status`] whose body decodes to an [`ApiError`] becomes
-    ///   [`AppError::Api`]; otherwise it becomes [`AppError::Transport`] carrying a status summary.
+    ///   [`AppError::Api`]; otherwise it becomes `AppError::Transport` carrying a status summary.
     /// * Every other variant (builder / (de)serialize / body read, and any future `#[non_exhaustive]`
-    ///   variant) becomes [`AppError::Transport`] carrying its display text.
+    ///   variant) becomes `AppError::Transport` carrying its display text.
     #[must_use]
     pub fn from_http(err: HttpError) -> Self {
         match err {
@@ -81,7 +81,7 @@ impl AppError {
     }
 }
 
-/// Convenience conversion so `?` on a `ferric_http` call yields an [`AppError`] directly.
+/// Convenience conversion so `?` on a `ferric_http` call yields an `AppError` directly.
 impl From<HttpError> for AppError {
     fn from(err: HttpError) -> Self {
         AppError::from_http(err)

@@ -1,9 +1,9 @@
 //! Typed async REST client over `ferric-http` + the `chirp-types` DTOs.
 //!
-//! [`ApiClient`] is the one place the SPA talks to the chirp REST backend. It wraps a
+//! `ApiClient` is the one place the SPA talks to the chirp REST backend. It wraps a
 //! [`ferric_http::Client`], (de)serializes the shared [`chirp_types`] wire DTOs **directly** (no
 //! parallel types), attaches the bearer token when the session carries one, and funnels every
-//! failure through [`AppError`] — decoding a server [`chirp_types::ApiError`] out of a non-2xx body
+//! failure through `AppError` — decoding a server `chirp_types::ApiError` out of a non-2xx body
 //! — so the views render coherent loading / error states.
 //!
 //! The method ⇄ endpoint map is frozen in `contracts/rest_endpoints.md`: each method below hits
@@ -12,7 +12,7 @@
 //! touches field naming.
 //!
 //! Nothing here panics: there is no `unwrap`/`expect`/`panic!`/`todo!`/`unsafe`. Serialization,
-//! transport, network, and non-2xx failures all map to an [`AppError`] variant. `send`/`send_json`
+//! transport, network, and non-2xx failures all map to an `AppError` variant. `send`/`send_json`
 //! are browser-only (they call the Fetch API); the native unit tests therefore cover the pure,
 //! off-DOM logic — URL/path/query building and error decoding — and leave the fetch itself to the
 //! compile-only wasm smoke tests the gate documents.
@@ -24,7 +24,7 @@ use crate::error::AppError;
 
 /// Typed async REST client. Holds the configurable base URL and an optional bearer token, builds a
 /// fresh [`ferric_http::Client`] per call (cheap — a string and a small header vector), and maps
-/// every failure to [`AppError`]. Cheap to clone.
+/// every failure to `AppError`. Cheap to clone.
 ///
 /// Each method's REST method+path and DTOs are frozen in `contracts/rest_endpoints.md`.
 #[derive(Debug, Clone)]

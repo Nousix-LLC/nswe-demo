@@ -17,7 +17,7 @@
 //! InMemoryRepository (default backing, no DB)
 //! ```
 //!
-//! Persistence is abstracted behind the [`ChirpRepository`](repository::ChirpRepository) trait so
+//! Persistence is abstracted behind the [`ChirpRepository`] trait so
 //! the server runs entirely in memory for the demo (the default [`InMemoryRepository`]) and could
 //! adopt a real database later by adding another implementor — without changing a single handler.
 //! The transport layer holds the repository as `Arc<dyn ChirpRepository>` shared state.
@@ -26,7 +26,7 @@
 //!
 //! * [`error::ServerError`] — the one typed error returned across every layer, with its mapping to
 //!   the `chirp-types` wire error contract.
-//! * [`repository`] — the [`ChirpRepository`](repository::ChirpRepository) seam and its default
+//! * [`repository`] — the [`ChirpRepository`] seam and its default
 //!   [`InMemoryRepository`] backing.
 //!
 //! The axum application/router builder and the server binary are the api-layer spoke's: the router

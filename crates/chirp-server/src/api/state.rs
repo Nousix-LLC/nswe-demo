@@ -2,7 +2,7 @@
 //!
 //! [`AppState`] is the single value axum threads through the request lifecycle as
 //! [`State`](axum::extract::State). It carries the persistence seam —
-//! [`ChirpRepository`](crate::repository::ChirpRepository) — as a trait object behind an
+//! [`ChirpRepository`] — as a trait object behind an
 //! [`Arc`], so the transport layer depends only on the repository *capability* and never on a
 //! concrete backend (the default [`InMemoryRepository`](crate::repository::InMemoryRepository),
 //! or a future database implementor) — swapping the backing store changes no handler.

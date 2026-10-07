@@ -13,7 +13,7 @@
 //! [`ServerError`] the repository (or an extractor) produces, and the committed
 //! `impl IntoResponse for ServerError` (in [`crate::error`]) renders it as the contract's
 //! `ApiError` JSON body with the matching HTTP status. Request bodies are extracted with
-//! [`ValidatedJson`](crate::api::ValidatedJson) rather than the plain `axum::Json`, so a
+//! [`ValidatedJson`] rather than the plain `axum::Json`, so a
 //! `chirp_types` `ValidationError` (or any other JSON-decoding failure) surfaced while decoding a
 //! DTO becomes `ServerError::InvalidBody` → `VALIDATION_ERROR`/HTTP 400 via the same path, instead
 //! of axum's default plain-text `422`.

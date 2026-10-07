@@ -8,7 +8,7 @@
 //!
 //! # Concurrency model
 //!
-//! All mutable state lives in one [`Store`] behind `Mutex<Store>`. Each trait method is a single
+//! All mutable state lives in one `Store` behind `Mutex<Store>`. Each trait method is a single
 //! synchronous critical section — acquire the lock, read/mutate, drop the lock — with **no `.await`
 //! held across the guard. Because the guard never crosses a suspension point, the futures
 //! `async_trait` produces remain `Send`, and a plain `std::sync::Mutex` is correct and cheap. A

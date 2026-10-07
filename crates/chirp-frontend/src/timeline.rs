@@ -1,12 +1,12 @@
 //! `/` — the timeline view.
 //!
-//! Realizes the frozen [`timeline_view`] signature (`contracts/app_api.rs`): load a
-//! [`Page<Chirp>`] through `ctx.client().timeline(..)`, render a keyed, reactive chirp list, and
+//! Realizes the frozen `timeline_view` signature (`contracts/app_api.rs`): load a
+//! `Page<Chirp>` through `ctx.client().timeline(..)`, render a keyed, reactive chirp list, and
 //! handle the loading, error, empty, and paginated-content states with cursor-based "load more".
 //!
 //! # Reactive-state model (why this module holds state the way it does)
 //!
-//! `ferric` is a *coarse* re-render framework: [`mount`](ferric::mount) wraps the whole render in
+//! `ferric` is a *coarse* re-render framework: `mount` wraps the whole render in
 //! one reactive effect, and a route view such as this one is **re-invoked from scratch on every
 //! re-render**. Critically, a signal created *inside* a running effect is owned by that effect and
 //! is **disposed when the effect re-runs** (see the note in `ferric-router`'s `router.rs`: "a
@@ -17,14 +17,14 @@
 //!
 //! The sound equivalent, mirroring how `ferric-router` keeps its current-path state alive, is:
 //!
-//! * the view's data lives in a module [`thread_local!`] [`TimelineModel`] (plain data — never
+//! * the view's data lives in a module `thread_local!` `TimelineModel` (plain data — never
 //!   disposed, survives every re-render); and
-//! * reactivity is driven by a tiny re-render **trigger** [`Signal`] that each render *recreates*
+//! * reactivity is driven by a tiny re-render **trigger** `Signal` that each render *recreates*
 //!   and reads (so the mount effect subscribes to the current one), and that async completions and
 //!   event handlers *bump* to request a re-render. Because the trigger is recreated every render,
-//!   the handle stored in [`RERENDER`] is always the live one while this route is mounted; a
-//!   completion that fires after the user has navigated away is dropped by the [`ROUTE_PATH`]
-//!   guard in [`bump`] rather than touching a disposed handle (which would panic).
+//!   the handle stored in `RERENDER` is always the live one while this route is mounted; a
+//!   completion that fires after the user has navigated away is dropped by the `ROUTE_PATH`
+//!   guard in `bump` rather than touching a disposed handle (which would panic).
 //!
 //! This is a single-instance view (one timeline route), so module-global `thread_local` state is
 //! the correct scope — exactly as `ferric-router` scopes its single current-path signal.
@@ -45,7 +45,7 @@ use ferric_router::prelude::current_path;
 use crate::app::AppContext;
 use crate::error::AppError;
 
-/// The path this view is mounted at (see `app.rs` route table). Used by [`bump`] to avoid
+/// The path this view is mounted at (see `app.rs` route table). Used by `bump` to avoid
 /// re-rendering — and thus touching a now-disposed trigger handle — once the user has navigated
 /// away while a request was still in flight.
 const ROUTE_PATH: &str = "/";
@@ -144,7 +144,7 @@ impl TimelineModel {
     }
 }
 
-/// `/` — timeline. Loads a [`Page<Chirp>`] on first display, renders a keyed reactive list with
+/// `/` — timeline. Loads a `Page<Chirp>` on first display, renders a keyed reactive list with
 /// loading / error / empty states, and offers cursor-based "load more".
 ///
 /// See the [module docs](self) for why the view's state lives in a `thread_local` model plus a
@@ -235,8 +235,8 @@ fn apply_result(kind: LoadKind, result: Result<Page<Chirp>, AppError>) {
 
 /// Request a re-render by bumping the current trigger signal.
 ///
-/// Guarded by [`ROUTE_PATH`]: if the user has navigated away, the most recent render was another
-/// route, so the trigger handle in [`RERENDER`] has been disposed. We skip the bump (the model was
+/// Guarded by `ROUTE_PATH`: if the user has navigated away, the most recent render was another
+/// route, so the trigger handle in `RERENDER` has been disposed. We skip the bump (the model was
 /// still updated, so returning to the timeline renders the latest state) rather than set a disposed
 /// signal, which would panic.
 fn bump() {

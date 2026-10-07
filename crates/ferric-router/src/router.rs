@@ -4,8 +4,8 @@
 //!
 //! This layer composes `ferric` signals for reactivity — it does **not** re-implement reactivity or
 //! the DOM diff. A route's view builder is `Fn(&Params) -> VNode`: it receives the matched
-//! [`Params`](crate::matcher::Params) and returns a `ferric` view tree, and route resolution uses
-//! the real [`RoutePattern`](crate::matcher::RoutePattern) matcher.
+//! [`Params`] and returns a `ferric` view tree, and route resolution uses
+//! the real [`RoutePattern`] matcher.
 //!
 //! # The reactive current path
 //!
