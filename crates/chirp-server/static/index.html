@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<!--
+  PLACEHOLDER static asset for chirp-server.
+
+  The real single-page app bundle is delivered by a later work-item (#9). Until then this file is
+  the static root served by `build_router`'s `ServeDir` + SPA fallback, so the server boots and
+  serves a page with no frontend build step. Any client-side route that does not match an API route
+  or a static file falls back to this document.
+
+  Override the static root with the CHIRP_STATIC_DIR environment variable to serve a real bundle.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chirp</title>
+  </head>
+  <body>
+    <main>
+      <h1>chirp</h1>
+      <p>
+        The chirp API server is running. This is a placeholder page; the single-page app
+        has not been built into this static directory yet.
+      </p>
+      <p>
+        Health probe: <a href="/healthz">/healthz</a> &middot; API is served under
+        <code>/api/…</code>.
+      </p>
+    </main>
+  </body>
+</html>

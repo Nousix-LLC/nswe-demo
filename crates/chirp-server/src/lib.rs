@@ -29,20 +29,20 @@
 //! * [`repository`] — the [`ChirpRepository`](repository::ChirpRepository) seam and its default
 //!   [`InMemoryRepository`] backing.
 //!
-//! The axum application/router builder and the server binary are added by the api-layer spoke; when
-//! present, the router builder is re-exported here so the end-to-end integration tests and the
-//! binary construct the server against an [`InMemoryRepository`] through one entry point.
+//! The axum application/router builder and the server binary are the api-layer spoke's: the router
+//! builder [`build_router`] is re-exported here so the end-to-end integration tests and the
+//! [`main`](../main/index.html) binary construct the server against an [`InMemoryRepository`]
+//! through one entry point.
 
 pub mod api;
 pub mod error;
 pub mod repository;
 
-pub use api::{AppState, AuthUser};
+pub use api::{build_router, AppState, AuthUser};
 pub use error::ServerError;
 pub use repository::{ChirpRepository, InMemoryRepository};
 
-// NOTE (transport-foundations): `pub mod api;` and the `AppState` / `AuthUser` re-exports above
-// are the transport foundations handlers compile against. The `build_router` re-export
-// (`pub use api::build_router;`) and `src/main.rs` are added by the router-and-bootstrap
-// sub-spoke, so `tests/` and the binary share one way to construct the app over an
+// NOTE: `pub mod api;` and the `AppState` / `AuthUser` re-exports are the transport foundations
+// handlers compile against; `build_router` is the router-and-bootstrap composition root. Together
+// they give `tests/` and the `main` binary one shared way to construct the app over an
 // `InMemoryRepository`.

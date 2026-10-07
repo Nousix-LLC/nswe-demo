@@ -13,13 +13,16 @@
 //! * [`handlers`] — the axum handler functions for the full `repository_seam` endpoint surface,
 //!   each translating HTTP ⇄ DTO and delegating to the repository through [`AppState`].
 //!
-//! The `build_router` builder (static/SPA serving, `/healthz`, tracing) and the `main.rs` binary
-//! are added by the router-and-bootstrap sub-spoke; it mounts the [`handlers`] through
-//! [`AppState`].
+//! * [`build_router`](router::build_router) — the composition root in [`router`] that mounts the
+//!   handlers, `GET /healthz`, and the static/SPA fallback into one [`Router`](axum::Router), with
+//!   request tracing. It is the single entry point the binary and the integration tests build the
+//!   app through.
 
 pub mod auth;
 pub mod handlers;
+pub mod router;
 pub mod state;
 
 pub use auth::AuthUser;
+pub use router::build_router;
 pub use state::AppState;
