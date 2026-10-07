@@ -1,0 +1,46 @@
+[package]
+name = "chirp-frontend"
+description = "The chirp Twitter-style client SPA: a client-side WebAssembly app on the ferric framework, composing the chirp-types REST contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The landed framework crates — path-deps on sibling workspace members. Composed, never
+# re-implemented (see ../../_GLOBAL.md §Subtree-Wide Constraints).
+ferric = { path = "../ferric" }
+ferric-router = { path = "../ferric-router" }
+ferric-http = { path = "../ferric-http" }
+# The shared wire contract — DTOs used directly, never redefined.
+chirp-types = { path = "../chirp-types" }
+
+# JSON decoding of the server's `ApiError` document out of a non-2xx response body (src/error.rs).
+serde_json = { workspace = true }
+
+# Browser glue. `wasm-bindgen-futures::spawn_local` is the fetch->signal async bridge the feature
+# views use; `wasm-bindgen` (JsCast) lets a handler query a DOM <input>; `web-sys` provides the
+# Window/Document/Element surface the mount entry and views touch. Features are additive over what
+# ferric / ferric-router / ferric-http already enable (web-sys is feature-unified across the graph).
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4"
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = [
+    "Window",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlTextAreaElement",
+    "Node",
+    "Event",
+    "EventTarget",
+] }
+
+[dev-dependencies]
+# Compile-only browser smoke tests the feature spokes may add (gated to wasm32, mirroring the
+# ferric / ferric-router precedent). The native `cargo test` suite remains the gate.
+wasm-bindgen-test.workspace = true

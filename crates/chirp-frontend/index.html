@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>chirp</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        max-width: 40rem;
+      }
+      .chirp-nav {
+        margin-bottom: 1.5rem;
+      }
+      .ferric-router-link {
+        cursor: pointer;
+        color: #1d9bf0;
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The SPA mounts into this element (see `chirp_frontend::start`); it falls back to <body>. -->
+    <div id="app"></div>
+
+    <!--
+      `init()` instantiates the wasm module and runs the example's `main`, which calls
+      `chirp_frontend::start()` to build and mount the app.
+
+      Generate `./pkg/chirp.js` + `./pkg/chirp_bg.wasm` from the built example with wasm-bindgen
+      (see README.md). The path below assumes `--out-dir pkg` next to this file.
+    -->
+    <script type="module">
+      import init from "./pkg/chirp.js";
+      init();
+    </script>
+  </body>
+</html>
