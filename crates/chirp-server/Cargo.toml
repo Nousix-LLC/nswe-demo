@@ -1,0 +1,68 @@
+# `chirp-server` — the axum REST API backend for the `chirp` application (work-item #8).
+#
+# A workspace member that composes against the shared `chirp-types` contract crate (#7) via a
+# path dependency: every wire type (domain entities + API DTOs) is imported from `chirp-types`
+# and NEVER re-declared here, so the server cannot drift from the client.
+#
+# Crate shape: library + binary. `lib.rs` exposes the app/router builder and the repository so the
+# end-to-end integration tests (and the binary) can construct a server against the in-memory repo;
+# `main.rs` (added by the api-layer spoke) is the server entrypoint.
+#
+# Layering (transport → service → repository) keeps persistence behind the `ChirpRepository` trait.
+# The DEFAULT backing is fully in-memory, so `cargo build` and `cargo test` need no database or any
+# other external infrastructure. A SQLite/`sqlx` backing is an optional, documented alternative only
+# and MUST NOT become a test prerequisite.
+[package]
+name = "chirp-server"
+description = "axum REST API backend for the chirp application: persistence behind a repository trait (in-memory default), typed errors over the chirp-types wire contract, static/SPA serving, and a health endpoint."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The single source of truth for every wire type (domain entities + API DTOs). Path dependency on
+# the sibling workspace member — the server imports the contract, it never forks or re-declares it.
+chirp-types = { path = "../chirp-types" }
+
+# `async fn` in the `ChirpRepository` trait, kept object-safe so axum state can hold
+# `Arc<dyn ChirpRepository>`. Native async-fn-in-trait is not yet `dyn`-compatible, so the
+# ecosystem-standard `async-trait` is used to box the returned futures. The boxing cost is
+# irrelevant for this workload and preserves the documented async-DB alternative without a
+# trait rewrite.
+async-trait = "0.1"
+
+# Typed error enum derivation (`ServerError`): `#[error(...)]` Display + `#[from]` conversion from
+# the domain `ValidationError`, with zero hand-written boilerplate. Standard choice for a library's
+# public, matchable error type.
+thiserror = "2"
+
+# Async runtime. The repository's async unit tests run under `#[tokio::test]`; the api-layer binary
+# serves on the multi-thread runtime. Feature set provisioned for the whole crate so the api-layer
+# spoke can serve without re-editing this manifest.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+
+# Serialization of wire types (the chirp-types DTOs already derive serde; these are declared for the
+# api-layer's JSON extractors/responders and for round-trip assertions). Centralized versions from
+# the workspace so server and frontend share one serde.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# --- Transport layer (owned by the api-layer spoke; declared here as part of crate scaffolding) ---
+# The repository layer this spoke delivers does not use these; they are provisioned so the api-layer
+# spoke can author handlers, routing, middleware, static/SPA serving, and tracing without editing
+# this manifest (which this spoke owns).
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# End-to-end API integration tests (owned by the integration_tests_and_docs spoke) drive the router
+# in-process; these harness helpers are provisioned here as part of crate scaffolding.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
