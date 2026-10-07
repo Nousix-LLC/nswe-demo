@@ -1,0 +1,194 @@
+# CI for the Nousix `ferric`/chirp Rust + WebAssembly workspace (work-item #11).
+#
+# Validates every pull request and every push to `main` with five independent,
+# required-check-friendly jobs (fmt, clippy, test, wasm, doc). On a push to
+# `main` only, a sixth job (image) builds and publishes the chirp-server
+# container image to GHCR — it is wired now and activates once work-item #12
+# lands the multi-stage Dockerfile (it skips cleanly until then; see the job).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Least privilege by default: jobs may only read the repository. The image job
+# widens this locally to `packages: write` for GHCR; nothing else can write.
+permissions:
+  contents: read
+
+# Give fast feedback and save runners: a newer commit on the same ref cancels
+# the superseded in-flight run. `main` pushes are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # The whole toolchain is pinned so a clean checkout reproduces the result.
+  # 1.97 (not the manifest's declared MSRV 1.82) is used deliberately: the
+  # locked dependency graph no longer parses on 1.82 (e.g. hyper-util 0.1.21).
+  # See SYNTHESIS.md for the MSRV-vs-locked-deps follow-up.
+  RUST_TOOLCHAIN: "1.97"
+  # Deny-warnings everywhere, and keep incremental off (CI builds are cold).
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }} (+ rustfmt)
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }} (+ clippy)
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The workspace lints (missing_docs=warn, unsafe_code=warn,
+      # clippy::all=warn) are promoted to hard errors here with -D warnings.
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }} (+ wasm32 target)
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # wasm-bindgen-cli MUST match the locked `wasm-bindgen` crate (0.2.129);
+      # a version skew is a hard runtime error. Pinned + --locked accordingly.
+      - name: Install wasm-bindgen-cli (0.2.129, matches Cargo.lock)
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.129
+      # Reproduces the documented browser build (crates/chirp-frontend/README.md):
+      # compile the SPA entry example to wasm, then generate the JS/wasm bindings
+      # index.html imports. This proves the frontend produces a loadable artifact.
+      - name: Build chirp-frontend (wasm32) + example entry
+        run: |
+          cargo build -p chirp-frontend --target wasm32-unknown-unknown --locked
+          cargo build -p chirp-frontend --example chirp --target wasm32-unknown-unknown --locked
+      - name: Generate wasm-bindgen output (pkg/)
+        run: |
+          wasm-bindgen --target web --no-typescript \
+            --out-dir crates/chirp-frontend/pkg \
+            target/wasm32-unknown-unknown/debug/examples/chirp.wasm
+      - name: Confirm SPA artifacts exist
+        run: test -f crates/chirp-frontend/pkg/chirp.js && test -f crates/chirp-frontend/pkg/chirp_bg.wasm
+
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    # Intra-doc-link and doc warnings fail the build (CRQ-02 enforcement). The
+    # workspace's existing doc-link debt was resolved in this change so this
+    # gate is green; -D warnings keeps it from regressing.
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (deny warnings)
+        run: cargo doc --workspace --no-deps --locked
+
+  image:
+    name: image
+    # Publish only after every check is green, and only on a push to `main`
+    # (never on pull requests). This job is therefore not a PR required check.
+    needs: [fmt, clippy, test, wasm, doc]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR push, via the built-in GITHUB_TOKEN (no PATs/secrets)
+    env:
+      REGISTRY: ghcr.io
+      # GHCR requires a lowercase path; the owner `Nousix-LLC` lowercases here.
+      IMAGE_NAME: ghcr.io/nousix-llc/chirp-server
+    steps:
+      - uses: actions/checkout@v4
+
+      # Ordering with work-item #12 (containerize), handled honestly: the
+      # multi-stage Dockerfile ships in #12 and has not landed yet. Rather than
+      # fabricate a build, detect the Dockerfile and skip the publish steps
+      # cleanly until it exists. Once #12 adds ./Dockerfile, this job publishes
+      # automatically on the next `main` push with no further edits here.
+      - name: Detect Dockerfile (awaiting work-item #12)
+        id: dockerfile
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "Dockerfile present — building and pushing the chirp-server image."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dockerfile not present yet (awaiting work-item #12 / containerize); skipping image build+push."
+          fi
+
+      - name: Log in to GHCR
+        if: steps.dockerfile.outputs.present == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags/labels
+        if: steps.dockerfile.outputs.present == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: Set up Buildx
+        if: steps.dockerfile.outputs.present == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push chirp-server image
+        if: steps.dockerfile.outputs.present == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
