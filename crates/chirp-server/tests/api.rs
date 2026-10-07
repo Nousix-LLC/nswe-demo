@@ -497,18 +497,21 @@ mod errors {
         assert_eq!(resp.api_error().code, ErrorCode::NotFound);
     }
 
-    /// CHARACTERIZATION (documents a contract gap — see `TEST_NOTES.md`, finding F1).
+    /// A well-formed-JSON body carrying an invalid DTO field value is rejected as the contract's
+    /// **400 `VALIDATION_ERROR`** with an [`ApiError`] body — not axum's default plain-text `422`.
     ///
-    /// The subtree contract's `error_mapping` and `API_NOTES.md` document a DTO-validation failure
-    /// (e.g. an invalid username) as **400 `VALIDATION_ERROR`** carrying an [`ApiError`] with field
-    /// `details`. In the assembled server, validation happens at the serde boundary of the plain
-    /// `axum::Json` extractor, so an invalid field is rejected by axum's default `JsonRejection` as
-    /// **422 Unprocessable Entity** with a plain-text body — the `chirp-types` wire error contract is
-    /// NOT applied on this path. This test pins the *actual* behavior (so a future fix that routes it
-    /// through `ServerError::Validation` will visibly flip this assertion) and the gap is reported to
-    /// the gate rather than silently accepted.
+    /// The subtree contract's `error_mapping` maps an `input/DTO validation failure (incl.
+    /// chirp-types ValidationError)` to `VALIDATION_ERROR`/400 with field `details`. The
+    /// `chirp-types` value objects validate on deserialization (`#[serde(try_from = "String")]`),
+    /// so an invalid field value (here a username with a space) fails at the body-extractor's serde
+    /// boundary. The [`ValidatedJson`] extractor routes that `JsonRejection` through
+    /// `ServerError::InvalidBody`, so the failure surfaces as the contract's `ApiError` with a
+    /// `VALIDATION_ERROR` code and a non-empty `details`.
+    ///
+    /// (Remediates finding F1: the earlier plain `axum::Json` extractor returned `422` plain text,
+    /// bypassing the wire error contract. This test previously pinned that non-conforming behavior.)
     #[tokio::test]
-    async fn invalid_dto_field_is_rejected_as_422_not_contract_400() {
+    async fn invalid_dto_field_is_rejected_as_400_validation_error() {
         let app = TestApp::new();
         // Valid JSON, but "has space" fails `Username` validation during deserialization.
         let body = serde_json::json!({
@@ -518,16 +521,18 @@ mod errors {
         });
         let resp = app.request("POST", "/api/users", None, Some(&body)).await;
 
-        // Actual behavior: the input IS rejected (never created), but as 422, not the contract's 400.
+        // The input is rejected (never created) as the contract's 400 — not axum's default 422.
         assert_eq!(
             resp.status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "current behavior is axum's default JsonRejection (422); contract expects 400"
+            StatusCode::BAD_REQUEST,
+            "a well-formed-JSON body with an invalid DTO field must be the contract's 400"
         );
-        // And the body is NOT the `ApiError` wire contract on this path (the gap being reported).
+        // And the body IS the `ApiError` wire contract: VALIDATION_ERROR with field details.
+        let error = resp.api_error();
+        assert_eq!(error.code, ErrorCode::ValidationError);
         assert!(
-            serde_json::from_slice::<ApiError>(&resp.body).is_err(),
-            "the 422 body is plain text, not an ApiError — the wire error contract is bypassed here"
+            !error.details.is_empty(),
+            "a validation failure carries at least one FieldError detail"
         );
     }
 }

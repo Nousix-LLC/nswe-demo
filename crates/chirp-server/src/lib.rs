@@ -38,7 +38,7 @@ pub mod api;
 pub mod error;
 pub mod repository;
 
-pub use api::{build_router, AppState, AuthUser};
+pub use api::{build_router, AppState, AuthUser, ValidatedJson};
 pub use error::ServerError;
 pub use repository::{ChirpRepository, InMemoryRepository};
 

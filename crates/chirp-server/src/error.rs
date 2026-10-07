@@ -31,6 +31,7 @@
 //! | [`Conflict`](ServerError::Conflict)        | `CONFLICT`         | 409 |
 //! | [`Internal`](ServerError::Internal)        | `INTERNAL`         | 500 |
 
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -55,6 +56,20 @@ pub enum ServerError {
     /// domain [`ValidationError`] via `?` (see the [`From`] impl).
     #[error("validation failed: {0}")]
     Validation(#[from] ValidationError),
+
+    /// A request body could not be deserialized/validated at the transport boundary
+    /// (HTTP 400 / `VALIDATION_ERROR`).
+    ///
+    /// Raised by the [`ValidatedJson`](crate::api::ValidatedJson) extractor when axum's JSON
+    /// decoding rejects the body — including a `chirp-types` value object's
+    /// `#[serde(try_from = "String")]` [`ValidationError`] surfacing as a serde data error, as well
+    /// as malformed JSON or a missing/incorrect content type. These all represent invalid *input*,
+    /// so they map to the same `VALIDATION_ERROR`/400 as a domain [`Validation`](ServerError::Validation)
+    /// failure, ensuring the body is rendered as the contract's [`ApiError`] rather than axum's
+    /// default plain-text `422`. Carries the rejection's human-readable message. See the
+    /// [`From<JsonRejection>`](#impl-From<JsonRejection>-for-ServerError) impl.
+    #[error("{0}")]
+    InvalidBody(String),
 
     /// Authentication is required but missing or invalid (HTTP 401 / `UNAUTHORIZED`).
     ///
@@ -93,7 +108,7 @@ impl ServerError {
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
-            ServerError::Validation(_) => ErrorCode::ValidationError,
+            ServerError::Validation(_) | ServerError::InvalidBody(_) => ErrorCode::ValidationError,
             ServerError::Unauthorized(_) => ErrorCode::Unauthorized,
             ServerError::Forbidden(_) => ErrorCode::Forbidden,
             ServerError::NotFound(_) => ErrorCode::NotFound,
@@ -105,11 +120,14 @@ impl ServerError {
     /// Builds the wire-ready [`ApiError`](chirp_types::api::ApiError) for this error.
     ///
     /// The [`code`](ServerError::code) sets the category and the [`Display`](std::fmt::Display)
-    /// text becomes the human-readable `message`. For a [`Validation`](ServerError::Validation)
-    /// error the originating [`ValidationError`]'s field is lifted into a single
-    /// [`FieldError`](chirp_types::api::FieldError) so the client can attribute the problem; other
-    /// variants carry no field details. HTTP status is intentionally *not* set here — the api-layer
-    /// applies it when turning this into a response.
+    /// text becomes the human-readable `message`. The two validation-category variants carry field
+    /// details: for a [`Validation`](ServerError::Validation) error the originating
+    /// [`ValidationError`]'s field is lifted into a single
+    /// [`FieldError`](chirp_types::api::FieldError); for an [`InvalidBody`](ServerError::InvalidBody)
+    /// error (a transport-boundary deserialization rejection, where the structured field is not
+    /// recoverable from axum's `JsonRejection`) a single generic `body` [`FieldError`] carries the
+    /// rejection message. Other variants carry no field details. HTTP status is intentionally *not*
+    /// set here — the api-layer applies it when turning this into a response.
     #[must_use]
     pub fn into_api_error(&self) -> ApiError {
         let error = ApiError::new(self.code(), self.to_string());
@@ -118,8 +136,26 @@ impl ServerError {
                 field: validation_field(source).to_owned(),
                 message: source.to_string(),
             }]),
+            ServerError::InvalidBody(detail) => error.with_details(vec![FieldError {
+                field: "body".to_owned(),
+                message: detail.clone(),
+            }]),
             _ => error,
         }
+    }
+}
+
+/// Converts an axum [`JsonRejection`] into a [`ServerError::InvalidBody`].
+///
+/// This is the seam the [`ValidatedJson`](crate::api::ValidatedJson) extractor relies on: a failed
+/// JSON body extraction (a `chirp-types` `#[serde(try_from)]` [`ValidationError`] surfacing as a
+/// serde data error, malformed JSON, or a missing/incorrect content type) becomes a
+/// `VALIDATION_ERROR`/400 that renders as the contract's [`ApiError`], instead of axum's default
+/// plain-text `422`. The rejection's [`body_text`](JsonRejection::body_text) is preserved as the
+/// human-readable message.
+impl From<JsonRejection> for ServerError {
+    fn from(rejection: JsonRejection) -> Self {
+        ServerError::InvalidBody(rejection.body_text())
     }
 }
 
@@ -230,5 +266,20 @@ mod tests {
         let api = ServerError::NotFound("chirp chirp-9".into()).into_api_error();
         assert_eq!(api.code, ErrorCode::NotFound);
         assert!(api.details.is_empty());
+    }
+
+    #[test]
+    fn invalid_body_maps_to_validation_code_with_a_generic_field_detail() {
+        // A transport-boundary deserialization rejection surfaces as VALIDATION_ERROR with a
+        // single generic `body` FieldError carrying the rejection message.
+        let err = ServerError::InvalidBody(
+            "Failed to deserialize the JSON body into the target type".to_owned(),
+        );
+        assert_eq!(err.code(), ErrorCode::ValidationError);
+        let api = err.into_api_error();
+        assert_eq!(api.code, ErrorCode::ValidationError);
+        assert_eq!(api.details.len(), 1);
+        assert_eq!(api.details[0].field, "body");
+        assert!(!api.details[0].message.is_empty());
     }
 }

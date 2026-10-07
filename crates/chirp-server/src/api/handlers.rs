@@ -12,8 +12,11 @@
 //! Every handler returns `Result<_, ServerError>`. The `?` operator propagates any
 //! [`ServerError`] the repository (or an extractor) produces, and the committed
 //! `impl IntoResponse for ServerError` (in [`crate::error`]) renders it as the contract's
-//! `ApiError` JSON body with the matching HTTP status. A `chirp_types` `ValidationError` surfaced
-//! while decoding a DTO becomes `ServerError::Validation` (HTTP 400) via the same path.
+//! `ApiError` JSON body with the matching HTTP status. Request bodies are extracted with
+//! [`ValidatedJson`](crate::api::ValidatedJson) rather than the plain `axum::Json`, so a
+//! `chirp_types` `ValidationError` (or any other JSON-decoding failure) surfaced while decoding a
+//! DTO becomes `ServerError::InvalidBody` → `VALIDATION_ERROR`/HTTP 400 via the same path, instead
+//! of axum's default plain-text `422`.
 //!
 //! # Authentication
 //!
@@ -49,18 +52,18 @@ use chirp_types::api::{
 use chirp_types::domain::{Chirp, User};
 use chirp_types::ids::{ChirpId, UserId};
 
-use crate::{AppState, AuthUser, ServerError};
+use crate::{AppState, AuthUser, ServerError, ValidatedJson};
 
 /// `POST /api/users` — register a new user. Unauthenticated.
 ///
 /// Decodes a [`CreateUserRequest`] body and delegates to
 /// [`ChirpRepository::create_user`](crate::repository::ChirpRepository::create_user). Returns
 /// **201 Created** with the server-assigned [`User`]. A duplicate username surfaces as
-/// `ServerError::Conflict` (HTTP 409); an invalid handle in the body fails DTO validation as
-/// `ServerError::Validation` (HTTP 400).
+/// `ServerError::Conflict` (HTTP 409); an invalid handle in the body fails DTO validation at the
+/// [`ValidatedJson`] boundary as `ServerError::InvalidBody` (`VALIDATION_ERROR`/HTTP 400).
 pub async fn create_user(
     State(state): State<AppState>,
-    Json(request): Json<CreateUserRequest>,
+    ValidatedJson(request): ValidatedJson<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<User>), ServerError> {
     let user = state.repo.create_user(request).await?;
     Ok((StatusCode::CREATED, Json(user)))
@@ -94,7 +97,7 @@ pub async fn get_user(
 /// [`SessionToken`]: chirp_types::api::SessionToken
 pub async fn login(
     State(state): State<AppState>,
-    Json(request): Json<LoginRequest>,
+    ValidatedJson(request): ValidatedJson<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ServerError> {
     let auth = state.repo.login(request).await?;
     Ok(Json(auth))
@@ -106,12 +109,12 @@ pub async fn login(
 /// [`CreateChirpRequest`], and delegates to
 /// [`ChirpRepository::create_chirp`](crate::repository::ChirpRepository::create_chirp). Returns
 /// **201 Created** with the server-assigned [`Chirp`]. An absent `reply_to` target surfaces as
-/// `ServerError::NotFound` (HTTP 404); an over-long body fails DTO validation as
-/// `ServerError::Validation` (HTTP 400).
+/// `ServerError::NotFound` (HTTP 404); an over-long body fails DTO validation at the
+/// [`ValidatedJson`] boundary as `ServerError::InvalidBody` (`VALIDATION_ERROR`/HTTP 400).
 pub async fn create_chirp(
     AuthUser(author): AuthUser,
     State(state): State<AppState>,
-    Json(request): Json<CreateChirpRequest>,
+    ValidatedJson(request): ValidatedJson<CreateChirpRequest>,
 ) -> Result<(StatusCode, Json<Chirp>), ServerError> {
     let chirp = state.repo.create_chirp(author, request).await?;
     Ok((StatusCode::CREATED, Json(chirp)))
@@ -230,10 +233,12 @@ mod tests {
     #[tokio::test]
     async fn create_user_returns_201_and_delegates() {
         let state = state();
-        let (status, Json(user)) =
-            create_user(State(state.clone()), Json(new_user_request("alice")))
-                .await
-                .expect("create_user succeeds");
+        let (status, Json(user)) = create_user(
+            State(state.clone()),
+            ValidatedJson(new_user_request("alice")),
+        )
+        .await
+        .expect("create_user succeeds");
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(user.username.as_str(), "alice");
 
@@ -247,10 +252,10 @@ mod tests {
     #[tokio::test]
     async fn create_user_duplicate_is_conflict() {
         let state = state();
-        let _ = create_user(State(state.clone()), Json(new_user_request("bob")))
+        let _ = create_user(State(state.clone()), ValidatedJson(new_user_request("bob")))
             .await
             .expect("first create succeeds");
-        let err = create_user(State(state), Json(new_user_request("bob")))
+        let err = create_user(State(state), ValidatedJson(new_user_request("bob")))
             .await
             .expect_err("duplicate handle conflicts");
         assert!(matches!(err, ServerError::Conflict(_)));
@@ -267,14 +272,17 @@ mod tests {
     #[tokio::test]
     async fn login_then_create_chirp_delegates_with_authenticated_author() {
         let state = state();
-        let (_, Json(user)) = create_user(State(state.clone()), Json(new_user_request("carol")))
-            .await
-            .expect("create_user succeeds");
+        let (_, Json(user)) = create_user(
+            State(state.clone()),
+            ValidatedJson(new_user_request("carol")),
+        )
+        .await
+        .expect("create_user succeeds");
 
         // login returns 200 with a token + the same user profile.
         let Json(auth) = login(
             State(state.clone()),
-            Json(LoginRequest {
+            ValidatedJson(LoginRequest {
                 username: "carol".parse().expect("valid handle"),
             }),
         )
@@ -286,7 +294,7 @@ mod tests {
         let (status, Json(chirp)) = create_chirp(
             AuthUser(user.id),
             State(state.clone()),
-            Json(CreateChirpRequest {
+            ValidatedJson(CreateChirpRequest {
                 text: ChirpText::parse("hello, chirp!").expect("valid body"),
                 reply_to: None,
             }),
@@ -311,9 +319,12 @@ mod tests {
     #[tokio::test]
     async fn self_follow_is_forbidden_and_like_absent_is_not_found() {
         let state = state();
-        let (_, Json(user)) = create_user(State(state.clone()), Json(new_user_request("dave")))
-            .await
-            .expect("create_user succeeds");
+        let (_, Json(user)) = create_user(
+            State(state.clone()),
+            ValidatedJson(new_user_request("dave")),
+        )
+        .await
+        .expect("create_user succeeds");
 
         let err = follow(AuthUser(user.id), State(state.clone()), Path(user.id))
             .await

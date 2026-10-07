@@ -10,7 +10,7 @@
 //! async fn create_chirp(
 //!     AuthUser(author): AuthUser,
 //!     State(state): State<AppState>,
-//!     Json(req): Json<CreateChirpRequest>,
+//!     ValidatedJson(req): ValidatedJson<CreateChirpRequest>,
 //! ) -> Result<Json<Chirp>, ServerError> { /* ... */ }
 //! ```
 //!
