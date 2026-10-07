@@ -58,14 +58,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferric-http"
+name = "ferric-router"
 version = "0.1.0"
 dependencies = [
+ "ferric",
  "js-sys",
- "serde",
- "serde_json",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
 ]
