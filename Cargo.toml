@@ -20,6 +20,11 @@ wasm-bindgen = "0.2"
 js-sys = "0.3"
 web-sys = "0.3"
 wasm-bindgen-test = "0.3"
+# Serialization for the shared `chirp-types` contract (work-item #7). Centralized here so the
+# server (#8) and frontend (#9) that import `chirp-types` share one version. `serde_json` is only
+# used by `chirp-types`' round-trip tests today; consumers that serialize pick their own format.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Lints inherited by every member (`[lints] workspace = true`). Kept deliberately light for a
 # long-lived public surface: enforce documentation on public items and clippy's default group,
