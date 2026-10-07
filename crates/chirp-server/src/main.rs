@@ -56,14 +56,41 @@ fn init_tracing() {
     fmt().with_env_filter(filter).init();
 }
 
-/// Resolve when the server receives Ctrl-C, driving `axum`'s graceful shutdown.
+/// Resolve when the server receives a shutdown signal, driving `axum`'s graceful shutdown.
 ///
-/// On signal the server stops accepting new connections and lets in-flight requests finish. If the
-/// Ctrl-C handler cannot be installed the future returns immediately, so startup never hangs on a
+/// Waits for **either** `SIGINT` (Ctrl-C, interactive runs) **or** `SIGTERM` (the signal
+/// `docker stop`, Kubernetes, and other orchestrators send first). Handling SIGTERM is what lets a
+/// containerized instance drain in-flight requests and exit 0 rather than being SIGKILL'd (exit
+/// 137) when its grace period expires. On signal the server stops accepting new connections and
+/// lets in-flight requests finish. If a handler cannot be installed the corresponding future
+/// resolves (SIGINT: immediately; SIGTERM: never, deferring to SIGINT), so startup never hangs on a
 /// platform that denies it.
 async fn shutdown_signal() {
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => tracing::info!("shutdown signal received; draining in-flight requests"),
-        Err(error) => tracing::error!(%error, "failed to install Ctrl-C handler; shutting down"),
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to install Ctrl-C (SIGINT) handler");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                term.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to install SIGTERM handler");
+                // Defer to the SIGINT branch rather than triggering a spurious shutdown.
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = interrupt => tracing::info!("SIGINT received; draining in-flight requests"),
+        _ = terminate => tracing::info!("SIGTERM received; draining in-flight requests"),
     }
 }
