@@ -10,12 +10,15 @@
 //! * the `IntoResponse` rendering of [`ServerError`](crate::error::ServerError), which lives
 //!   alongside the error enum in [`crate::error`] (so `error.rs` owns the full error seam) and
 //!   lets a handler return `Result<_, ServerError>`.
+//! * [`handlers`] — the axum handler functions for the full `repository_seam` endpoint surface,
+//!   each translating HTTP ⇄ DTO and delegating to the repository through [`AppState`].
 //!
-//! The axum handler functions, the `build_router` builder (static/SPA serving, `/healthz`,
-//! tracing), and the `main.rs` binary are added by the later api-layer sub-spokes; they slot into
-//! this module and are mounted through [`AppState`].
+//! The `build_router` builder (static/SPA serving, `/healthz`, tracing) and the `main.rs` binary
+//! are added by the router-and-bootstrap sub-spoke; it mounts the [`handlers`] through
+//! [`AppState`].
 
 pub mod auth;
+pub mod handlers;
 pub mod state;
 
 pub use auth::AuthUser;
