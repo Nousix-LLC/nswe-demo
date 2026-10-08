@@ -1,0 +1,41 @@
+# chirp-server Ingress (north-south reachability on k3d-hosted k3s).
+# Owned by SUBTASK_app_manifests. Uses the k3s built-in Traefik ingress controller
+# (ingressClassName: traefik, from ground_truth.md). The k3d serverlb maps host
+# localhost:8081 -> 80 through Traefik, so the app is reachable at:
+#
+#     curl -H 'Host: chirp.localhost' http://localhost:8081/          # -> the WASM SPA (HTML)
+#     curl -H 'Host: chirp.localhost' http://localhost:8081/healthz   # -> {"status":"ok",...}
+#
+# Host-based routing is used; the synthesis gate MUST send the Host header above when testing.
+#
+# Design note (Ingress vs Gateway API): current k8s guidance steers NEW north-south routing to
+# the Gateway API, but this target is k3d/k3s whose shipped, supported controller is Traefik as
+# an Ingress controller; the contract and ground_truth.md both specify an Ingress with class
+# traefik. The Ingress resource is therefore the correct, idiomatic choice here. A Gateway-API
+# migration would be a cluster-platform decision, not this app's.
+#
+# TLS: omitted deliberately. The reachability demonstration uses plain HTTP via the k3d serverlb
+# (:8081 -> 80). Self-signed/no TLS is acceptable for k3d per the contract; a production/native
+# deploy would terminate TLS at Traefik (cert-manager or a provided cert) on :443 (serverlb 8444).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: chirp-server
+  namespace: chirp
+  labels:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/managed-by: argocd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: chirp.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chirp-server   # == Service name (20-service.yaml)
+                port:
+                  number: 80         # == Service port

@@ -1,0 +1,104 @@
+# chirp-server workload.
+# Owned by SUBTASK_app_manifests. Image pinned by the immutable @sha256: manifest-list digest
+# resolved in ../SUBTASK_discovery/outputs/ground_truth.md (#24 SEC-3 — never a movable tag).
+#
+# replicas: 1 is DELIBERATE. chirp-server uses an in-memory repository (no DB / no PVC per the
+# Dockerfile), so each replica would hold independent state; running >1 replica would split state
+# across pods and serve inconsistent data. Scale-out requires a shared backing store first.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chirp-server
+  namespace: chirp
+  labels:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/managed-by: argocd
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  minReadySeconds: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1          # bring the new pod up before removing the old one
+      maxUnavailable: 0    # never drop below 1 serving pod during a roll
+  selector:
+    # Immutable after creation. Minimal stable identifying subset (name + part-of) — the
+    # Service selector (20-service.yaml) uses the same subset, so it matches these pods.
+    matchLabels:
+      app.kubernetes.io/name: chirp-server
+      app.kubernetes.io/part-of: chirp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chirp-server
+        app.kubernetes.io/part-of: chirp
+        app.kubernetes.io/managed-by: argocd
+    spec:
+      # chirp-server does not call the Kubernetes API; do not mount a SA token.
+      automountServiceAccountToken: false
+      # chirp-server is PID 1 (exec-form ENTRYPOINT) and handles SIGTERM via tokio graceful
+      # shutdown; no preStop hook needed. 30s is ample to drain in-flight requests.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532          # distroless nonroot uid/gid baked into the image
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        # The ghcr.io/nousix-llc/chirp-server package is PRIVATE (ground_truth.md §6).
+        # This Secret is created OUT-OF-BAND in namespace chirp (NOT committed to git) — see
+        # README.md. Alternative: make the GHCR package public and drop this field.
+        - name: ghcr-pull
+      containers:
+        - name: chirp-server
+          image: ghcr.io/nousix-llc/chirp-server@sha256:054af27f588c13aeebd8698dbddf690e15bf75cd36c9a087b38763fd0902abe3
+          imagePullPolicy: IfNotPresent   # digest is immutable; no need to always re-pull
+          ports:
+            - name: http
+              containerPort: 8080          # CHIRP_BIND_ADDR=0.0.0.0:8080 (image default)
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Probes target the JSON API health endpoint /healthz on :8080 (NOT the SPA at "/").
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12            # up to ~60s cold-start grace before liveness engages
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true    # SPA is read from /srv/chirp; config is env-only
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp               # writable scratch under a read-only root fs
+      volumes:
+        - name: tmp
+          emptyDir: {}

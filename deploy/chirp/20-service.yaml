@@ -1,0 +1,24 @@
+# chirp-server Service.
+# Owned by SUBTASK_app_manifests. ClusterIP — external reachability is via the Ingress
+# (30-ingress.yaml), not the Service type. Identities (contract + ground_truth.md):
+#   - selector matches the Deployment pod-template labels (name + part-of subset)
+#   - port 80 (stable in-cluster), targetPort 8080 == container_listen_port
+apiVersion: v1
+kind: Service
+metadata:
+  name: chirp-server
+  namespace: chirp
+  labels:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/managed-by: argocd
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+  ports:
+    - name: http
+      port: 80            # Service port (Ingress backend references this)
+      targetPort: 8080    # == container_listen_port (ground_truth.md)
+      protocol: TCP

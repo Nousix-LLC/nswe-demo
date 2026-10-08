@@ -1,0 +1,80 @@
+# deploy/argocd/appproject.yaml
+#
+# Least-privilege Argo CD AppProject for the `chirp` application.
+#
+# This project is the authorization boundary for the `chirp` Application: it constrains WHICH
+# repo may be a source, WHERE resources may be synced (one cluster, one namespace), and WHICH
+# resource kinds may be created. It deliberately does NOT grant the stock cluster-admin-equivalent
+# `*/*/*` posture — every allowed kind is enumerated explicitly (#24 SEC-2 / SEC-4).
+#
+# Composed against ../contracts/deploy_contract.yaml (argocd.appproject_name=chirp,
+# destination_namespace=chirp) and ../SUBTASK_discovery/outputs/ground_truth.md
+# (appproject_apiversion=argoproj.io/v1alpha1; in-cluster API server
+# https://kubernetes.default.svc; repo https://github.com/Nousix-LLC/nswe-demo.git).
+#
+# Target: k3d-hosted k3s (cluster `nswe`, k3s v1.35.5+k3s1), Argo CD v3.5.4 in namespace `argocd`.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: chirp
+  # AppProjects live in the Argo CD control-plane namespace, NOT in the chirp workload namespace.
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/managed-by: argocd
+  # Cascade deletion: removing this project cleans up its managed resources deterministically.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: >-
+    Least-privilege project for the chirp application. Scoped to the chirp namespace on the
+    in-cluster API server, sourcing only the nswe-demo repo, with an explicit (non-wildcard)
+    allow-list of the resource kinds chirp actually needs.
+
+  # --- Source restriction: only this repo may back a chirp Application -------------------------
+  # Not `*`: a bad/hostile Application cannot point this project at an arbitrary repo.
+  sourceRepos:
+    - https://github.com/Nousix-LLC/nswe-demo.git
+
+  # --- Destination restriction: exactly one {server, namespace} -------------------------------
+  # Only the in-cluster API server, only the `chirp` namespace. The `argocd` namespace is
+  # deliberately NOT a destination: chirp deploys no resources into the control-plane namespace.
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: chirp
+
+  # --- Cluster-scoped resource allow-list -----------------------------------------------------
+  # The only cluster-scoped object chirp owns is its own Namespace (committed in deploy/chirp,
+  # per the `namespace-isolation-no-secrets` contract identity). Nothing else cluster-scoped is
+  # permitted — explicitly NOT `group: '*', kind: '*'`.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+
+  # --- Namespaced resource allow-list ---------------------------------------------------------
+  # Exactly the kinds a stateless web workload needs. Contract-frozen set (Deployment, Service,
+  # Ingress) plus the minimal workload-identity/config kinds (ServiceAccount, ConfigMap) a
+  # dedicated-SA, least-privilege workload uses. NOT a wildcard.
+  #
+  # Secret is DELIBERATELY EXCLUDED: no secrets are committed to the tree (#24), and the GHCR
+  # imagePullSecret (ground_truth §6: package is private) is applied out-of-band, not via Git.
+  # Excluding Secret here is defense-in-depth: this project cannot sync a Secret even if one were
+  # accidentally committed. If the chirp spoke later legitimately needs another kind, request an
+  # ADDITIVE amendment to this list rather than widening it to a wildcard.
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ServiceAccount
+    - group: ""
+      kind: ConfigMap
+    - group: apps
+      kind: Deployment
+    - group: networking.k8s.io
+      kind: Ingress
+
+  # Surface any resources in the chirp namespace that belong to NO Application as a warning,
+  # so unmanaged sprawl in the project's namespace is visible.
+  orphanedResources:
+    warn: true
