@@ -1,0 +1,20 @@
+# chirp application namespace.
+# Owned by SUBTASK_app_manifests. All chirp resources live in this namespace (isolation).
+# Pod Security Admission is set to the `restricted` standard — the chirp-server pod is
+# fully restricted-compliant (non-root 65532, no privilege escalation, all caps dropped,
+# RuntimeDefault seccomp, read-only root fs, only an emptyDir volume), so enforcement is safe.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chirp
+  labels:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/managed-by: argocd
+    # Pod Security Standards (enforced by the built-in Pod Security Admission controller).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

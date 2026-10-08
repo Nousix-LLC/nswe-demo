@@ -1,0 +1,80 @@
+# deploy/argocd/application.yaml
+#
+# Argo CD Application that tracks this repo's `deploy/chirp` path and syncs the chirp app into
+# namespace `chirp`, scoped through the least-privilege `chirp` AppProject (NOT `default`).
+#
+# Composed against ../contracts/deploy_contract.yaml
+#   (argocd.application_name=chirp, source_path=deploy/chirp, destination_namespace=chirp,
+#    spec.project=chirp) and ../SUBTASK_discovery/outputs/ground_truth.md
+#   (argocd_application_apiversion=argoproj.io/v1alpha1; repo
+#    https://github.com/Nousix-LLC/nswe-demo.git; in-cluster server https://kubernetes.default.svc).
+#
+# Satisfies contract identity `argocd-application-wired`:
+#   source.path == deploy/chirp, repoURL == nswe-demo, destination.namespace == chirp,
+#   spec.project == chirp (not 'default').
+#
+# This Application lives in deploy/argocd/, OUTSIDE its own synced path (deploy/chirp), so Argo CD
+# does NOT manage its own definition (no self-reconciliation recursion).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: chirp
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: chirp-server
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/managed-by: argocd
+  # Without this finalizer, deleting the Application orphans the synced child resources.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # Bind to the least-privilege project authored in appproject.yaml — explicitly NOT `default`.
+  project: chirp
+
+  source:
+    repoURL: https://github.com/Nousix-LLC/nswe-demo.git
+    # Track the default branch as the GitOps source of truth (steady state, post-merge).
+    # Pre-merge note (#23 HSO-1 divergence): the synthesis gate testing on branch
+    # `work/deploy-argocd` before the PR merges may temporarily point targetRevision at that
+    # branch for its reachability test, or sync after merge. Tracking an ephemeral feature branch
+    # as the committed value is an anti-pattern (the branch is deleted post-merge), so the
+    # committed manifest tracks `main`.
+    targetRevision: main
+    # The Application tracks ONLY this path; everything outside deploy/chirp is invisible to it.
+    path: deploy/chirp
+
+  destination:
+    # In-cluster API server (this Argo CD manages its own cluster). On a native (non-k3d) cluster
+    # the server value is identical (`https://kubernetes.default.svc`) — no divergence here.
+    server: https://kubernetes.default.svc
+    namespace: chirp
+
+  syncPolicy:
+    automated:
+      # GitOps idiom, chosen deliberately:
+      #   prune    — an object removed from deploy/chirp is deleted from the cluster (Git is truth).
+      #   selfHeal — an out-of-band `kubectl edit` is reverted back to the Git-declared state.
+      #   allowEmpty:false — a bad commit cannot prune the app down to zero resources.
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      # Server-Side Apply: cleaner three-way diffs and robust field ownership.
+      - ServerSideApply=true
+      # Delete pruned resources with a foreground cascade so dependents are removed cleanly.
+      - PrunePropagationPolicy=foreground
+      # NOTE: CreateNamespace is intentionally NOT set. The `chirp` Namespace is a committed
+      # manifest in deploy/chirp (contract identity `namespace-isolation-no-secrets`), so the
+      # namespace is declaratively owned and labeled. CreateNamespace=true would imperatively
+      # create an unlabeled namespace that then diffs against the committed one.
+    retry:
+      # Converge transient ordering (e.g. a namespaced resource applied in the same sync as its
+      # Namespace) without manual intervention.
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Keep a bounded sync history.
+  revisionHistoryLimit: 10
