@@ -88,18 +88,18 @@ HTTP status fixed by the contract:
 
 | Condition | `ErrorCode` | HTTP |
 |-----------|-------------|------|
+| Invalid request body / field value (DTO validation) | `VALIDATION_ERROR` | 400 |
 | Missing/invalid session token | `UNAUTHORIZED` | 401 |
 | Not permitted (e.g. self-follow) | `FORBIDDEN` | 403 |
 | Addressed user/chirp absent | `NOT_FOUND` | 404 |
 | State conflict (duplicate username) | `CONFLICT` | 409 |
 | Unexpected server fault | `INTERNAL` | 500 |
 
-> **Known gap (DTO validation).** A body that is well-formed JSON but carries an invalid field value
-> (e.g. a username with a space, or over-length chirp text) is currently rejected by axum's default
-> JSON extractor as **422 Unprocessable Entity** with a plain-text body, rather than the contract's
-> intended **400 `VALIDATION_ERROR`** `ApiError`. The input is still safely rejected; only the error
-> *shape* differs. See `TEST_NOTES.md` (finding F1) for the recommended fix (a custom JSON extractor
-> that maps a deserialization failure to `ServerError::Validation`).
+> **DTO validation (finding F1 — resolved).** A body that is well-formed JSON but carries an invalid
+> field value (e.g. a username with a space, or over-length chirp text), as well as a malformed JSON
+> body, is rejected as the contract's **400 `VALIDATION_ERROR`** `ApiError`. A custom `ValidatedJson`
+> extractor maps the deserialization/validation failure to `ServerError::Validation` instead of
+> surfacing axum's default plain-text **422 Unprocessable Entity**. See `TEST_NOTES.md` (finding F1).
 
 ## Persistence: the repository trait
 

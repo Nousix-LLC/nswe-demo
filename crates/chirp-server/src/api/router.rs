@@ -1,7 +1,7 @@
 //! The axum application router — the composition root that mounts the whole HTTP surface.
 //!
 //! [`build_router`] assembles one [`Router`] from three concerns and is the single entry point the
-//! binary ([`crate::main`]) and the end-to-end integration tests both construct the app through:
+//! binary (`crate::main`) and the end-to-end integration tests both construct the app through:
 //!
 //! 1. **The API** — every handler in [`crate::api::handlers`], mounted under `/api/…` over the
 //!    shared [`AppState`] (see the authoritative method/path table in `HANDLERS_NOTES.md`).
@@ -11,7 +11,7 @@
 //!
 //! A `tower-http` [`TraceLayer`] wraps the whole stack so every request is traced (the spans are
 //! emitted only when a `tracing` subscriber is installed — the binary installs one in
-//! [`crate::main`]; tests may omit it harmlessly).
+//! `crate::main`; tests may omit it harmlessly).
 //!
 //! # Route / fallback precedence
 //!
@@ -25,7 +25,7 @@
 //!
 //! The real SPA bundle is built by a later work-item (#9). Until then the static root holds a
 //! committed placeholder `index.html`, so the server boots and serves a page with no frontend
-//! build step. The static root is resolved by [`static_dir`]: the `CHIRP_STATIC_DIR` environment
+//! build step. The static root is resolved by `static_dir`: the `CHIRP_STATIC_DIR` environment
 //! variable when set, else the crate-local `static/` directory (resolved at compile time from
 //! `CARGO_MANIFEST_DIR`, so it is found regardless of the process working directory).
 
@@ -44,7 +44,7 @@ use crate::AppState;
 ///
 /// Mounts every API handler (`/api/…`), the `GET /healthz` probe, and the static/SPA fallback
 /// service, then wraps the result in a request [`TraceLayer`] and binds the state. The returned
-/// `Router` is state-erased (`Router<()>`), ready to hand to [`axum::serve`] or to an in-process
+/// `Router` is state-erased (`Router<()>`), ready to hand to [`axum::serve()`] or to an in-process
 /// test harness.
 ///
 /// This is re-exported at the crate root as [`chirp_server::build_router`](crate::build_router),

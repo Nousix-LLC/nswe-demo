@@ -5,12 +5,12 @@
 //! [`AppContext::session`](crate::app::AppContext) signal:
 //!
 //! * **Logged out** — a handle field and a *Log in* button. On submit the handle is validated
-//!   with [`Username::parse`], then [`ApiClient::login`](crate::api::ApiClient::login) is called;
-//!   on success the returned [`Session`] is written into `ctx.session` (which re-renders every
+//!   with `Username::parse`, then [`ApiClient::login`](crate::api::ApiClient::login) is called;
+//!   on success the returned `Session` is written into `ctx.session` (which re-renders every
 //!   dependent view), and a server [`AppError`](crate::error::AppError) (e.g. `Unauthorized`) is
 //!   surfaced inline.
 //! * **Logged in** — a compose field gated on the authed session. On submit the text is validated
-//!   with [`ChirpText::parse`] (a [`ValidationError`] is shown inline *without* a round-trip), then
+//!   with `ChirpText::parse` (a `ValidationError` is shown inline *without* a round-trip), then
 //!   [`ApiClient::create_chirp`](crate::api::ApiClient::create_chirp) is called, with reactive
 //!   busy/disabled, success, and error feedback.
 //!
@@ -21,16 +21,16 @@
 //! the render runs is owned by that effect and disposed the next time it re-runs (see the
 //! `counter` example, which creates its state *above* `mount`). A view therefore cannot hold a
 //! long-lived local signal of its own. This view keeps its transient UI state (busy / error /
-//! success / input drafts) in plain thread-local [`ComposeState`] and uses the long-lived
-//! `session` signal — created once in [`AppContext`], outside any effect — as its *render anchor*:
-//! [`request_rerender`] re-notifies it to re-run the render, which re-reads the plain state. The
+//! success / input drafts) in plain thread-local `ComposeState` and uses the long-lived
+//! `session` signal — created once in `AppContext`, outside any effect — as its *render anchor*:
+//! `request_rerender` re-notifies it to re-run the render, which re-reads the plain state. The
 //! session value is read (to branch logged-in/out) and only ever *changed* by an actual login.
 //!
 //! # Reading inputs
 //!
 //! `ferric` event handlers are zero-argument (`Rc<dyn Fn()>`), so a handler cannot pull a value
 //! off the event. Instead each field carries a stable `id` and the handler reads its current value
-//! straight from the DOM element by that id ([`read_field_value`]). Inputs are *uncontrolled* (the
+//! straight from the DOM element by that id (`read_field_value`). Inputs are *uncontrolled* (the
 //! view never sets their `value` attribute), so a re-render never clobbers what the user is typing.
 
 use std::cell::RefCell;
@@ -57,7 +57,7 @@ const COMPOSE_FIELD_ID: &str = "chirp-compose-text";
 
 /// The view's transient UI state. Plain (non-reactive) data held in a thread-local; the render
 /// reads a snapshot of it each pass and the `session` signal is the reactive anchor that re-runs
-/// the render (see [`request_rerender`]).
+/// the render (see `request_rerender`).
 #[derive(Clone, Default)]
 struct ComposeState {
     /// The login request is in flight.
@@ -91,7 +91,7 @@ fn mutate(f: impl FnOnce(&mut ComposeState)) {
     STATE.with(|cell| f(&mut cell.borrow_mut()));
 }
 
-/// Re-render the active view to reflect a change in the plain [`ComposeState`].
+/// Re-render the active view to reflect a change in the plain `ComposeState`.
 ///
 /// See the module-level "Reactivity model" note: the long-lived `session` signal is this view's
 /// render anchor. Re-notifying it (without changing its value) re-runs `ferric`'s root render
@@ -106,13 +106,13 @@ fn request_rerender(ctx: &AppContext) {
 // =====================================================================================
 
 /// Validate a raw handle string into a [`LoginRequest`]. Surrounding whitespace is trimmed (a
-/// handle never contains spaces); emptiness and illegal characters surface as a [`ValidationError`].
+/// handle never contains spaces); emptiness and illegal characters surface as a `ValidationError`.
 fn validate_handle(raw: &str) -> Result<LoginRequest, ValidationError> {
     Username::parse(raw.trim()).map(|username| LoginRequest { username })
 }
 
-/// Validate a raw chirp body into a [`CreateChirpRequest`] via [`ChirpText::parse`] (empty / too
-/// long surface as a [`ValidationError`]). The body is not trimmed: whitespace is content.
+/// Validate a raw chirp body into a [`CreateChirpRequest`] via `ChirpText::parse` (empty / too
+/// long surface as a `ValidationError`). The body is not trimmed: whitespace is content.
 fn validate_chirp(raw: &str) -> Result<CreateChirpRequest, ValidationError> {
     ChirpText::parse(raw).map(|text| CreateChirpRequest {
         text,
@@ -131,7 +131,7 @@ fn compose_submit_enabled(text_draft: &str, busy: bool) -> bool {
     !busy && !text_draft.is_empty()
 }
 
-/// A user-facing message for a construction-time [`ValidationError`].
+/// A user-facing message for a construction-time `ValidationError`.
 fn validation_message(err: &ValidationError) -> String {
     err.to_string()
 }
@@ -306,7 +306,7 @@ fn render_compose(ctx: &AppContext, state: &ComposeState, username: &str) -> VNo
 // Submit flows (event-handler side: validate, then drive the async call via spawn_local)
 // =====================================================================================
 
-/// Validate the handle and, if valid, log in; on success write the [`Session`] into `ctx.session`.
+/// Validate the handle and, if valid, log in; on success write the `Session` into `ctx.session`.
 fn submit_login(ctx: &AppContext) {
     let raw = read_field_value(LOGIN_FIELD_ID);
     let request = match validate_handle(&raw) {
@@ -402,7 +402,7 @@ fn submit_chirp(ctx: &AppContext) {
 // =====================================================================================
 
 /// `/compose` — login + compose. Renders the login form when logged out and the compose form when
-/// a [`Session`] is present, reading the reactive `session` signal so a login/logout re-renders it.
+/// a `Session` is present, reading the reactive `session` signal so a login/logout re-renders it.
 ///
 /// Realizes the frozen `contracts/app_api.rs` signature; bound to `/compose` by the scaffold's
 /// route table.

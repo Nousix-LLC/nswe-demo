@@ -1,0 +1,202 @@
+# CI for the Nousix `ferric`/chirp Rust + WebAssembly workspace (work-item #11).
+#
+# Validates every pull request and every push to `main` with five independent,
+# required-check-friendly jobs (fmt, clippy, test, wasm, doc) plus a sixth
+# `image` job that builds the chirp-server container image from ./Dockerfile.
+# The image job runs on every PR (build-only, push: false) and every `main`
+# push, so the Dockerfile build is gated by the same required checks as the
+# rest of the workspace; on a push to `main` the validated image is also
+# published to GHCR. Building on PRs closes the drift window where the
+# Dockerfile's Rust toolchain could diverge from RUST_TOOLCHAIN undetected
+# until post-merge (IMG-1).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Least privilege by default: jobs may only read the repository. The image job
+# widens this locally to `packages: write` for GHCR; nothing else can write.
+permissions:
+  contents: read
+
+# Give fast feedback and save runners: a newer commit on the same ref cancels
+# the superseded in-flight run. `main` pushes are never cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # The whole toolchain is pinned so a clean checkout reproduces the result.
+  # 1.97 (not the manifest's declared MSRV 1.82) is used deliberately: the
+  # locked dependency graph no longer parses on 1.82 (e.g. hyper-util 0.1.21).
+  # See SYNTHESIS.md for the MSRV-vs-locked-deps follow-up.
+  RUST_TOOLCHAIN: "1.97"
+  # Deny-warnings everywhere, and keep incremental off (CI builds are cold).
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }} (+ rustfmt)
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }} (+ clippy)
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The workspace lints (missing_docs=warn, unsafe_code=warn,
+      # clippy::all=warn) are promoted to hard errors here with -D warnings.
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }} (+ wasm32 target)
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # wasm-bindgen-cli MUST match the locked `wasm-bindgen` crate (0.2.129);
+      # a version skew is a hard runtime error. Pinned + --locked accordingly.
+      - name: Install wasm-bindgen-cli (0.2.129, matches Cargo.lock)
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.129
+      # Reproduces the documented browser build (crates/chirp-frontend/README.md):
+      # compile the SPA entry example to wasm, then generate the JS/wasm bindings
+      # index.html imports. This proves the frontend produces a loadable artifact.
+      - name: Build chirp-frontend (wasm32) + example entry
+        run: |
+          cargo build -p chirp-frontend --target wasm32-unknown-unknown --locked
+          cargo build -p chirp-frontend --example chirp --target wasm32-unknown-unknown --locked
+      - name: Generate wasm-bindgen output (pkg/)
+        run: |
+          wasm-bindgen --target web --no-typescript \
+            --out-dir crates/chirp-frontend/pkg \
+            target/wasm32-unknown-unknown/debug/examples/chirp.wasm
+      - name: Confirm SPA artifacts exist
+        run: test -f crates/chirp-frontend/pkg/chirp.js && test -f crates/chirp-frontend/pkg/chirp_bg.wasm
+
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    # Intra-doc-link and doc warnings fail the build (CRQ-02 enforcement). The
+    # workspace's existing doc-link debt was resolved in this change so this
+    # gate is green; -D warnings keeps it from regressing.
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        uses: dtolnay/rust-toolchain@1.97
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo doc (deny warnings)
+        run: cargo doc --workspace --no-deps --locked
+
+  image:
+    name: image
+    # Build the production image after every other check is green. The build
+    # runs on BOTH pull requests and pushes to `main`: on a PR it is build-only
+    # (push: false), which gates ./Dockerfile before merge and keeps its Rust
+    # toolchain from silently drifting away from RUST_TOOLCHAIN (IMG-1); on a
+    # push to `main` the same validated build is additionally published to GHCR.
+    # On a pull_request, actions/checkout builds the merge ref (PR head merged
+    # onto base `main`), so the Dockerfile that lives on `main` is the exact
+    # artifact exercised here — the pre-merge build gates the post-merge publish.
+    needs: [fmt, clippy, test, wasm, doc]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # GHCR push on `main` only (via GITHUB_TOKEN); inert on PR build-only
+    env:
+      REGISTRY: ghcr.io
+      # GHCR requires a lowercase path; the owner `Nousix-LLC` lowercases here.
+      IMAGE_NAME: ghcr.io/nousix-llc/chirp-server
+      # Publish only on a push to `main`; every other trigger is a build-only gate.
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # ./Dockerfile is a required artifact (it lives on `main` from work-item
+      # #12 and is present on the PR merge ref). The build therefore runs
+      # unconditionally: a missing or broken Dockerfile fails the job loudly
+      # rather than being silently skipped.
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags/labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build chirp-server image (push on `main`, build-only on PR)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Surface the published image digest for provenance/traceability (IMG-4):
+      # pin deployments by immutable digest rather than the mutable `latest` tag.
+      - name: Summarize published image
+        if: env.PUBLISH == 'true'
+        run: |
+          {
+            echo "### chirp-server image published";
+            echo "- tags: \`${{ steps.meta.outputs.tags }}\`";
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`";
+          } >> "$GITHUB_STEP_SUMMARY"

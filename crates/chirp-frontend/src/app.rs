@@ -2,8 +2,8 @@
 //! the wasm mount entry.
 //!
 //! This module (owned by `SUBTASK_scaffold`) realizes the frozen `contracts/app_api.rs` surface:
-//! [`Session`], [`AppContext`] (with [`AppContext::new`] and [`AppContext::client`]), and the
-//! [`start`] entry point that assembles the [`Router`] route table (`/` → timeline, `/compose` →
+//! `Session`, `AppContext` (with `AppContext::new` and `AppContext::client`), and the
+//! [`start`] entry point that assembles the `Router` route table (`/` → timeline, `/compose` →
 //! compose, `/user/:id` → profile, plus a fallback), renders a persistent nav above the reactive
 //! outlet, and mounts the application into `#app` (falling back to `<body>`).
 //!
@@ -41,7 +41,7 @@ pub struct Session {
 /// `AppContext` is `Clone`.
 #[derive(Clone)]
 pub struct AppContext {
-    /// Base URL the [`ApiClient`] targets (default `/api`; configurable — see [`api_base_url`]).
+    /// Base URL the [`ApiClient`] targets (default `/api`; configurable — see `api_base_url`).
     pub base_url: String,
     /// Reactive current session; writing it (login/logout) re-renders dependent views.
     pub session: Signal<Option<Session>>,
@@ -100,7 +100,7 @@ fn not_found_view() -> VNode {
         .into()
 }
 
-/// The wasm entry point: build the [`AppContext`], assemble the [`Router`] route table, render a
+/// The wasm entry point: build the `AppContext`, assemble the `Router` route table, render a
 /// persistent nav above the reactive outlet, and mount the app into `#app` (falling back to
 /// `<body>`).
 ///

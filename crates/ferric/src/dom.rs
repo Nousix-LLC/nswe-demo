@@ -5,7 +5,7 @@
 //!
 //! `ferric`'s layers compose here into a running application:
 //!
-//! 1. A [`Component`](crate::component::Component) renders a [`VNode`] tree ([`crate::vdom`]).
+//! 1. A [`Component`] renders a [`VNode`] tree ([`crate::vdom`]).
 //! 2. [`mount`] wraps that render in a reactive effect ([`create_effect`]). Every
 //!    [`Signal`](crate::signal::Signal) the render reads is tracked, so a later write re-runs the
 //!    render.

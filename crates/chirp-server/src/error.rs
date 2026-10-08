@@ -8,21 +8,21 @@
 //! # Ownership of the error seam
 //!
 //! This module owns the **enum definition** and its translation into the wire types
-//! [`ApiError`](chirp_types::api::ApiError) / [`ErrorCode`](chirp_types::api::ErrorCode) — both of
+//! [`ApiError`] / [`ErrorCode`] — both of
 //! which are *imported from `chirp-types`, never re-declared*. It deliberately does **not** own the
 //! `axum::response::IntoResponse` implementation or any HTTP-status mapping: that is the api-layer
 //! spoke's responsibility (it depends on `axum`; this layer stays HTTP-free). The bridge this module
 //! provides for that spoke is [`ServerError::code`] (the machine-readable category) and
 //! [`ServerError::into_api_error`] (the ready-to-serialize body); the api-layer maps
-//! [`ErrorCode`](chirp_types::api::ErrorCode) → `axum::http::StatusCode` in its `IntoResponse`.
+//! [`ErrorCode`] → `axum::http::StatusCode` in its `IntoResponse`.
 //!
 //! # The error-mapping contract
 //!
-//! The variant ↔ [`ErrorCode`](chirp_types::api::ErrorCode) ↔ HTTP-status correspondence is frozen
+//! The variant ↔ [`ErrorCode`] ↔ HTTP-status correspondence is frozen
 //! in the subtree contract (`contracts/_MANIFEST.yaml`, `error_mapping`). For reference, the
 //! intended end-to-end mapping (HTTP status applied by the api-layer) is:
 //!
-//! | [`ServerError`] variant | [`ErrorCode`](chirp_types::api::ErrorCode) | HTTP status |
+//! | [`ServerError`] variant | [`ErrorCode`] | HTTP status |
 //! |-------------------------|--------------------------------------------|-------------|
 //! | [`Validation`](ServerError::Validation)   | `VALIDATION_ERROR` | 400 |
 //! | [`Unauthorized`](ServerError::Unauthorized) | `UNAUTHORIZED`    | 401 |
@@ -41,7 +41,7 @@ use chirp_types::domain::ValidationError;
 /// The one error type returned across the chirp server: repository, service, and (via the
 /// api-layer's `IntoResponse`) the transport edge.
 ///
-/// Each variant corresponds to exactly one [`ErrorCode`](chirp_types::api::ErrorCode) category and,
+/// Each variant corresponds to exactly one [`ErrorCode`] category and,
 /// downstream, one HTTP status (see the [module docs](self)). The enum is `#[non_exhaustive]` so new
 /// failure categories can be added without breaking downstream matches, and it carries a
 /// human-readable message on every variant for logging and for the wire
@@ -102,7 +102,7 @@ pub enum ServerError {
 }
 
 impl ServerError {
-    /// Returns the machine-readable [`ErrorCode`](chirp_types::api::ErrorCode) category for this
+    /// Returns the machine-readable [`ErrorCode`] category for this
     /// error — the stable value a client branches on and the key the api-layer maps to an HTTP
     /// status.
     #[must_use]
@@ -117,13 +117,13 @@ impl ServerError {
         }
     }
 
-    /// Builds the wire-ready [`ApiError`](chirp_types::api::ApiError) for this error.
+    /// Builds the wire-ready [`ApiError`] for this error.
     ///
     /// The [`code`](ServerError::code) sets the category and the [`Display`](std::fmt::Display)
     /// text becomes the human-readable `message`. The two validation-category variants carry field
     /// details: for a [`Validation`](ServerError::Validation) error the originating
     /// [`ValidationError`]'s field is lifted into a single
-    /// [`FieldError`](chirp_types::api::FieldError); for an [`InvalidBody`](ServerError::InvalidBody)
+    /// [`FieldError`]; for an [`InvalidBody`](ServerError::InvalidBody)
     /// error (a transport-boundary deserialization rejection, where the structured field is not
     /// recoverable from axum's `JsonRejection`) a single generic `body` [`FieldError`] carries the
     /// rejection message. Other variants carry no field details. HTTP status is intentionally *not*
@@ -160,7 +160,7 @@ impl From<JsonRejection> for ServerError {
 }
 
 /// Extracts the offending field name from a domain [`ValidationError`] so it can surface as a
-/// wire-level [`FieldError`](chirp_types::api::FieldError).
+/// wire-level [`FieldError`].
 fn validation_field(error: &ValidationError) -> &'static str {
     match error {
         ValidationError::Empty { field }

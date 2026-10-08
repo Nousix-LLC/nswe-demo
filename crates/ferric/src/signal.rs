@@ -7,7 +7,7 @@
 //!
 //! # Design
 //!
-//! All reactive state lives in one thread-local [`Runtime`] holding a **generational arena** of
+//! All reactive state lives in one thread-local `Runtime` holding a **generational arena** of
 //! nodes. `Signal<T>` and `Memo<T>` are `Copy` generational keys into that arena, not the values
 //! themselves — cloning a handle is a bitwise copy of a key. Generational keys make the runtime
 //! sound against stale handles: once a node is disposed, its slot's generation is bumped, so a
@@ -18,7 +18,7 @@
 //!   observer runs it first clears its previous dependency set, so a conditional read that stops
 //!   happening is correctly unsubscribed and subscriber sets never grow unboundedly.
 //! * **Ownership & disposal** — every node is owned by the scope (or the running effect/memo) that
-//!   created it. Disposing a [`ReactiveScope`], or re-running an effect, disposes the owned nodes
+//!   created it. Disposing a `ReactiveScope`, or re-running an effect, disposes the owned nodes
 //!   and removes them from every subscriber set they participated in. This is the mechanism behind
 //!   the `no_stale_subscriber_leak` identity.
 //! * **Values** — each node stores its value behind its own `Rc<RefCell<Box<dyn Any>>>` cell, so a

@@ -1,6 +1,6 @@
 //! A JSON request-body extractor that routes decoding/validation failures through [`ServerError`].
 //!
-//! [`ValidatedJson`] is a thin wrapper around axum's [`Json`](axum::Json) extractor with one
+//! [`ValidatedJson`] is a thin wrapper around axum's [`Json`] extractor with one
 //! behavioral difference: instead of letting a [`JsonRejection`](axum::extract::rejection::JsonRejection)
 //! render axum's **default plain-text `422 Unprocessable Entity`**, it converts the rejection into a
 //! [`ServerError::InvalidBody`] (via the `From<JsonRejection>` impl in [`crate::error`]), which the
@@ -11,7 +11,7 @@
 //!
 //! The `chirp-types` value objects (`Username`, `ChirpText`) validate on deserialization via
 //! `#[serde(try_from = "String")]`, so an invalid field value fails at the serde boundary of the
-//! body extractor — *before* any handler body runs. With the plain [`Json`](axum::Json) extractor
+//! body extractor — *before* any handler body runs. With the plain [`Json`] extractor
 //! that failure is axum's `JsonRejection::JsonDataError` → `422` plain text, which never routes
 //! through [`ServerError`] and so bypasses the wire error contract. Extracting the body with
 //! `ValidatedJson` instead funnels every body-decoding failure through the one error seam, so the

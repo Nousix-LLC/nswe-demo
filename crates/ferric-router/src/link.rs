@@ -1,7 +1,7 @@
 //! Declarative in-app navigation helper producing a `ferric` view node.
 //!
 //! [`link`] returns a [`VNode`] that navigates client-side — without a full page reload — when the
-//! user clicks it, by calling [`navigate`](crate::router::navigate). It composes with the rest of
+//! user clicks it, by calling [`navigate`]. It composes with the rest of
 //! the router: the click updates the reactive current path, and every mounted
 //! [`outlet`](crate::router::Router::outlet) re-renders to show the newly matched route.
 //!
@@ -17,7 +17,7 @@
 //! work-item), [`link`] sidesteps the default-navigation behaviour entirely: it emits a **non-anchor
 //! element** (`<span>`) that the browser will never full-page-navigate on, because there is no `href`
 //! for it to follow. The element carries a `ferric` [`EventKind::Click`] handler that calls
-//! [`navigate`](crate::router::navigate), giving the same user-visible behaviour as a preventing
+//! [`navigate`], giving the same user-visible behaviour as a preventing
 //! `<a>` without needing an event object. The destination is also recorded in a `data-to` attribute
 //! (useful for styling, testing, and accessibility tooling), and `role="link"` + `tabindex="0"`
 //! keep the element focusable and announced as a link by assistive technology.
@@ -50,7 +50,7 @@ use crate::router::navigate;
 pub const LINK_CLASS: &str = "ferric-router-link";
 
 /// A declarative in-app navigation link: returns a `ferric` [`VNode`] that, when clicked, calls
-/// [`navigate`](crate::router::navigate) to `to` (client-side, no full page reload) and displays
+/// [`navigate`] to `to` (client-side, no full page reload) and displays
 /// `label`.
 ///
 /// The returned node is a focusable, link-styled `<span>` carrying a [`EventKind::Click`] handler —
@@ -119,7 +119,7 @@ impl Link {
     ///
     /// The result is a `<span role="link" tabindex="0">` carrying the chosen class, a `data-to`
     /// attribute recording the destination, and a [`EventKind::Click`] handler that calls
-    /// [`navigate`](crate::router::navigate) to the destination.
+    /// [`navigate`] to the destination.
     #[must_use]
     pub fn build(self) -> VNode {
         let Link { to, label, class } = self;
