@@ -50,12 +50,41 @@ wedge in `ImagePullBackOff` (gate identity `image-pull-works`):
    kubectl -n chirp create secret docker-registry ghcr-pull \
      --docker-server=ghcr.io \
      --docker-username='<gh-user-or-bot>' \
-     --docker-password='<GHCR token with read:packages>'
+     --docker-password='<GHCR token with read:packages ONLY>'
    ```
-   (A sealed/external-secret mechanism is the GitOps-managed equivalent; the raw Secret never lands
-   in git.) **or**
+   The credential MUST be **least-privilege**: a token (classic PAT or fine-grained PAT) whose *only*
+   grant is `read:packages` for `nousix-llc/chirp-server` — **not** a broad `repo`/`workflow` token and
+   **not** a write/admin-packages token. A dedicated bot/deploy identity is preferred over a human PAT.
+   This keeps the pull credential's blast radius to "read this one package." (A sealed-secret / External
+   Secrets Operator mechanism is the GitOps-managed equivalent; the raw Secret never lands in git. That
+   is deliberately deferred to avoid installing a controller here — out of this item's scope.) **or**
 2. **Make the GHCR package public**, after which the `imagePullSecrets` field is unnecessary and may
-   be dropped.
+   be dropped. This is a **deliberate supply-chain trade-off**: the digest stays pinned (integrity is
+   unchanged) but the image becomes world-readable (confidentiality is dropped). Record it as a
+   conscious decision if chosen; option 1 preserves least-privilege and is preferred.
+
+### Why the out-of-band Secret survives ArgoCD selfHeal/prune
+
+The AppProject `chirp` `namespaceResourceWhitelist` is `{Service, ServiceAccount, ConfigMap,
+apps/Deployment, networking/Ingress}` — **`Secret` is intentionally not whitelisted**. A `Secret`
+created directly in namespace `chirp` is therefore *outside* ArgoCD's managed set: the controller does
+not track it and `prune`/`selfHeal` does not delete it. This is what lets option 1 be a durable
+cluster-side credential without widening the AppProject scope (no broad RBAC, no `*/*/*` whitelist).
+Keep it that way — do **not** add `Secret` to the whitelist just to commit a plaintext/base64 secret.
+
+### Verify (live, on the committed digest)
+
+```sh
+# 1. Pod backing the Service runs the committed digest and is 1/1 Ready (stale chirp:local RS -> 0):
+kubectl -n chirp get pods -o wide
+kubectl -n chirp get deploy chirp-server -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+# 2. ArgoCD Application Synced + Healthy:
+kubectl -n argocd get application chirp -o jsonpath='{.status.sync.status} {.status.health.status}{"\n"}'
+# 3. /healthz 200 through the k3d Traefik ingress (served by the digest pod):
+curl -H 'Host: chirp.localhost' http://localhost:8081/healthz   # -> HTTP 200 {"status":"ok",...}
+# 4. selfHeal-survival: hard-refresh/sync and re-check 1–3 stay green.
+kubectl -n argocd patch application chirp --type merge -p '{"operation":{"sync":{"revision":"HEAD"}}}'
+```
 
 The decision taken (and the credential source) should be recorded in the root `SYNTHESIS.md`.
 
