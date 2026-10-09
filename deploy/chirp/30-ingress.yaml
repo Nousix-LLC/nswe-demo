@@ -8,6 +8,9 @@
 #
 # Host-based routing is used; the synthesis gate MUST send the Host header above when testing.
 #
+# A second, host-less rule matches requests for any other host, so the app is also reachable by the
+# server's address over the private tailnet (e.g. http://100.90.75.93:8081/). Added by the owner.
+#
 # Design note (Ingress vs Gateway API): current k8s guidance steers NEW north-south routing to
 # the Gateway API, but this target is k3d/k3s whose shipped, supported controller is Traefik as
 # an Ingress controller; the contract and ground_truth.md both specify an Ingress with class
@@ -39,3 +42,12 @@ spec:
                 name: chirp-server   # == Service name (20-service.yaml)
                 port:
                   number: 80         # == Service port
+    - http:                  # any host: the server's tailnet address (owner)
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: chirp-server
+                port:
+                  number: 80
