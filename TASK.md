@@ -13,7 +13,7 @@ history.
 ## Taskflow & Output Location
 
 Author your taskflow (thread iterations, every forked DAG's `_FORK.md`, and all lifecycle and synthesis records) under
-`~/nousix-runtime/nswe-demo/taskflow/`. The product's source of truth is the GitHub repository; the taskflow is the record
+`<run-dir>/taskflow/`. The product's source of truth is the GitHub repository; the taskflow is the record
 of how the work was run.
 
 ## The Request

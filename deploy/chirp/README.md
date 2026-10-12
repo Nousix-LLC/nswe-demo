@@ -118,7 +118,7 @@ These manifests target **only** the proven k3d-hosted k3s cluster. On a native/s
 
 ## Handoff to the synthesis gate (git state)
 
-The checkout at `/home/mattm/nswe-demo` was on local `main` (`25e90c0`), **5 commits behind**
+The local working checkout was on local `main` (`25e90c0`), **5 commits behind**
 `origin/main @ ada3aa9` — the `deploy/` tree and the `Dockerfile` only exist at `ada3aa9`
 (ground_truth.md §1). Per this subtree's decomposition, **git branch/commit/PR is the synthesis
 gate's job, not an authoring spoke's** (two concurrent spokes must not race on shared git state).
@@ -126,8 +126,8 @@ gate's job, not an authoring spoke's** (two concurrent spokes must not race on s
 Therefore these files were written as **untracked** files into the working tree. The synthesis gate
 should:
 
-1. `git -C /home/mattm/nswe-demo fetch origin`
-2. `git -C /home/mattm/nswe-demo checkout -B work/deploy-argocd ada3aa9`  (== `origin/main`)
+1. `git fetch origin`  (run from the working checkout)
+2. `git checkout -B work/deploy-argocd ada3aa9`  (== `origin/main`)
    — `deploy/chirp/` does not exist at `ada3aa9`, so these untracked files survive the checkout.
 3. Stage and commit `deploy/chirp/` (and the sibling's `deploy/argocd/`) onto `work/deploy-argocd`.
    **Do not** `git clean`/`reset --hard` before staging — that would discard these untracked files.

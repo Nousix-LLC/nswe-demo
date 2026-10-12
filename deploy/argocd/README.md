@@ -85,7 +85,7 @@ ground_truth §2 provides the manifest-list digest to pin.)
 
 ## Operational notes
 
-- **Base-checkout caveat (ground_truth §1).** The working checkout at `/home/mattm/nswe-demo` was
+- **Base-checkout caveat (ground_truth §1).** The local working checkout was
   reported 5 commits behind `origin/main` (`ada3aa9`), which is the real base that first introduced
   the `deploy/` tree. The synthesis gate (which owns git/branch/PR) must branch
   `work/deploy-argocd` from `ada3aa9` (== `origin/main`) before committing — not from the stale
