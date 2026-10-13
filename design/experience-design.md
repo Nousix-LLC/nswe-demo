@@ -50,19 +50,15 @@ the release bar criteria (`BAR-*`) are the release-bar document's. This experien
 the *screens, interactions, and the product-level UX requirement* for those surfaces; it does not
 redefine the sibling areas' requirements.
 
-**Grounding & run note.** Grounded in chirp's product requirements (journeys J1–J8 and the
+**Grounding.** Grounded in chirp's product requirements (journeys J1–J8 and the
 `REQ-PROD-*` register) and the current product at `Nousix-LLC/nswe-demo` @ `c805525` (a small SPA —
 timeline, compose+sign-in, profile; handle-only login; minimal styling and no design system — taken
-as the starting point to improve, not a target to preserve). The design-domain methodology bundles
-were not applied when this design was produced; it was authored from the product requirements, the
-frozen experience seam (screen inventory, state vocabulary, and the REQ-UX id scheme), and the live
-product. No conclusion depends on methodology content that was not applied.
+as the starting point to improve, not a target to preserve).
 
 ## Design reconciliations & known remediations (verification outcomes)
 
 Assembling and verifying the five concern designs surfaced the following cross-section outcomes.
-They are recorded here so a builder cannot miss them; the verification evidence is in the design's
-fold record.
+They are recorded here so a builder cannot miss them.
 
 1. **Contrast remediations (release-gating — enforced by REQ-UX-113).** A WCAG 2.1 contrast audit of
    the visual system's colour tokens found three values below their intended ratio. The **token
@@ -291,7 +287,7 @@ OPERATOR (segregated — §1.3)
 
 Route paths above are **illustrative destinations**, not an implementation contract — what is fixed
 here is the *hierarchy* (what is top-level vs nested vs contextual) and the *reachability*. The exact
-URL strings are a build-time concern for the code DAGs; the current SPA's `/`, `/compose`, `/user/:id`
+URL strings are a build-time concern for the code work; the current SPA's `/`, `/compose`, `/user/:id`
 are preserved or generalized rather than broken.
 
 ##### 2.1 Top-level vs nested vs contextual
@@ -571,20 +567,13 @@ nobody demos.
    surface instantiates per screen.
 3. **Screens & flows** (section `screens_and_flows`): the four surface groups — entry & auth, the
    signed-in core loop, account lifecycle & settings, and trust/safety/admin — assembled from
-   their owning concern spokes.
+   their owning concern sections.
 
 **Scope boundary.** Mechanism is deferred: credential/session/auth lifetime, deletion/export
 internals and authorization, and persistence belong to the identity-&-trust, domain, and
 operational-readiness requirement areas; implementation belongs to the code work. The visual
 language & design system, the information-architecture & interaction model, responsive layout,
 and accessibility are sibling experience-design sections — referenced here, never redefined.
-
-**Methodology note.** The design-domain methodology bundles were not applied when these fragments
-were produced; they were authored from the brief, the frozen design contract (screen inventory,
-state vocabulary, per-screen state matrix, REQ-UX id scheme and the identities verified at the
-gate), the dependency design sections (the state model, the information-architecture & interaction
-model, the visual language & design system), the product requirements, and the live product at
-`Nousix-LLC/nswe-demo` @ `c805525`. No conclusion depends on bundle content that was not applied.
 
 ---
 
@@ -670,7 +659,7 @@ is loading, has nothing to show, has failed, cannot find the thing, has reached 
 session, is rejecting input, is working on a submission, or has just succeeded. These are the states a
 product is judged on in its first minute, and the ones most often left as a blank page, a raw error code, a
 spinner with no exit, or a silent failure. The model here is deliberately **defined once** so that every
-surface spoke instantiates the same treatment per screen rather than reinventing state handling screen by
+surface section instantiates the same treatment per screen rather than reinventing state handling screen by
 screen — that consistency is what makes chirp read as one intentional product instead of a set of screens
 that each fail differently.
 
@@ -679,16 +668,15 @@ that each fail differently.
 - It **owns** the shared behaviour, copy *intent and voice*, and recovery affordance of each state in the
   frozen `state_vocabulary`, plus the cross-cutting rules that bind them, plus the `REQ-UX-020..029`
   register for the state model.
-- It **elaborates** `the frozen design contract (per-screen state matrix)` into a complete model; it does **not** redefine
+- It **elaborates** the per-screen state matrix into a complete model; it does **not** redefine
   the state vocabulary, the screen inventory, or the REQ-UX id scheme.
 - It **composes with**, and does not re-draw, the visual-system **state blocks** (visual-system §3.14), the
   busy control state (§3.0), the input validation states and character counter (§3.3/§3.4), the toast
   (§3.12) and inline alert (§3.13), and the IA **global interaction patterns** (ia-interaction §3). Where a
-  needed presentation would require a component the visual system lacks, this section **flags it for the
-  synthesis gate** rather than inventing one. (None was needed — see §3.)
+  needed presentation would require a component the visual system lacks, this section **flags it for resolution** rather than inventing one. (None was needed — see §3.)
 - The **exact per-screen wording** and the choice of which applicable states a given screen shows are the
-  surface spokes' (`entry_auth`, `core_loop`, `account_settings`, `trust_safety_admin`), driven by
-  `the frozen design contract (per-screen state matrix)`. This section gives each surface spoke the model and representative
+  surface sections' (`entry_auth`, `core_loop`, `account_settings`, `trust_safety_admin`), driven by
+  the per-screen state matrix. This section gives each surface section the model and representative
   exemplar copy to instantiate; it does not author any single screen.
 - The **mechanisms** behind these states — the auth/session protocol and session lifetime, deletion and
   export internals, the persistence engine — are out of UX scope and belong to identity & trust
@@ -701,7 +689,7 @@ that each fail differently.
 
 ###### 0.1 The frozen state vocabulary (designed here)
 
-The states are drawn verbatim from `the frozen design contract (screen inventory & state vocabulary)`; none is added or renamed.
+The states are drawn verbatim from the screen inventory & state vocabulary; none is added or renamed.
 
 | State | One-line role |
 |---|---|
@@ -723,7 +711,7 @@ The states are drawn verbatim from `the frozen design contract (screen inventory
    about what happened.
 2. **Consistent by construction.** A given state **means the same thing and looks the same wherever it
    appears** — an `error` on the timeline, on a profile, and on a submit are recognisably one pattern,
-   built from the same visual-system block (ia-interaction §3.5; visual-system §5). Surface spokes
+   built from the same visual-system block (ia-interaction §3.5; visual-system §5). Surface sections
    instantiate; they do not invent per-screen variants of a state's shape.
 3. **Recoverable.** Every state that can trap a user offers a way forward — a retry, a route back, a
    re-sign-in, a correction — and `error`/`loading` recover **without a full page reload** (REQ-PROD-018).
@@ -734,18 +722,18 @@ The states are drawn verbatim from `the frozen design contract (screen inventory
 5. **Not carried by colour alone.** Every state signal is also carried by icon, text, or weight, so it is
    legible to someone who cannot distinguish the colours (visual-system §3.0/§3.13, REQ-UX-073).
 
-###### 0.3 The per-state anatomy every surface spoke instantiates
+###### 0.3 The per-state anatomy every surface section instantiates
 
-So the four surface spokes produce *one shared model per screen* rather than divergent handling, each state
+So the four surface sections produce *one shared model per screen* rather than divergent handling, each state
 below is specified with the same five-part anatomy, and each per-screen instance fills the same slots:
 
 - **When it occurs** — the trigger that puts the surface into this state.
 - **Copy intent & voice** — the tone and what the copy must convey, with **representative exemplars** a
-  surface spoke adapts to the specific screen (the exemplars are illustrative, not frozen strings).
+  surface section adapts to the specific screen (the exemplars are illustrative, not frozen strings).
 - **Recovery affordance** — the one clear way forward the state must offer.
 - **Composition** — the visual-system block/component that renders it and the IA pattern it obeys (named,
   never re-drawn here).
-- **Per-screen instantiation** — how a surface spoke tailors it, and the variants to distinguish.
+- **Per-screen instantiation** — how a surface section tailors it, and the variants to distinguish.
 
 ###### 0.4 Shared copy voice (binds the exemplars below and every per-screen instance)
 
@@ -773,7 +761,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
 - **Composition:** rendered by the surface's primary component — the chirp card/list (visual-system §3.6),
   the profile header/identity cluster (§3.5), the settings list (§3.15) — never a state block. Visual-system
   §4 maps `content` to "the relevant component".
-- **Per-screen instantiation:** each surface spoke designs the loaded layout of its own screens; this model
+- **Per-screen instantiation:** each surface section designs the loaded layout of its own screens; this model
   only fixes that `content` is the baseline and that the transition **into** it from `loading` must not jump
   the layout (shape-matched skeletons, §1.1).
 
@@ -793,7 +781,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
   (chirp skeleton, profile skeleton) on `bg.subtle`, so arriving content does not shift the layout; a
   **spinner** only for in-control/`busy_submitting` actions, not for whole-surface loads. The already-loaded
   chrome (nav, identity indicator) is **not** blocked by a content load.
-- **Per-screen instantiation:** the surface spoke picks the matching skeleton shape for its screen
+- **Per-screen instantiation:** the surface section picks the matching skeleton shape for its screen
   (list skeleton for timelines/search, header+list skeleton for profile, row skeleton for settings/admin);
   the determinate progress bar (visual-system §3.15) is reserved for export generation.
 
@@ -817,7 +805,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
 - **Composition:** the **Empty state block** (visual-system §3.14): icon + title + supportive copy + one
   primary action. Obeys ia-interaction §3.5 ("empty states are first-class, state what they are, offer the
   next action").
-- **Per-screen instantiation:** each surface spoke selects the applicable variant(s) from the list above
+- **Per-screen instantiation:** each surface section selects the applicable variant(s) from the list above
   for its screen and writes the exact copy; the logged-out-landing and new-user variants are the two that
   most affect first-impression and retention (J1, J2, REQ-PROD-014/022).
 
@@ -839,7 +827,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
   Transient, non-blocking notices may use a toast with *Retry* (§3.12). Obeys ia-interaction §3.1/§3.5.
 - **Per-screen instantiation:** fetch-heavy screens (timeline, profile, thread, search, admin) use the
   section Error block; submit screens (sign-up, sign-in, compose, edit-profile, report, export request)
-  use the inline alert with input preserved. The surface spoke writes the specific line.
+  use the inline alert with input preserved. The surface section writes the specific line.
 
 ###### 1.4 `not_found`
 
@@ -857,7 +845,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
 - **Per-screen instantiation:** `SCR-profile` and `SCR-chirp_thread` use the block for a missing
   subject and the tombstone for a missing item in a list; `SCR-account_deletion`'s post-delete
   not-found is the "deleted" wording (ties to REQ-PROD-012); `SCR-admin_support` lookup-with-no-match is an
-  `empty` (no match for a query), not a `not_found` (a named thing that is gone) — the surface spokes keep
+  `empty` (no match for a query), not a `not_found` (a named thing that is gone) — the surface sections keep
   that distinction.
 
 ###### 1.5 `end_of_list`
@@ -871,7 +859,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
   rather than an ambiguous dead stop or an endless spinner probing for a non-existent next page.
 - **Composition:** the **End-of-list state block** (visual-system §3.14) — a subtle terminal marker at the
   foot of the list, distinct from the Empty block.
-- **Per-screen instantiation:** the surface spokes owning paginated lists (`core_loop` for home timeline,
+- **Per-screen instantiation:** the surface sections owning paginated lists (`core_loop` for home timeline,
   profile chirps, search) instantiate it at the list foot; non-paginated surfaces do not show it.
 
 ###### 1.6 `session_expired` (satisfies REQ-PROD-006)
@@ -956,14 +944,14 @@ below is specified with the same five-part anatomy, and each per-screen instance
 
 ---
 
-##### 2. Cross-cutting rules (bind every state and every surface spoke)
+##### 2. Cross-cutting rules (bind every state and every surface section)
 
 1. **One state, one pattern, product-wide.** A state is instantiated from the single model above on every
-   screen it applies to; a surface spoke never hand-rolls a screen-specific shape for a state (visual-system
-   §5.3). The `the frozen design contract (per-screen state matrix)` matrix is each surface spoke's **coverage checklist**: every
-   state listed for a screen must be *designed* (copy intent + recovery), not merely named
-   (identity `STATES_DESIGNED_NOT_SKELETAL`); a state the spoke drops must be recorded out-of-scope with a
-   reason for the synthesis gate, never silently omitted.
+   screen it applies to; a surface section never hand-rolls a screen-specific shape for a state (visual-system
+   §5.3). The per-screen state matrix is each surface section's **coverage checklist**: every
+   state listed for a screen must be *designed* (copy intent + recovery), not merely named; a state
+   the section drops must be recorded out-of-scope with a
+   reason, never silently omitted.
 2. **Honest resolution of every action.** Every action resolves into exactly one observable outcome from
    the vocabulary — `busy_submitting` → `success` or `error` — with no silent completion and no false
    success (ia-interaction §3.1).
@@ -978,8 +966,7 @@ below is specified with the same five-part anatomy, and each per-screen instance
 7. **No state carried by colour alone** — icon/text/weight accompanies every state signal (visual-system
    §3.0/§3.13, REQ-UX-073).
 8. **Compose, don't invent.** Every state is rendered by a named visual-system block/component; a state the
-   component set cannot serve is **flagged for synthesis**, never invented here (identity
-   `COMPONENTS_CONSISTENT`).
+   component set cannot serve is **flagged for resolution**, never invented here.
 
 ---
 
@@ -1007,9 +994,9 @@ This matches visual-system §4's own state→component mapping; the two are cons
 
 ##### 4. Requirements & acceptance criteria — REQ-UX-020 .. REQ-UX-029
 
-Range owned by `the state model` per `the frozen design contract`. Each requirement is stated
+Range owned by the state model. Each requirement is stated
 from the user's side, is testable by a stranger exercising the live product, carries a `release_gating`
-flag, and traces to ≥1 `REQ-PROD-*` and/or journey. These govern the state model the surface spokes
+flag, and traces to ≥1 `REQ-PROD-*` and/or journey. These govern the state model the surface sections
 instantiate per screen.
 
 ###### REQ-UX-020 — One consistent state model across the product
@@ -1129,35 +1116,26 @@ instantiate per screen.
 | REQ-UX-029 | true | REQ-PROD-016, 020, 021; J5 |
 
 All ten ids are unique, fall within the owned `REQ-UX-020..029` sub-range, and lie within the parent
-`REQ-UX-020..069` range (identities `REQ_UX_UNIQUE_IN_SUBRANGE`, `REQ_UX_TESTABLE`).
+`REQ-UX-020..069` range.
 
 ---
 
-##### 5. Notes for synthesis & the surface spokes
+##### 5. Coverage & composition notes
 
-- **Coverage.** Every state in `the frozen design contract (screen inventory & state vocabulary)` (including the `content` baseline) is
-  designed above with concrete copy intent and a recovery affordance (identity
-  `STATES_DESIGNED_NOT_SKELETAL` seed) — §1.0–§1.9. The `the frozen design contract (per-screen state matrix)` seeds are
+- **Coverage.** Every state in the screen inventory & state vocabulary (including the `content` baseline) is
+  designed above with concrete copy intent and a recovery affordance  — §1.0–§1.9. The the per-screen state matrix seeds are
   elaborated, not redefined.
 - **Composition.** The model maps entirely onto existing visual-system components and IA patterns (§3); no
-  component is invented, and no gap was found to flag (identity `COMPONENTS_CONSISTENT` seed). Should a
-  surface spoke find a screen state it cannot serve with these components, it reports that to the synthesis
-  gate rather than inventing one.
-- **For the four surface spokes.** Use `the frozen design contract (per-screen state matrix)` as the per-screen coverage
+  component is invented, and no gap was found to flag. Should a
+  surface section find a screen state it cannot serve with these components, it records that for resolution rather than inventing one.
+- **For the four surface sections.** Use the per-screen state matrix as the per-screen coverage
   checklist; for each listed state instantiate the matching §1 pattern (its block + IA pattern + the voice
   in §0.4) and write the exact per-screen copy from the exemplars. `session_expired` always routes through
   §1.6; optimistic UI is confined to like/follow (§1.8); destructive flows are never optimistic and are
-  confirmed per ia-interaction §3.4 (the surface spokes own the consequence copy).
+  confirmed per ia-interaction §3.4 (the surface sections own the consequence copy).
 - **Boundary kept.** This fragment designs *what* each state looks and behaves like and the testable bar —
   no front-end code; session/auth lifetime, deletion/export internals, and persistence are deferred to
   `REQ-ID-*`/`REQ-DOM-*`/`REQ-OPS-*`.
-- **Hygiene.** All content above is repository-ready — no host/system detail, no run/agent ids, no
-  attribution trailers; things named by repository identity (`Nousix-LLC/nswe-demo` @ `c805525`) (identity
-  `GITHUB_HYGIENE` seed).
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  reconstructed run); grounded in the brief, the frozen design contract, the dependency outputs
-  (IA & interaction, visual system), and the product requirements. No conclusion depends on bundle content
-  that could not be loaded.
 
 ---
 
@@ -1165,7 +1143,7 @@ All ten ids are unique, fall within the owned `REQ-UX-020..029` sub-range, and l
 
 *(section: `screens_and_flows` — the four surface groups, assembled)*
 
-The four surface-group fragments below — entry & auth, the signed-in core loop, account lifecycle & settings, and trust/safety/admin — together design every screen in the frozen 18-screen inventory, each with its happy-path flow and every applicable state, instantiating the one state model above. They are assembled here verbatim from their owning concern spokes; the synthesis gate assembles and verifies, it does not author section content.
+The four surface-group fragments below — entry & auth, the signed-in core loop, account lifecycle & settings, and trust/safety/admin — together design every screen in the frozen 18-screen inventory, each with its happy-path flow and every applicable state, instantiating the one state model above.
 
 ---
 
@@ -1177,7 +1155,7 @@ This fragment designs **the first screens a stranger meets and the path from vis
 user**: the logged-out landing / public timeline, create-account, credentialed sign-in, and account
 recovery. The bar is *designed screens, not a skeleton* — each screen is given its content/layout
 intent at wireframe level, its happy-path flow, and **every state that applies to it** per
-`the frozen design contract (per-screen state matrix)`, with concrete copy intent and a recovery affordance, so that
+the per-screen state matrix, with concrete copy intent and a recovery affordance, so that
 someone who was never in the room could find chirp, understand what it is, and join — and get back in
 if they lose access.
 
@@ -1189,7 +1167,7 @@ if they lose access.
   **not** redefine any state's meaning, voice, or recovery pattern — it selects the applicable
   variant and writes the exact per-screen copy.
 - It **composes from** named visual-system components and places each screen per the IA screen map and
-  logged-out navigation; it invents **no** component — a gap would be flagged for the synthesis gate
+  logged-out navigation; it invents **no** component — a gap would be flagged for resolution
   (none was needed — see §5).
 - It designs **UX only — what, not how.** The **credential mechanism** (what a user signs in with and
   how it is verified, session lifetime, the recovery factor) is identity & trust's (`REQ-ID-*`); this
@@ -1530,7 +1508,7 @@ fields, and the honest, non-enumerating feedback a user sees. Richer multi-facto
 
 ##### 6. Requirements & acceptance criteria — REQ-UX-030 .. REQ-UX-039
 
-Range owned by `the entry & auth surfaces` per `the frozen design contract`. Each requirement is stated
+Range owned by `the entry & auth surfaces`. Each requirement is stated
 from the user's side, is testable by a stranger exercising the live product, carries a `release_gating`
 flag, and traces to ≥1 `REQ-PROD-*` and/or journey. These are **screen-level** entry/auth requirements;
 the product-wide navigation/state rules they build on are `ia_interaction` (REQ-UX-001..019) and the
@@ -1612,33 +1590,33 @@ state model (REQ-UX-020..029), referenced not restated.
 | REQ-UX-039 | SCR-recovery | true | REQ-PROD-007; J4 |
 
 All ten ids are unique, fall within the owned `REQ-UX-030..039` sub-range, and lie within the parent
-`REQ-UX-020..069` range (identities `REQ_UX_UNIQUE_IN_SUBRANGE`, `REQ_UX_TESTABLE`). Every entry/auth
+`REQ-UX-020..069` range. Every entry/auth
 screen is `gating: true` in the inventory, so the register is gating true throughout; honest cuts within
 this flow (richer multi-factor recovery, social/remember-me sign-in) are deferred to `REQ-ID-*` and
 later work rather than minted as non-gating UX here.
 
 ---
 
-##### 7. Coverage, composition & handoff notes (for the synthesis gate)
+##### 7. Coverage, composition & handoff notes
 
-- **Screen coverage (identity `SCREEN_COVERAGE_LOCAL`).** All four owned screens are designed:
+- **Screen coverage.** All four owned screens are designed:
   SCR-landing_timeline (§2), SCR-signup (§3), SCR-signin (§4), SCR-recovery (§5). Each is designed with
-  every state in its `the frozen design contract (per-screen state matrix)` row plus the implied `content`:
+  every state in its the per-screen state matrix row plus the implied `content`:
   - SCR-landing_timeline: `loading, empty, error, end_of_list` — all designed (§2).
   - SCR-signup: `validation, busy_submitting, error, success` — all designed (§3).
   - SCR-signin: `validation, busy_submitting, error, success` — all designed (§4).
   - SCR-recovery: `validation, busy_submitting, error, success` — all designed (§5).
   No state was dropped; none is recorded out-of-scope.
-- **States designed, not skeletal (identity `STATES_DESIGNED_NOT_SKELETAL`).** Each state carries
+- **States designed, not skeletal.** Each state carries
   concrete copy intent and a recovery affordance, instantiated from the state model
   (`empty_error_loading_states` §1.1–§1.9) with its shared voice (§0.4) — not merely named.
-- **Components consistent (identity `COMPONENTS_CONSISTENT`).** Every screen is composed from named
+- **Components consistent.** Every screen is composed from named
   visual-system components (nav §3.9, button §3.1, link §3.2, input/textarea §3.3, character counter
   §3.4, identity cluster §3.5, chirp card §3.6, inline alert §3.13, state blocks §3.14, modal §3.11,
   tokens §2) and placed per the IA screen map and logged-out nav (ia-interaction §1.1/§1.4/§2). **No
   component was invented and no gap was found to flag** — the component set and the state model cover
   every entry/auth screen and state.
-- **Req-UX register (identities `REQ_UX_UNIQUE_IN_SUBRANGE`, `REQ_UX_TESTABLE`).** REQ-UX-030..039, all
+- **Req-UX register.** REQ-UX-030..039, all
   within the owned sub-range, each user-side, stranger-testable, release-gating-flagged, and traced to
   ≥1 REQ-PROD / journey (§6).
 - **Seam respected.** No screen inventory entry, state-vocabulary entry, REQ-UX id scheme, or state
@@ -1649,12 +1627,6 @@ later work rather than minted as non-gating UX here.
   only; no front-end code. The current SPA at `c805525` is treated as the starting point to improve
   (handle-only login → credentialed sign-in; no sign-up → in-product sign-up; raw timeline → designed
   landing; nothing → recovery), not a target to preserve.
-- **Hygiene (identity `GITHUB_HYGIENE`).** All content is repository-ready: no host/cluster/system
-  detail, no filesystem paths, no agent/DAG/run ids, no attribution trailers; things named by
-  repository identity (`Nousix-LLC/nswe-demo` @ `c805525`, repo-relative `crates/chirp-frontend`).
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in
-  dependency outputs (state model, IA & interaction, visual system), and the product requirements. No
-  conclusion depends on bundle content that could not be loaded.
 
 ---
 
@@ -1680,13 +1652,13 @@ first-class, designed state here, not an afterthought.
    and traced to the product requirements and journeys it serves. This is the release bar for the core
    loop.
 2. **The six screen fragments** (§ Home timeline … § Search / discovery) — each owned and authored by its
-   screen spoke and assembled here verbatim. Each fragment carries its own layout intent, happy-path flow,
+   screen design and assembled here verbatim. Each fragment carries its own layout intent, happy-path flow,
    designed states, requirements, and notes.
 
 #### What is deliberately *not* here (scope boundary)
 
 - **How it is built.** This is *what, not how*: behaviour, appearance, and the testable bar. Front-end
-  code, routing, persistence, and the session/auth lifetime are deferred to the code DAGs and to the
+  code, routing, persistence, and the session/auth lifetime are deferred to the code work and to the
   identity / domain / ops requirement areas (`REQ-ID-*`, `REQ-DOM-*`, `REQ-OPS-*`).
 - **Screens owned by sibling surface groups** — entry/auth (landing, sign-up, sign-in, recovery),
   account/settings (settings, edit-profile, deletion, export, sign-out), and trust/safety/admin
@@ -1700,7 +1672,7 @@ first-class, designed state here, not an afterthought.
 
 #### A. Unified requirement register — `REQ-UX-040 .. REQ-UX-051`
 
-Twelve requirements across the six screens, partitioned by the subtree contract into disjoint per-screen
+Twelve requirements across the six screens, partitioned into disjoint per-screen
 sub-ranges. Every id is **unique**, lies **inside its owning screen's sub-range** and within the core-loop
 range `REQ-UX-040..051` (itself inside the experience range `REQ-UX-020..069`), **collides with no other**,
 and leaves **no gap**. Each is user-side, carries acceptance criteria a stranger could check, a
@@ -1736,11 +1708,9 @@ range). The core-loop contract freezes the reply stance to the **reply-built** b
 affordance appears (on a feed card, a profile chirp, a search result), it opens the coherent thread
 designed in § Chirp thread — it is never a stub.
 
-#### B. The core-loop cross-screen seams (frozen; verified in the fold record)
+#### B. The core-loop cross-screen seams
 
-The six screens are parts of one design and share five seams, frozen in the subtree contract before any
-screen was drawn and verified against the assembled output by the synthesis gate (see `SYNTHESIS.md` at
-this subtree's root for the per-identity verdicts and evidence):
+The six screens are parts of one design and share five seams, fixed as shared decisions before the individual screens were designed:
 
 - **SHARED_CHIRP_CARD** — every surface that shows a chirp (feed, profile list, thread root + replies,
   search results) renders the **one** shared chirp card, never a per-screen variant.
@@ -1759,9 +1729,8 @@ this subtree's root for the per-identity verdicts and evidence):
 
 ### The six screen fragments
 
-The fragments below are assembled verbatim from their owning screen spokes, in core-loop reading order
-(feed → compose → profile → thread → onboarding → search). Each retains its own provenance header,
-section numbering, and notes.
+The fragments below are presented in core-loop reading order
+(feed → compose → profile → thread → onboarding → search). Each retains its own section numbering and notes.
 
 ---
 
@@ -1781,8 +1750,8 @@ honestly** — at wireframe level, with concrete copy intent and a recovery affo
 does **not** redesign the composer (that is the one `SCR-compose` surface this screen *routes to*,
 identity `COMPOSE_ENTRY_SEAM`), the chirp card (the one shared component from the visual system, identity
 `SHARED_CHIRP_CARD`), the navigation chrome (owned by the IA model and the visual system), or the state
-model (owned by `the state model` and *instantiated* here). A component or pattern this screen needs
-but cannot find is flagged for the synthesis gate, never invented. Where a signed-in action meets an expired
+model (owned by the state model and *instantiated* here). A component or pattern this screen needs
+but cannot find is flagged for resolution, never invented. Where a signed-in action meets an expired
 session, this screen routes through the one re-sign-in prompt (state model §1.6) rather than a bespoke
 message. **What, not how:** no routing/framework/persistence mechanism is settled here.
 
@@ -1880,9 +1849,8 @@ and highlights **Home** as the active destination (nav active state, visual-syst
   the gating core is the honest-states feed with paging.
 
 **Composition note.** Every colour, type, space, and control above is a visual-system token/component; this
-screen introduces no new component. If a needed presentation were missing it would be flagged for the
-synthesis gate — none was: the chirp card, nav, buttons, follow/like controls, state blocks, toast, and
-inline alert cover this screen entirely (`COMPONENTS_CONSISTENT`).
+screen introduces no new component. If a needed presentation were missing it would be flagged for resolution — none was: the chirp card, nav, buttons, follow/like controls, state blocks, toast, and
+inline alert cover this screen entirely.
 
 ---
 
@@ -1919,7 +1887,7 @@ inline alert cover this screen entirely (`COMPONENTS_CONSISTENT`).
 
 The required-state matrix for SCR-home_timeline is
 `[loading, empty, error, end_of_list, session_expired, busy_submitting, success]`
-(`the frozen design contract (per-screen state matrix)`), plus the `content` baseline (always implied). Each
+(the per-screen state matrix), plus the `content` baseline (always implied). Each
 state below **instantiates the shared state model** (the state model §1.x) with this screen's concrete
 copy intent and recovery affordance, rendered by the named visual-system block, obeying the named IA
 pattern. Exemplar copy is illustrative, in the product's calm, plain, non-blaming voice (state model §0.4),
@@ -1960,7 +1928,7 @@ is a bare blank area (state model §1.2):
     + **Find people**.
 - **Recovery affordance:** the surface's primary next action — **Find people** / **Compose** — never a
   blank screen the user must leave. (Distinct from the logged-out landing empty, which is the entry/auth
-  spoke's; this is the *signed-in* feed.)
+  section's; this is the *signed-in* feed.)
 - **Composition:** Empty state block (visual-system §3.14); IA first-class-empties §3.5. (Clearly different
   from `error` — the fetch *succeeded*.)
 
@@ -2041,7 +2009,7 @@ is a bare blank area (state model §1.2):
 list, not an addressable single subject. A single missing/removed chirp that would otherwise appear in the
 list is shown via the chirp-card **`tombstone`** variant ("This chirp is unavailable", no actions;
 visual-system §3.6, state model §1.4) rather than a whole-screen not-found; the whole-screen `not_found` is
-`SCR-profile`/`SCR-chirp_thread`'s concern. Recorded so the synthesis gate sees the deliberate scoping, not
+`SCR-profile`/`SCR-chirp_thread`'s concern. Recorded so the deliberate scoping is visible, not
 a dropped state.
 
 ---
@@ -2060,7 +2028,7 @@ defers the thread design to `the chirp-thread design`.
 
 ##### 5. Requirements & acceptance criteria — REQ-UX-040 .. REQ-UX-042
 
-Range owned by `the home-timeline design` per `the frozen design contract`
+Range owned by `the home-timeline design`
 (`REQ-UX-040 .. REQ-UX-042`). Each requirement is stated from the user's side, is testable by a stranger
 exercising the live product, carries a `release_gating` flag, and traces to ≥1 `REQ-PROD-*` and/or journey.
 Composes against `req_ux_schema`; the parent id scheme, screen inventory, and state vocabulary are used as
@@ -2115,22 +2083,21 @@ frozen and not redefined.
 
 ###### 5.1 Traceability summary (REQ-UX → REQ-PROD / journeys)
 
-| REQ-UX | Gating | Traces to | Realizes (identities) |
+| REQ-UX | Gating | Traces to | Realizes |
 |---|---|---|---|
-| REQ-UX-040 | true | REQ-PROD-018; (REQ-PROD-025 non-gating); J5, J6 | STATES_DESIGNED_NOT_SKELETAL |
+| REQ-UX-040 | true | REQ-PROD-018; (REQ-PROD-025 non-gating); J5, J6 | states designed in full |
 | REQ-UX-041 | true | REQ-PROD-016, 020, 021; J5 | OPTIMISTIC_RECONCILE, COMPOSE_ENTRY_SEAM, SHARED_CHIRP_CARD |
 | REQ-UX-042 | true | REQ-PROD-006; J6 | (session-expired via state model §1.6) |
 
 All three ids are unique, fall within the owned `REQ-UX-040..042` sub-range, lie within the parent
-`REQ-UX-020..069` range, and collide with no other child's range (`REQ_UX_UNIQUE_IN_SUBRANGE`,
-`REQ_UX_TESTABLE`).
+`REQ-UX-020..069` range, and collide with no other child's range.
 
 ---
 
-##### 6. Notes for the synthesis gate
+##### 6. Coverage & composition notes
 
 - **Coverage.** Every state in SCR-home_timeline's matrix is designed with concrete copy intent and a
-  recovery affordance (`STATES_DESIGNED_NOT_SKELETAL`): `content` §3.0, `loading` §3.1, `empty` §3.2 (two
+  recovery affordance: `content` §3.0, `loading` §3.1, `empty` §3.2 (two
   distinct variants), `error` §3.3, `end_of_list` §3.4, `session_expired` §3.5, `busy_submitting` §3.6
   (incl. optimistic reconcile), `success` §3.7. `not_found` is recorded out-of-scope with a reason (§3.8).
 - **Frozen seams honoured.** `COMPOSE_ENTRY_SEAM` — this screen owns the compose *entry affordance* and
@@ -2141,18 +2108,12 @@ All three ids are unique, fall within the owned `REQ-UX-040..042` sub-range, lie
   stance and defers the thread to `the chirp-thread design` (§4), never a dead control.
 - **Composed, not invented.** Builds on the IA signed-in nav model & screen map (IA §1.2/§2) and the global
   interaction patterns (optimistic+reconcile §3.2, auth-gating §3.3, honest feedback §3.1); composes from
-  visual-system components and state blocks (`COMPONENTS_CONSISTENT`). No component or pattern was missing;
+  visual-system components and state blocks. No component or pattern was missing;
   nothing was invented and nothing is flagged. A reader who finds a needed component absent should treat its
   flag — not a local invention — as the correct outcome.
 - **Boundary kept (what, not how).** Design intent, behaviour, and the testable bar only — no front-end
   code; routing/framework/persistence and the session/auth lifetime (`REQ-ID-*`) are out of UX scope.
-- **Grounding & hygiene.** Grounded in `Nousix-LLC/nswe-demo` @ `c805525`; all content is repository-ready —
-  no host/cluster/system detail, no filesystem paths, no agent/DAG/run ids, no attribution trailers
-  (`GITHUB_HYGIENE`).
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  reconstructed run); grounded in the brief, the frozen design contract, the dependency outputs (state model,
-  IA, visual system), the product requirements, and the live product at `c805525`. No conclusion depends on
-  bundle content that could not be loaded.
+- **Grounding.** Grounded in `Nousix-LLC/nswe-demo` @ `c805525`.
 
 ---
 
@@ -2167,7 +2128,7 @@ the signed-in nav, the compose affordance on the home timeline, and onboarding's
 screen, not a skeleton*: the loaded happy path, and **every state in its frozen matrix** —
 `[validation, busy_submitting, error, success, session_expired]` plus the `content` baseline — each with
 concrete copy intent and a named recovery affordance, instantiating the shared state model
-(`the state model` §1) from the shared visual-system components (`the visual language & design system` §3).
+(the state model §1) from the shared visual-system components (`the visual language & design system` §3).
 
 **What this surface owns, and what it defers.**
 
@@ -2175,11 +2136,11 @@ concrete copy intent and a named recovery affordance, instantiating the shared s
   character counter, inline validation, the **draft-survival guarantee** (`COMPOSE_DRAFT_SURVIVES`), the
   non-optimistic post feedback (`OPTIMISTIC_RECONCILE` reserves optimism for like/follow), and the
   `REQ-UX-043..044` register for this screen.
-- It **composes against, and does not redefine**: the state model (`the state model` §1.3/§1.6/§1.7/§1.8/
+- It **composes against, and does not redefine**: the state model (the state model §1.3/§1.6/§1.7/§1.8/
   §1.9), the IA compose placement and interaction patterns (`the information architecture & interaction model` §2.2, §3.1, §3.3), and the
   visual-system components (textarea + message slot §3.3, character counter §3.4, button §3.1, inline alert
   §3.13, toast §3.12, session-expired block §3.14, chirp card §3.6). A presentation these components cannot
-  serve is **flagged for the synthesis gate, never invented** (none was needed — see §6).
+  serve is **flagged for resolution, never invented** (none was needed — see §6).
 - It **defers the mechanism**: the session lifetime and its invalidation, the auth token, the create-chirp
   endpoint and persistence, and rate limiting are identity/trust and domain/ops concerns (`REQ-ID-*`,
   `REQ-DOM-*`, `REQ-OPS-*`). This section designs only what the user sees and does, and the testable bar.
@@ -2218,14 +2179,14 @@ What is **improved** (today's gaps against the bar):
 3. **No routed session-expired treatment.** A post attempted after the session has gone is shown as a
    generic inline error, not the one re-sign-in prompt — a silent-ish failure the whole "no silent sign-out"
    guarantee (`REQ-PROD-006`) forbids. §4 (session_expired) routes it through the shared prompt
-   (`the state model` §1.6) with the draft preserved.
+   (the state model §1.6) with the draft preserved.
 4. **The composer is only a full route.** Per the IA (`the information architecture & interaction model` §2.2) the composer should be
    reachable in-context (inline or modal over the feed) so a person composes without abandoning the
    timeline, and the current `/compose` route is generalized, not broken. §2 designs it as that one
    in-context surface while remaining deep-linkable.
 
 The handle-only login currently folded into `/compose` is **not** this screen's concern — credentialed
-sign-in/sign-up/recovery are the entry/auth spoke's (`SCR-signin`/`SCR-signup`/`SCR-recovery`), and the
+sign-in/sign-up/recovery are the entry/auth section's (`SCR-signin`/`SCR-signup`/`SCR-recovery`), and the
 logged-out and signed-in navigation that reaches the composer is the IA model's (`the information architecture & interaction model` §1).
 This surface is the composer a *signed-in* person uses; where a signed-in compose meets an expired session
 it routes to re-sign-in (§4, session_expired).
@@ -2316,11 +2277,11 @@ not draw a chirp of its own.
 
 ##### 4. The designed states
 
-Each state instantiates the shared model (`the state model` §1.x) and the shared conventions
-(`the frozen design contract (per-screen state matrix)`); copy is **representative intent**, adapted to this screen, not a
+Each state instantiates the shared model (the state model §1.x) and the shared conventions
+(the per-screen state matrix); copy is **representative intent**, adapted to this screen, not a
 frozen string. The required matrix for SCR-compose is
 `[validation, busy_submitting, error, success, session_expired]` + the implied `content` baseline — all are
-designed below (identity `STATES_DESIGNED_NOT_SKELETAL`).
+designed below.
 
 ###### 4.0 `content` — the loaded composer
 - **When:** the composer is open and ready (the §2.2 layout). The baseline every other state departs from.
@@ -2328,9 +2289,9 @@ designed below (identity `STATES_DESIGNED_NOT_SKELETAL`).
   counter shows the full budget remaining ("280 left") on an empty field.
 - **Recovery:** n/a (baseline).
 - **Composition:** rendered by the primary components (textarea §3.3, counter §3.4, button §3.1, identity
-  cluster §3.5) — no state block (`the state model` §1.0).
+  cluster §3.5) — no state block (the state model §1.0).
 
-###### 4.1 `validation` — inline, actionable, at or before submit (`the state model` §1.7)
+###### 4.1 `validation` — inline, actionable, at or before submit (the state model §1.7)
 - **When:** the body violates a rule — **empty** (the Chirp button is disabled, so this surfaces only on an
   all-whitespace or edge attempt) or **over the 280-character limit** (reached by typing past the limit or
   pasting a longer block).
@@ -2348,7 +2309,7 @@ designed below (identity `STATES_DESIGNED_NOT_SKELETAL`).
   approaching-limit warning, and an explicit over-limit message; a pasted over-length block is explained,
   not silently cut.
 
-###### 4.2 `busy_submitting` — in flight, no duplicate, holds its place (`the state model` §1.8)
+###### 4.2 `busy_submitting` — in flight, no duplicate, holds its place (the state model §1.8)
 - **When:** a valid chirp has been submitted and the create request is in flight.
 - **Copy & voice:** minimal — the button shows the work ("Chirping…", today's label, kept); the point is to
   show it is working and prevent a second submission, not to narrate.
@@ -2360,7 +2321,7 @@ designed below (identity `STATES_DESIGNED_NOT_SKELETAL`).
   (`OPTIMISTIC_RECONCILE`): the chirp is not shown anywhere as posted during `busy_submitting` — only
   like/follow may update ahead of confirmation, and this surface has neither.
 
-###### 4.3 `error` — honest, recoverable, draft preserved (`the state model` §1.3)
+###### 4.3 `error` — honest, recoverable, draft preserved (the state model §1.3)
 - **When:** the post failed — a transient network/server failure, or any non-validation request failure.
   (A failure that is actually an expired session is the `session_expired` case, §4.5, not a generic error.)
 - **Copy & voice:** honest, plain, non-blaming, and explicit that the **text is safe**, never a raw error
@@ -2372,7 +2333,7 @@ designed below (identity `STATES_DESIGNED_NOT_SKELETAL`).
 - **Composition:** inline alert §3.13; the field is not cleared (today's behavior — `clear_field` runs only
   on success — is correct and is kept as the explicit guarantee).
 
-###### 4.4 `success` — honest confirmation, result observable, no id leak (`the state model` §1.9)
+###### 4.4 `success` — honest confirmation, result observable, no id leak (the state model §1.9)
 - **When:** the server confirmed the chirp was created.
 - **Copy & voice:** a brief, honest confirmation — *"Chirp posted."* — with **no internal id surfaced** (the
   live `"Chirped! ({id})"` leak is removed; the record of success is the chirp itself appearing).
@@ -2384,7 +2345,7 @@ designed below (identity `STATES_DESIGNED_NOT_SKELETAL`).
   is the confirmation of record. Honest only — success is shown only when the post truly succeeded
   (`the information architecture & interaction model` §3.1).
 
-###### 4.5 `session_expired` — route to the one re-sign-in prompt, draft kept (`the state model` §1.6)
+###### 4.5 `session_expired` — route to the one re-sign-in prompt, draft kept (the state model §1.6)
 - **When:** the person attempts to post after the session has **expired or been invalidated** — including
   after a service restart, which wipes in-memory sessions today (`REQ-PROD-006`; J6 second-visit failure).
 - **Copy & voice:** the **single shared re-sign-in prompt**, not a per-screen message and not a generic
@@ -2415,7 +2376,7 @@ An unsent draft is **never silently discarded**. It survives, concretely, all of
 - **closing a modal composer with text in it** — closing with a non-empty draft keeps the draft so the next
   open restores it (a lightweight "keep your draft?" affordance is acceptable; silently dropping it is not).
 
-This is the compose instantiation of the product-wide input-preserving principle (`the state model` §0.2
+This is the compose instantiation of the product-wide input-preserving principle (the state model §0.2
 rule 4, §2 rule 4; `REQ-PROD-017`). Draft **persistence across a full browser close** is a larger storage
 question (local persistence) and is an **honest, recorded extension**, not part of this gating guarantee —
 flagged here for the backlog, not silently promised.
@@ -2437,18 +2398,16 @@ flagged here for the backlog, not silently promised.
 | The posted chirp (observed result) | Chirp card §3.6 (shared) | `SHARED_CHIRP_CARD` |
 
 Every piece this surface needs already exists in the visual system and the IA model; **no component is
-invented and no gap is flagged**. Had one been missing, it would be reported to the synthesis gate per
-`COMPONENTS_CONSISTENT`, not patched here.
+invented and no gap is flagged**. Had one been missing, it would be flagged for resolution, not patched here.
 
 ---
 
 ##### 7. Requirements & acceptance criteria — REQ-UX-043 .. REQ-UX-044
 
-Range owned by `the compose design` per `the frozen design contract` (`REQ-UX-043 .. REQ-UX-044`). Each
+Range owned by `the compose design` (`REQ-UX-043 .. REQ-UX-044`). Each
 requirement is stated from the user's side, is testable by a stranger exercising the live product, carries a
 `release_gating` flag, and traces to ≥1 `REQ-PROD-*` and/or journey. Both ids are unique, fall inside the
-owned sub-range, and lie within the node's `REQ-UX-040..051` and the experience `REQ-UX-020..069`
-(identities `REQ_UX_UNIQUE_IN_SUBRANGE`, `REQ_UX_TESTABLE`).
+owned sub-range, and lie within this section's `REQ-UX-040..051` and the experience `REQ-UX-020..069`.
 
 ###### REQ-UX-043 — Compose and post a chirp, with a visible limit and honest, non-optimistic feedback
 - **Statement:** A signed-in person can write a chirp of up to 280 characters in one composer reached from
@@ -2476,7 +2435,7 @@ owned sub-range, and lie within the node's `REQ-UX-040..051` and the experience 
   (never a silent no-op and never an apparent success), and after signing in they are returned to the
   composer with their draft intact and can post it.
 - **Release gating:** true
-- **Traces to:** REQ-PROD-017, REQ-PROD-006; J5, J6. (Instantiates `the state model` REQ-UX-023/026/028
+- **Traces to:** REQ-PROD-017, REQ-PROD-006; J5, J6. (Instantiates the state model REQ-UX-023/026/028
   for this screen; identity `COMPOSE_DRAFT_SURVIVES`.)
 
 ###### 7.1 Traceability summary
@@ -2488,19 +2447,18 @@ owned sub-range, and lie within the node's `REQ-UX-040..051` and the experience 
 
 ---
 
-##### 8. Notes for the synthesis gate
+##### 8. Coverage & composition notes
 
 - **Coverage.** SCR-compose is designed with every state in its frozen matrix
   (`validation, busy_submitting, error, success, session_expired`) plus the `content` baseline — each with
-  concrete copy intent and a named recovery affordance (§4), instantiating `the state model` §1 and
-  following `the frozen design contract (per-screen state matrix)`. No state was dropped.
-- **Identities asserted here.** `COMPOSE_DRAFT_SURVIVES` (§4.3/§4.5/§5), `OPTIMISTIC_RECONCILE` — posting is
+  concrete copy intent and a named recovery affordance (§4), instantiating the state model §1 and
+  following the per-screen state matrix. No state was dropped.
+- **Seams honoured here.** `COMPOSE_DRAFT_SURVIVES` (§4.3/§4.5/§5), `OPTIMISTIC_RECONCILE` — posting is
   non-optimistic (§4.2), `COMPOSE_ENTRY_SEAM` — one composer that entry points route to (§2.1), and
-  `SHARED_CHIRP_CARD` — the posted chirp uses the shared card (§4.4/§6). `STATES_DESIGNED_NOT_SKELETAL` and
-  `COMPONENTS_CONSISTENT` hold (§4, §6).
+  `SHARED_CHIRP_CARD` — the posted chirp uses the shared card (§4.4/§6). Every state is designed, not skeletal, and every element composes from existing components (§4, §6).
 - **Cross-screen seams owned elsewhere.** The compose *affordances* on `SCR-home_timeline` and
-  `SCR-onboarding` are owned by those spokes and only reference this composer; if either needs a composer
-  behavior this fragment does not describe, that is a seam note for synthesis, not an invention there.
+  `SCR-onboarding` are owned by those sections and only reference this composer; if either needs a composer
+  behavior this fragment does not describe, that is a seam note for resolution, not an invention there.
 - **REQ-UX range.** Only `REQ-UX-043..044` minted; the full `COMPOSE_DRAFT_SURVIVES` and non-optimistic
   guarantees are carried within those two ids (the per-state consistency requirements live in the state
   model's `REQ-UX-023/026/028/029`, which this screen instantiates rather than re-mints). No id outside the
@@ -2509,13 +2467,6 @@ owned sub-range, and lie within the node's `REQ-UX-040..051` and the experience 
   (local-storage-style persistence) is left out of the gating draft-survival guarantee and flagged for the
   backlog (§5). An image/media attachment on a chirp is out of scope for this product version (chirp is
   text-first; no upload exists today) and is noted, not designed.
-- **Hygiene.** All content is repository-ready — no host/cluster/system detail, no filesystem paths,
-  no agent/run ids, no attribution trailers; things named by repository identity (`Nousix-LLC/nswe-demo` @
-  `c805525`, `crates/chirp-frontend/src/compose.rs`) (identity `GITHUB_HYGIENE`).
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  reconstructed run); grounded in the brief, the frozen design contract, the dependency and sibling outputs
-  (state model, IA, visual system), the product requirements, and the live product at `c805525`. No
-  conclusion depends on bundle content that could not be loaded.
 
 ---
 
@@ -2527,7 +2478,7 @@ A profile is the account seen whole: who the user is, how many people they follo
 and the chirps they have posted. It is read by two different people with two different intents — **its
 owner** (checking and managing their own presence — J6) and **another user** (deciding whether this is
 someone to follow — J5) — and the one screen must serve both honestly. Reading a profile never requires an
-account (REQ-PROD-013); the **logged-out** reader of a profile is the entry/auth spoke's and the IA model's
+account (REQ-PROD-013); the **logged-out** reader of a profile is the entry/auth section's and the IA model's
 concern (ia-interaction §1.1/§3.3). This fragment designs the **signed-in** profile and routes an expired
 session through the one shared re-sign-in prompt (state model §1.6).
 
@@ -2537,7 +2488,7 @@ action. It does **not** design the **edit-profile** screen (`SCR-edit_profile`) 
 (`SCR-settings_home`) — both are sibling-owned; this screen only exposes the affordance and **references the
 route**. It composes the **one shared chirp card** (identity `SHARED_CHIRP_CARD`) for every chirp, routes any
 "compose" affordance to the one composer (`COMPOSE_ENTRY_SEAM`), and never invents a component the visual
-system lacks — a gap is flagged for synthesis (§6), not patched here.
+system lacks — a gap is flagged for resolution (§6), not patched here.
 
 ---
 
@@ -2605,7 +2556,7 @@ own:
 - **Other user's profile:** a **Follow / Unfollow** control (§2.3, §3) and an **overflow `⋯` menu** (§3.10)
   whose **Report/block** item routes to `SCR-report_block` (sibling-owned — reference only). **No** Edit /
   Settings controls appear. (A logged-out reader sees neither follow nor edit; that case is the entry/auth
-  spoke's — this screen is the signed-in profile.)
+  section's — this screen is the signed-in profile.)
 
 ###### 2.3 Chirps list, paging & counts
 - **Paging:** cursor-based "**Load more**" appends older chirps; reaching the last page shows the explicit
@@ -2630,19 +2581,19 @@ dialog.
 
 - **Counts are honest display metrics.** The follower/following numbers are shown and kept truthful
   (the follower count reconciles with the follow action above). A dedicated **followers / following list**
-  screen is **not in the frozen screen inventory** (`the frozen design contract (screen inventory & state vocabulary)`); the counts are
+  screen is **not in the frozen screen inventory** (the screen inventory & state vocabulary); the counts are
   therefore **display-only in this release** and do not open a list. This is recorded as a deliberate,
-  honest cut (not an invented screen) and **flagged for the synthesis gate** (§6) in case the register wants
+  honest cut (not an invented screen) and **flagged for resolution** (§6) in case the register wants
   to carry it — it is NOT silently added here.
 
 ---
 
 ##### 3. States (the matrix for SCR-profile — designed, not skeletal)
 
-Required states (`the frozen design contract (per-screen state matrix):SCR-profile`):
+Required states (the per-screen state matrix:SCR-profile`):
 `[loading, empty, error, not_found, end_of_list, busy_submitting, success, session_expired]` (+ `content`,
-implied). Each instantiates the shared state model (`the state model` §1) with the matching convention
-(`the frozen design contract (per-screen state matrix)`): copy **intent** (exemplars illustrative, not frozen strings) +
+implied). Each instantiates the shared state model (the state model §1) with the matching convention
+(the per-screen state matrix): copy **intent** (exemplars illustrative, not frozen strings) +
 recovery affordance + the visual-system block that renders it. **The empty-vs-not_found distinction is the
 load-bearing one for this screen** and is called out explicitly.
 
@@ -2738,15 +2689,14 @@ release_gating · traces_to).
 
 Both ids are unique, fall within the owned `REQ-UX-045..046` sub-range, lie within the parent
 `REQ-UX-040..051` and grandparent `REQ-UX-020..069` ranges, and each is user-side, testable against the live
-product, release-gating-flagged, and traced (identities `REQ_UX_UNIQUE_IN_SUBRANGE`, `REQ_UX_TESTABLE`).
+product, release-gating-flagged, and traced.
 
 ---
 
-##### 6. Notes for synthesis
+##### 6. Coverage & composition notes
 
 - **Coverage.** Every state in the SCR-profile matrix is designed with concrete copy intent and a recovery
-  affordance (§3), including the explicit **empty-vs-not_found** distinction required by the brief (identity
-  `STATES_DESIGNED_NOT_SKELETAL`). `content` is the loaded baseline (§2.1). No matrix state is dropped.
+  affordance (§3), including the explicit **empty-vs-not_found** distinction required by the brief . `content` is the loaded baseline (§2.1). No matrix state is dropped.
 - **Seam compliance.** Chirps use the one shared chirp card (`SHARED_CHIRP_CARD`); follow/unfollow and the
   per-card like are the shared optimistic+reconcile pattern (`OPTIMISTIC_RECONCILE`); the own-profile
   "compose a first chirp" routes to the one composer (`COMPOSE_ENTRY_SEAM`). The edit-profile and settings
@@ -2754,20 +2704,13 @@ product, release-gating-flagged, and traced (identities `REQ_UX_UNIQUE_IN_SUBRAN
   `SCR-settings_home`) and does **not** design them.
 - **Composition (components consistent).** Every element is a visual-system component (identity cluster §3.5,
   chirp card §3.6, follow control §3.7, like §3.8, menu §3.10, state blocks §3.14, count pill §3.15) built on
-  the IA model (own-vs-other §1.2, auth-gating §3.3, optimistic reconcile §3.2); **no component is invented**
-  (identity `COMPONENTS_CONSISTENT`).
+  the IA model (own-vs-other §1.2, auth-gating §3.3, optimistic reconcile §3.2); **no component is invented**.
 - **Flag (not invented).** A dedicated **followers / following list** screen is **absent from the frozen
   screen inventory**; the counts are therefore designed as **display-only** this release and this is reported
-  to the synthesis gate as a recorded cut — **not** silently added as a new screen or route.
-- **Boundary & hygiene.** What-not-how throughout — behaviour, layout intent, and the testable bar only, no
+  for resolution as a recorded cut — **not** silently added as a new screen or route.
+- **Boundary (what, not how).** What-not-how throughout — behaviour, layout intent, and the testable bar only, no
   front-end code; session/auth lifetime and the deletion/edit mechanisms are deferred to `REQ-ID-*` /
-  sibling screens. All content is repository-ready: no host/cluster/system detail, no filesystem
-  paths, no agent/DAG/run ids, no attribution trailers; named by repository identity (`Nousix-LLC/nswe-demo`
-  @ `c805525`) (identity `GITHUB_HYGIENE`).
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  reconstructed run); grounded in the brief, the frozen design contract, the dependency output (state model),
-  the sibling inputs (IA, visual system), and the product requirements. No conclusion depends on bundle
-  content that could not be loaded.
+  sibling screens.
 
 ---
 
@@ -2797,14 +2740,14 @@ hard condition that nothing half-built ever ships.
   rules, character counter, or busy/success/error states. Only the parts genuinely distinct to replying —
   the binding to a root chirp (`reply_to`), the "replying to" context, the inline placement, and the
   explicitly **non-optimistic** resolution — are designed here (§3).
-- It **instantiates**, per state, the shared state model (`the state model` §1) and the
-  `the frozen design contract (per-screen state matrix)`; it does not redefine the state vocabulary or re-draw a state block.
+- It **instantiates**, per state, the shared state model (the state model §1) and the
+  the per-screen state matrix; it does not redefine the state vocabulary or re-draw a state block.
 - It **defers**: the reply/thread *data mechanism* (how `reply_to` threads are stored and fetched, the
   thread query/pagination shape) to domain & application design (`REQ-DOM-*`); auth/session lifetime and the
-  authorization of reply/report/block to identity & trust (`REQ-ID-*`); front-end code to the code DAGs
+  authorization of reply/report/block to identity & trust (`REQ-ID-*`); front-end code to the code work
   (**what, not how**).
 - It **flags, never invents** (§6): one real gap in the visual system (a reply glyph / reply-count
-  presentation on the chirp card) is reported to the synthesis gate rather than filled here.
+  presentation on the chirp card) is flagged for resolution rather than filled here.
 
 ---
 
@@ -2855,7 +2798,7 @@ top to bottom:
   consistent within the replies list (visual-system §3.6). No screen hand-rolls a chirp row.
 - **Reading order of replies is oldest-first** (chronological) — a conversation is read top-to-bottom —
   deliberately unlike the reverse-chronological home timeline; this is the one ordering decision this screen
-  makes and it is stated so the synthesis gate and the code DAG do not assume the timeline's order.
+  makes and it is stated so the implementation does not assume the timeline's order.
 - **Reply count** on a card's action row reflects how many replies a chirp has and is the affordance that
   opens that chirp's thread; its glyph and count presentation are the flagged gap in §6.
 - **Like on the root and on replies is optimistic and reconciles** on failure (identity `OPTIMISTIC_RECONCILE`;
@@ -2922,10 +2865,10 @@ or its state set. What is **genuinely distinct about replying, and is designed h
 
 ##### 4. The designed states
 
-Each state instantiates the matching pattern in `the state model` §1 (its visual-system block + IA pattern
+Each state instantiates the matching pattern in the state model §1 (its visual-system block + IA pattern
 + the shared copy voice, §0.4), with concrete copy intent and a recovery affordance — designed, not merely
-named (identity `STATES_DESIGNED_NOT_SKELETAL`). Matrix for SCR-chirp_thread
-(`the frozen design contract (per-screen state matrix)`): `[loading, empty, error, not_found, session_expired, validation,
+named. Matrix for SCR-chirp_thread
+(the per-screen state matrix): `[loading, empty, error, not_found, session_expired, validation,
 busy_submitting, success]`, plus the `content` baseline (§1–§2).
 
 ###### 4.1 `loading`
@@ -3022,7 +2965,7 @@ busy_submitting, success]`, plus the `content` baseline (§1–§2).
 
 ##### 5. Requirements & acceptance criteria — REQ-UX-047 .. REQ-UX-048
 
-Range owned by `the chirp-thread design` per `the frozen design contract` (`REQ-UX-047 .. REQ-UX-048`).
+Range owned by `the chirp-thread design` (`REQ-UX-047 .. REQ-UX-048`).
 Each requirement is stated from the user's side, is testable by a stranger exercising the live product,
 carries a `release_gating` flag, and traces to ≥1 `REQ-PROD-*` and/or journey.
 
@@ -3077,19 +3020,18 @@ this is the bar it must meet.
 | REQ-UX-048 | false | REQ-PROD-023, 016, 017; J5 |
 
 Both ids are unique, fall within the owned `REQ-UX-047..048` sub-range, lie within the core-loop range
-`REQ-UX-040..051`, and within the parent `REQ-UX-020..069` range (identities `REQ_UX_UNIQUE_IN_SUBRANGE`,
-`REQ_UX_TESTABLE`).
+`REQ-UX-040..051`, and within the parent `REQ-UX-020..069` range.
 
 ---
 
-##### 6. Notes for the synthesis gate (coverage, composition, flagged gap)
+##### 6. Coverage & composition notes (coverage, composition, flagged gap)
 
 - **Frozen stance satisfied (`CONDITIONAL_REPLY_COHERENT`).** The REPLY-BUILT branch is designed in full: a
   real thread destination (§1–§2), a real reply bound to its root that lands in the thread (§3), every
   applicable state (§4), and the explicit guarantee that no reply/thread affordance is ever a dead control.
   The reply is **non-gating** and **non-optimistic**. The "deliberately-absent" branch is **not** designed —
   by the contract it is frozen out.
-- **State coverage (`STATES_DESIGNED_NOT_SKELETAL`).** Every state in this screen's matrix —
+- **State coverage.** Every state in this screen's matrix —
   `loading, empty, error, not_found, session_expired, validation, busy_submitting, success` — is designed
   with concrete copy intent and a recovery affordance (§4), plus the `content` baseline (§1–§2). `end_of_list`
   is **not** in this screen's matrix and is not designed; the replies render as a complete set, with paging +
@@ -3104,22 +3046,14 @@ Both ids are unique, fall within the owned `REQ-UX-047..048` sub-range, lie with
   (owned by `the compose design`) in reply mode and designs only the reply-distinct parts; it does not redefine
   the composer's layout, validation, counter, or states (§3). If the composer owner's final design changes
   the field/counter/validation, this screen inherits it unchanged.
-- **Components consistent (`COMPONENTS_CONSISTENT`) — one flagged gap, not invented.** The chirp card's
+- **Components consistent — one flagged gap, not invented.** The chirp card's
   **reply affordance and reply count** are the one place this screen needs more than the visual system
   currently specifies: visual-system §3.6 names a "reply affordance … only if replies are built" in the card
   anatomy, but the **required glyph inventory (§2.7) lists `compose` and no distinct reply/comment glyph**,
   and a **reply-count** presentation is not specified (only the like count, §3.8, is). Per the no-invention
-  rule this is **reported to the synthesis gate** for the visual system to resolve (add a reply/comment glyph
+  rule this is **flagged for resolution** for the visual system to resolve (add a reply/comment glyph
   and a reply-count treatment consistent with the like count), **not** invented here. Everything else on the
   card and in the composer composes existing components.
-- **Hygiene (`GITHUB_HYGIENE`).** All content here is repository-ready — no host/system detail, no
-  run/agent ids, no attribution trailers; things named by repository identity (`Nousix-LLC/nswe-demo` @
-  `c805525`, repo-relative paths).
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  reconstructed run); grounded in the brief, the frozen design contract, the dependency output
-  (`the state model`), the sibling inputs (`the information architecture & interaction model`, `the visual language & design system`), the product
-  requirements, and the live product at `c805525`. No conclusion depends on bundle content that could not be
-  loaded.
 
 ---
 
@@ -3130,7 +3064,7 @@ Both ids are unique, fall within the owned `REQ-UX-047..048` sub-range, lie with
 This fragment designs **SCR-onboarding**, the new user's first signed-in moment. Its single job is to replace
 the classic new-user dead end — a brand-new account that follows no one, dropped onto a blank timeline — with
 a first run that gives the user **a reason to stay and a concrete thing to do next** (`REQ-PROD-022`; journeys
-J2, J6; persona P2). It is **non-gating** (`the frozen design contract (screen inventory & state vocabulary)` marks SCR-onboarding `gating: false`;
+J2, J6; persona P2). It is **non-gating** (the screen inventory & state vocabulary marks SCR-onboarding `gating: false`;
 `REQ-PROD-022` is a tracked, non-blocking improvement): a first releasable version may ship with a
 functional-but-empty first session. It is designed in full regardless — a non-gating surface is still a
 designed screen, not a skeleton.
@@ -3227,7 +3161,7 @@ do both; the screen does not require both before letting the user continue.
 ##### 3. States
 
 The frozen matrix for this screen is `[empty, busy_submitting, success, error]`
-(`the frozen design contract (per-screen state matrix):SCR-onboarding`), plus the implied `content` baseline (§1). Each state
+(the per-screen state matrix:SCR-onboarding`), plus the implied `content` baseline (§1). Each state
 instantiates the one state model (the state model) with its five-part anatomy: *when it occurs · copy intent
 & voice · recovery affordance · composition · instantiation*.
 
@@ -3322,12 +3256,10 @@ Two honest sub-cases, each per the error model (state-patterns §1.3; recover in
 | `error` (a) suggestions fetch | Error state block + Retry §3.14 |
 | `error` (b) follow action | Toast with Retry §3.12 (inline alert §3.13 if persistent) |
 
-No element on this screen requires a component the visual system lacks, so **none is invented** (identity
-`COMPONENTS_CONSISTENT`). The suggested-account row is explicitly a composition of existing components; if the
-synthesis gate judges it warrants a first-class "account row" component in the visual system, that is a
+No element on this screen requires a component the visual system lacks, so **none is invented**. The suggested-account row is explicitly a composition of existing components; if the visual system judges it warrants a first-class "account row" component, that is a
 visual-system addition to flag, **not** an invention made here. No gap is flagged.
 
-##### 5. Cross-screen seam compliance (core-loop `the frozen design contract` identities)
+##### 5. Cross-screen seam compliance (core-loop seams)
 
 - **`COMPOSE_ENTRY_SEAM`** — the first-post offer **routes to the one composer** `SCR-compose`; this fragment
   references it and does not redefine composer layout, validation, or states. ✔
@@ -3335,16 +3267,13 @@ visual-system addition to flag, **not** an invention made here. No gap is flagge
   **posting is not optimistic** (it runs through the composer's busy → success/error). ✔
 - **`SHARED_CHIRP_CARD`** — any chirp shown as a result of the first run (on the destination timeline) is the
   one shared chirp card (§3.6); this screen renders no bespoke chirp row. ✔
-- **`SCREEN_COVERAGE_LOCAL` / `STATES_DESIGNED_NOT_SKELETAL`** — SCR-onboarding appears in exactly this
+- **Screen coverage & states designed** — SCR-onboarding appears in exactly this
   fragment and every state in its matrix (`empty`, `busy_submitting`, `success`, `error`) plus `content` is
   **designed** with copy intent and a recovery affordance (§1, §3). ✔
-- **`GITHUB_HYGIENE`** — repository-ready: no host/cluster/system detail, no filesystem paths, no
-  agent/DAG/run ids, no attribution trailers; references are by design-doc section and repository identity
-  (`Nousix-LLC/nswe-demo` @ `c805525`). ✔
 
 ##### 6. Requirement — REQ-UX-049
 
-Within the owned range `REQ-UX-049 .. REQ-UX-049` (`the frozen design contract:the onboarding design`),
+Within the owned range `REQ-UX-049 .. REQ-UX-049` (the onboarding design),
 inside the parent `REQ-UX-040..051` and the grandparent `REQ-UX-020..069`. Stated from the user's side,
 testable against the live product by a stranger, release-gating-flagged, traced to ≥1 `REQ-PROD-*`/journey.
 This requirement owns the first-run **screen's content and behaviour**; it complements, and does not redefine,
@@ -3368,7 +3297,7 @@ IA's `REQ-UX-014` (which owns the *placement* decision that a new user lands on 
      and a failed follow **reverts** to the true state with an honest message — no false success and no stuck
      busy control;
   5. the user can proceed to the home timeline at any time without being forced to follow or post first.
-- **Release gating:** **false** — SCR-onboarding is non-gating (`the frozen design contract (screen inventory & state vocabulary)` `gating: false`;
+- **Release gating:** **false** — SCR-onboarding is non-gating (the screen inventory & state vocabulary `gating: false`;
   `REQ-PROD-022` is explicitly a tracked, non-blocking improvement: a first releasable version may ship with a
   functional-but-empty first session). Stated explicitly as an honest, recorded non-gating cut.
 - **Traces to:** `REQ-PROD-022` (a new user's first session is not an empty dead-end); journeys **J2**
@@ -3377,16 +3306,16 @@ IA's `REQ-UX-014` (which owns the *placement* decision that a new user lands on 
   offer the next action) and the state-model requirements `REQ-UX-028`/`REQ-UX-029` (busy/reconcile; honest,
   observable success).
 
-##### 7. Notes for synthesis & boundaries
+##### 7. Coverage, composition & boundaries
 
-- **Coverage.** Every state in `the frozen design contract (per-screen state matrix):SCR-onboarding` — `empty`, `busy_submitting`,
+- **Coverage.** Every state in the per-screen state matrix:SCR-onboarding` — `empty`, `busy_submitting`,
   `success`, `error` — is designed with concrete copy intent and a recovery affordance, plus the `content`
   baseline (§1, §3). None is left skeletal; none is dropped.
 - **States deliberately not designed as first-class here (recorded, not silently omitted):**
   - **`loading`** is **not** in this screen's matrix. The brief suggestions fetch uses the shared in-place
     skeleton (state-patterns §1.1) within the content region, but the chrome and the first-post offer are
     available immediately; loading is not a first-class onboarding state. (Adding it would be permissible per
-    `the frozen design contract (per-screen state matrix)`, but it is not required and is left to the shared pattern.)
+    the per-screen state matrix, but it is not required and is left to the shared pattern.)
   - **`session_expired`** is **not** in this screen's matrix, because the first run begins on a just-established
     session. If a user lingers until the session expires and then attempts a follow/post, that authenticated
     action routes through the **one shared re-sign-in prompt** (state-patterns §1.6, `REQ-PROD-006`), owned by
@@ -3398,13 +3327,7 @@ IA's `REQ-UX-014` (which owns the *placement* decision that a new user lands on 
   (`SCR-home_timeline`), and the sign-up flow (`SCR-signup`) are their owners'.
 - **A missing component is flagged, never invented.** None was needed (§4). The suggested-account row is a
   composition of existing visual-system primitives; promoting it to a first-class component is a visual-system
-  decision for the synthesis gate, not an invention here.
-- **Hygiene.** All content above is repository-ready (identity `GITHUB_HYGIENE`): no host/system
-  detail, no run/agent ids, no attribution trailers; things named by repository identity
-  (`Nousix-LLC/nswe-demo` @ `c805525`) and by design-doc section.
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  output (state model), the sibling inputs (IA & interaction, visual system), and the product requirements. No
-  conclusion depends on bundle content that could not be loaded.
+  decision for resolution, not an invention here.
 
 ---
 
@@ -3510,7 +3433,7 @@ scroll beneath it. Composed entirely from existing visual-system components — 
 #### 5. States (each designed: copy intent + recovery)
 
 The required state matrix for this screen is `[loading, empty, error, end_of_list, validation]`
-(the frozen design contract (per-screen state matrix)). `content` (§4) is the loaded happy path. The **resting (pre-query)** state (§5.0)
+(the per-screen state matrix). `content` (§4) is the loaded happy path. The **resting (pre-query)** state (§5.0)
 is designed in addition, as the brief requires. Each state instantiates the shared state model and the
 shared copy/recovery conventions; copy below is **intent with concrete committed text**, not final
 microcopy.
@@ -3602,7 +3525,7 @@ message (nothing has been searched yet).
 | transient confirmations | Toast / inline alert §3.12 / §3.13 | e.g. follow failure reported by the shared control |
 
 No component required by this screen is missing from the visual system; nothing is invented. (Were one
-missing, it would be flagged for the synthesis gate, not hand-rolled.)
+missing, it would be flagged for resolution, not hand-rolled.)
 
 #### 7. Requirements (REQ-UX-050 .. REQ-UX-051)
 
@@ -3645,7 +3568,7 @@ someone who never met the author.
 - **Traces to:** REQ-PROD-024; J1, J5, J6 (instantiates the shared `loading`/`empty`/`error`/
   `end_of_list`/`validation` copy & recovery conventions).
 
-#### 8. Scope notes & assumptions (for the synthesis gate)
+#### 8. Scope notes & assumptions
 
 - **State coverage:** every state in this screen's matrix `[loading, empty, error, end_of_list,
   validation]` is designed with copy intent + a recovery affordance; `content` (§4) and the pre-query
@@ -3656,14 +3579,10 @@ someone who never met the author.
   session-expired behaviour is owned upstream. Recorded here so the omission is a decision, not a gap.
 - **Suggestions / who-to-follow (§5.0) is optional and capability-dependent:** plain query search is the
   core, releasable-shape design; a suggestions list depends on a product/domain capability and is
-  explicitly optional and non-gating. Flagged so the gate can confirm the dependency is tracked, not
-  assumed.
+  explicitly optional and non-gating. Recorded so the dependency is tracked, not assumed.
 - **Live-product starting point:** no search exists in the current product; this is net-new, consistent
   with the frozen screen inventory and the product requirements. No existing search behaviour was
   preserved because none exists.
-- **Methodology-loader limitation:** the design-methodology loader was unavailable at execution
-  the shared state model, the IA and visual-system dependency outputs, and the product requirements, per
-  the brief's fallback instruction. No methodology-specific checklist was applied beyond those inputs.
 - **What vs how:** this fragment specifies the surface, flow, states, copy intent, and the requirement
   bar only (wireframe-level + committed text). URL param shape, debounce timing, paging mechanism, and
   the search backend are implementation / responsive concerns deferred to their owners.
@@ -3681,7 +3600,7 @@ has **none** of them in the SPA: no settings, no way to edit a profile in-produc
 no API route), no data export, and no visible sign-out control. Absence here is the exact defect this work exists
 to prevent, so each screen below is designed to the bar of *designed screens, not a skeleton*: its content and
 layout intent at wireframe level, its happy-path flow, and **each state that applies to it** (per
-`the frozen design contract (per-screen state matrix)`) with concrete copy intent and a recovery affordance.
+the per-screen state matrix) with concrete copy intent and a recovery affordance.
 
 **What this fragment settles, and what it defers.**
 
@@ -3907,8 +3826,7 @@ rule without inventing a prompt for a user who is already leaving.
 ##### 6. Composition check — the area maps onto existing components (no gap)
 
 Every screen and state above is served by an existing `the visual language & design system` component and obeys an existing
-`the information architecture & interaction model` pattern; **no component is invented, and nothing is flagged to synthesis** (identity
-`COMPONENTS_CONSISTENT`).
+`the information architecture & interaction model` pattern; **no component is invented, and nothing is flagged**.
 
 | This fragment needs | Served by (visual-system) | Governed by (ia-interaction) |
 |---|---|---|
@@ -3927,7 +3845,7 @@ own composition check (`state-patterns` §3).
 
 ##### 7. Requirements & acceptance criteria — REQ-UX-052 .. REQ-UX-061
 
-Range owned by `the account & settings surfaces` per `the frozen design contract`. Each requirement is
+Range owned by `the account & settings surfaces`. Each requirement is
 stated from the user's side, is **testable by a stranger exercising the live product**, carries a `release_gating`
 flag, and traces to ≥1 `REQ-PROD-*` and/or journey. Mechanisms (auth/session, deletion authorization, export
 format) are deferred to `REQ-ID-*`/`REQ-DOM-*`/`REQ-OPS-*` and are **not** restated as UX requirements here.
@@ -4008,13 +3926,13 @@ format) are deferred to `REQ-ID-*`/`REQ-DOM-*`/`REQ-OPS-*` and are **not** resta
 | REQ-UX-061 | SCR-settings_home | true | REQ-PROD-029, 009; J7 |
 
 All ten ids are unique, fall within the owned `REQ-UX-052..061` sub-range, and lie within the parent
-`REQ-UX-020..069` range (identities `REQ_UX_UNIQUE_IN_SUBRANGE`, `REQ_UX_TESTABLE`).
+`REQ-UX-020..069` range.
 
 ---
 
-##### 8. Coverage & handoff notes (for the synthesis gate)
+##### 8. Coverage & handoff notes
 
-- **Screen coverage (identity `SCREEN_COVERAGE_LOCAL`).** All five owned screens are designed, each in exactly this
+- **Screen coverage.** All five owned screens are designed, each in exactly this
   fragment, with every state the matrix lists for it:
 
   | Screen | Required states (matrix) | Designed |
@@ -4027,13 +3945,13 @@ All ten ids are unique, fall within the owned `REQ-UX-052..061` sub-range, and l
 
   States recorded out-of-matrix are noted per screen with a reason (§§1–5); none required by the matrix was dropped.
 
-- **States designed, not skeletal (identity `STATES_DESIGNED_NOT_SKELETAL`).** Each applicable state above has
+- **States designed, not skeletal.** Each applicable state above has
   concrete copy intent and a named recovery affordance, instantiating the shared model in
   `the state model (empty, error & loading states)` §1 — not merely named.
 
-- **Components consistent (identity `COMPONENTS_CONSISTENT`).** Every screen is built from named `visual-system`
+- **Components consistent.** Every screen is built from named `visual-system`
   components and placed in the `ia-interaction` model (§6); no component was invented and **no gap was found to
-  flag**. Should the synthesis gate's assembly reveal a needed component the set lacks, it is reported, not invented.
+  flag**. Should the design reveal a needed component the set lacks, it is recorded, not invented.
 
 - **Boundaries kept (what, not how).** No front-end code; deletion semantics/authorization and session
   invalidation → `REQ-ID-*`; export format → `REQ-DOM-*`/`REQ-ID-*`; persistence/durable removal →
@@ -4042,16 +3960,8 @@ All ten ids are unique, fall within the owned `REQ-UX-052..061` sub-range, and l
 
 - **Seams to siblings.** `SCR-signout` and the session-expiry prompt share the auth/transition behaviour owned by
   `the entry & auth surfaces` (the sign-in destination/return-to-intent) and the global state in
-  `the state model` (§1.6) — this fragment references, does not re-author, them. REQ-UX-060 is scoped to the
+  the state model (§1.6) — this fragment references, does not re-author, them. REQ-UX-060 is scoped to the
   account surfaces and traces REQ-PROD-006 without redefining REQ-UX-026/-016.
-
-- **Hygiene (identity `GITHUB_HYGIENE`).** All content here is repository-ready — no host/cluster/system detail, no
-  filesystem paths, no agent/DAG/run ids, no attribution trailers; things named by repository identity
-  (`Nousix-LLC/nswe-demo` @ `c805525`).
-
-- **Run limitation.** Authored without the `design`-domain methodology bundles (loader unavailable in this
-  (state model, IA & interaction, visual system), and the product requirements. No conclusion depends on bundle
-  content that could not be loaded.
 
 ---
 
@@ -4754,7 +4664,7 @@ honoured explicitly.
 
 The surface is built **only** from existing visual-system components and IA patterns; **no component is invented**,
 and the one data-dense need the brief flags (operator tables) is served by the reserved wide column plus existing
-rows/cards. Nothing is flagged for synthesis from this screen.
+rows/cards. Nothing is flagged for resolution from this screen.
 
 | Need on this screen | Existing component / token (named, not re-drawn) |
 |---|---|
@@ -4773,11 +4683,11 @@ rows/cards. Nothing is flagged for synthesis from this screen.
 | `success` | Toast (§3.12) + reconciled surface |
 | `error` on an action | Inline alert (§3.13) |
 
-This satisfies identity `COMPONENTS_CONSISTENT` for this screen.
+This satisfies the component-consistency requirement for this screen.
 
 #### 3.6 Deferrals (explicitly out of this screen's UX scope)
 
-Recorded so the deferral is honest, not silent (identity `ADMIN_LIGHT_AUTHZ_DEFERRED`):
+Recorded so the deferral is honest, not silent:
 
 - **Capability & authorization — deferred to `REQ-ID-*` / `REQ-OPS-*`.** *Whether* a person may open
   `SCR-admin_support`, *whether* they may look up or act, and *how* that is enforced are not designed here. The screen
@@ -4927,15 +4837,14 @@ release-gating-flagged, and traced to ≥1 `REQ-PROD-*` and a journey.
 ### 5. Open component requests & cross-area seams
 
 Everything in this fragment composes from existing visual-system components and IA patterns, with the following
-exceptions **surfaced for resolution, not invented or plugged** (identity `COMPONENTS_CONSISTENT`, "compose, don't
-invent"). None of these blocks release: each screen ships on a composable interim today-shape. These are carried up to
-the screens-level synthesis / visual-system owners for resolution.
+exceptions **surfaced for resolution, not invented or plugged** ("compose, don't invent"). None of these blocks release: each screen ships on a composable interim today-shape. These are carried up to
+the screens-level and visual-system owners for resolution.
 
 | # | Item | Raised by | Status & recommendation |
 |---|---|---|---|
 | D1 | **Single-select reason control** (report form) | SCR-report_block | The ideal control is a single-select option list / radio group; the visual system defines inputs, a textarea, a boolean toggle, and a segmented control, but **no radio-group/option-list component**. Interim composable shape: the **segmented control (§3.15)** for a short (≤4) reason set, used here so the screen is releasable now. **Recommend** adding a single-select option-list component to the visual system, or confirming the segmented control as the sanctioned shape for short single-selects. Non-blocking. |
 | D2 | **Mute glyph** | SCR-report_block | The icon inventory lists `report/flag` and `block` but **no mute glyph**. **Requested** as an addition so the mute item is not icon-less. Non-blocking. |
-| D3 | **Blocked/muted accounts management list** | SCR-report_block | A dedicated list for bulk management is a plausible **account-settings sibling surface**. Reversal is already reachable from the overflow, so this screen is complete without it; **noted** as a possible sibling, **not** invented here. Out of this subtree's scope. |
+| D3 | **Blocked/muted accounts management list** | SCR-report_block | A dedicated list for bulk management is a plausible **account-settings sibling surface**. Reversal is already reachable from the overflow, so this screen is complete without it; **noted** as a possible sibling, **not** invented here. Out of this design's scope. |
 | D4 | **Long-document table-of-contents / scroll-spy** | SCR-privacy_terms | The "On this page" index needs a way to list and anchor to sections. Anchored `font.h2` headings + the static "On this page" list meet the readable bar now; a persistent scroll-tracking contents nav is **absent** from the visual system. **Flagged** to add via amendment if a longer statement warrants it. Enhancement, non-blocking. |
 | D5 | **Consequence-copy ↔ enforcement reconciliation** (cross-area seam) | SCR-report_block | The user-facing consequence copy for **Block** and **Mute** states the meaning of these actions; its wording MUST be reconciled at build with the authoritative enforcement semantics owned by identity & trust (`REQ-ID-*`) so a stated consequence matches what the system actually does (honesty: a state never promises an effect the system does not deliver). This is a **reconciliation**, not a component gap or an invention — recorded as a cross-area seam. |
 
@@ -4970,8 +4879,7 @@ column, underlined links) with class hooks in the markup but no visual language 
 with no design system is judged as unfinished in the first minute; this section is the floor that
 prevents that.
 
-It is **design intent and values, not implementation**. Tokens are given as named values a later code
-DAG maps to CSS custom properties; components are given as anatomy + states + rules, not as markup or CSS.
+It is **design intent and values, not implementation**. Tokens are given as named values a later implementation maps to CSS custom properties; components are given as anatomy + states + rules, not as markup or CSS.
 "How" (the framework, the stylesheet, the class names) is deferred.
 
 **Boundaries to sibling sections** (so nothing is designed twice or left in a seam):
@@ -4988,13 +4896,9 @@ DAG maps to CSS custom properties; components are given as anatomy + states + ru
   the **IA & interaction** section. This section provides the *visual states* those patterns switch
   between (e.g. follow → following → busy; the confirm dialog).
 
-**Grounding & run limitation.** Grounded in `Nousix-LLC/nswe-demo` at `c805525` (the current SPA:
+**Grounding.** Grounded in `Nousix-LLC/nswe-demo` at `c805525` (the current SPA:
 timeline, compose+sign-in, profile; handle-only login; minimal CSS) and in the product requirements
-(journeys J1–J8, register `REQ-PROD-001..034`). The `design`-domain methodology loader (Experience
-Design / Product Strategy bundles) was **unavailable in this reconstructed run**; this section was
-authored from the task brief, the frozen the frozen experience seam, the parent id scheme, and the
-product requirements, per the subtree's recorded contingency. No conclusion here depends on bundle
-content that could not be loaded.
+(journeys J1–J8, register `REQ-PROD-001..034`).
 
 ---
 
@@ -5013,7 +4917,7 @@ principles, and every token and component below is justified by one of them:
 4. **Trustworthy and legible.** Comfortable contrast, clear hierarchy, predictable controls. Status is
    never carried by colour alone. Destructive actions look and feel distinct.
 5. **Consistent by construction.** Screens assemble from this library; they do not invent one-off
-   components or states. Consistency is the bar the synthesis gate checks screens against (§5).
+   components or states. Consistency is the bar every screen is held to (§5).
 
 ---
 
@@ -5111,7 +5015,7 @@ Defaults: card/dialog padding `space.4`; stack gap between chirps `space.0` (div
 
 ##### 2.5 Elevation & overlay
 
-Expressed as intent (soft, neutral, low-opacity shadows); exact shadow values are the code DAG's to map.
+Expressed as intent (soft, neutral, low-opacity shadows); exact shadow values are the implementation's to map.
 
 | Token | Intent | Used by |
 |---|---|---|
@@ -5164,7 +5068,7 @@ for the first releasable version — captured as the non-gating REQ-UX-089.
 Every component is given as **purpose · variants · anatomy · states · tokens · usage**. Components are
 built only from §2 tokens — no raw values. Where a component already has a class hook in today's markup
 (e.g. `chirp`, `chirp-author`, `chirp-follow-button`, `banner`), the system *re-skins the existing hook*
-rather than inventing parallel markup — a migration convenience for the code DAG, not a design
+rather than inventing parallel markup — a migration convenience for the implementation, not a design
 dependency.
 
 ##### 3.0 The shared interaction-state model
@@ -5364,8 +5268,7 @@ block — mapped explicitly in §4.
 
 #### 4. State vocabulary → component mapping
 
-Every state in the state vocabulary has a defined rendering here, so `SCREEN_COVERAGE`
-and `STATES_DESIGNED_NOT_SKELETAL` can be checked mechanically:
+Every state in the state vocabulary has a defined rendering here, so screen coverage and completeness can be checked mechanically:
 
 | Seam state | Rendered by |
 |---|---|
@@ -5382,10 +5285,10 @@ and `STATES_DESIGNED_NOT_SKELETAL` can be checked mechanically:
 
 ---
 
-#### 5. Usage & consistency rules — the bar the synthesis gate checks screens against
+#### 5. Usage & consistency rules — the bar every screen is held to
 
 A screen is consistent with this system when all of the following hold. This is the checklist the
-synthesis gate (and the screens & flows section) can hold any screen to (maps `COMPONENTS_CONSISTENT`):
+screens & flows section can hold any screen to (the component-consistency requirement):
 
 1. **Tokens, not raw values.** Every colour, size, space, radius, and shadow on the screen comes from a
    §2 token; no ad-hoc hex/px.
@@ -5661,7 +5564,7 @@ thumb and an on-screen keyboard. It is the bridge between the *static* design (t
 the design tokens) and a product someone can actually use on the device in their hand.
 
 It is **design intent and rules, not implementation**. Breakpoints are given as named tiers with
-viewport ranges a code DAG maps to media/container queries; reflow is given as behaviour and layout
+viewport ranges an implementation maps to media/container queries; reflow is given as behaviour and layout
 intent, not as CSS. "How" (the framework, the stylesheet, the query syntax) is deferred.
 
 **Boundaries to sibling sections** (so nothing is designed twice or left in a seam):
@@ -5683,15 +5586,11 @@ intent, not as CSS. "How" (the framework, the stylesheet, the query syntax) is d
   section states the responsive/touch *intent* (44px targets, keyboard-aware forms, touch equivalents
   for hover-only affordances) and flags each item that section verifies; it does not own the audit.
 
-**Grounding & run limitation.** Grounded in `Nousix-LLC/nswe-demo` at `c805525`: the current SPA renders
+**Grounding.** Grounded in `Nousix-LLC/nswe-demo` at `c805525`: the current SPA renders
 a **single fixed ~40rem column** with a two-link text nav (`Timeline · Compose`) and **no breakpoints**
 — it does not adapt to the viewport, so on a phone the fixed column and text-link nav are cramped and on
 a wide display the content neither centres as a calm column nor uses the extra space. The current layout
-is the **starting point to improve, not a target to preserve**. The `design`-domain methodology loader
-(Experience Design bundle) was **unavailable in this reconstructed run**; this section was authored from
-the task brief, the frozen the frozen experience seam, the parent id scheme, the product
-requirements, and the completed IA & visual-system dependency outputs, per the subtree's recorded
-contingency. No conclusion here depends on bundle content that could not be loaded.
+is the **starting point to improve, not a target to preserve**.
 
 ---
 
@@ -5735,7 +5634,7 @@ device classes.
 Notes:
 
 - The ranges are **inclusive-exclusive and contiguous** (no gap, no overlap): Compact `[0,640)`, Medium
-  `[640,1024)`, Expanded `[1024,1280)`, Wide `[1280,∞)`. A code DAG maps these to breakpoints; the exact
+  `[640,1024)`, Expanded `[1024,1280)`, Wide `[1280,∞)`. An implementation maps these to breakpoints; the exact
   query mechanism is deferred.
 - **Compact is the baseline**, not a special case: the design is authored at Compact and the wider tiers
   are progressive enhancements over it.
@@ -5925,14 +5824,14 @@ single column and never forces horizontal scroll).
   avatar scales with them; any chirp body media (future) is constrained to the column width and never
   overflows or introduces horizontal scroll (REQ-UX-102).
 
-##### 4.12 Coverage check (for the synthesis gate)
+##### 4.12 Coverage check
 
 Every inventory surface is covered by a rule above: landing/home timeline (§4.1), profile (§4.2),
 compose (§4.3), sign-up/sign-in/recovery/edit-profile/report/export forms (§4.4), settings home +
 deletion/export sub-pages (§4.5), modals/dialogs (§4.6), chirp thread (§4.7, conditional), onboarding
 (§4.8), search (§4.9), admin/support (§4.10), privacy/terms + sign-out + media (§4.11). **No screen is
 left without a responsive rule, and no screen or state could not be served by the reflow approach** — so
-nothing is reported to synthesis as a responsive gap. The screen inventory, state vocabulary, and id
+nothing is flagged as a responsive gap. The screen inventory, state vocabulary, and id
 scheme are used as frozen and not redefined.
 
 ---
@@ -5969,9 +5868,9 @@ accessibility section verifies conformance against the stated WCAG level):
 
 ---
 
-#### 6. Handoff notes (for synthesis and sibling sections)
+#### 6. Handoff notes (for sibling sections)
 
-- **For the synthesis gate:** this section covers every screen in the inventory (§4.12), composes against
+- **Coverage:** this section covers every screen in the inventory (§4.12), composes against
   the IA navigation model and the visual-system `layout.*` tokens and components without redefining them,
   and mints REQ-UX only within `REQ-UX-090..104`. No responsive gap was found; none is reported.
 - **For the accessibility section (verify):** the 44px touch-target application (§5) against the stated
@@ -6139,7 +6038,7 @@ The section does four things:
 
 **It is design intent and testable requirements, not implementation.** Where it names ARIA roles,
 name/role/value, live regions, or landmarks, these are *required behaviours from an assistive-technology
-user's side* — the mechanism (framework, component code, exact attributes) is a later code DAG's.
+user's side* — the mechanism (framework, component code, exact attributes) is a later implementation's.
 
 **Boundaries to sibling sections** (so nothing is designed twice or left in a seam):
 
@@ -6161,14 +6060,10 @@ user's side* — the mechanism (framework, component code, exact attributes) is 
   resize-text* conformance requirements (WCAG 1.4.10, 1.4.4) the responsive strategy must satisfy; it does
   not fix the breakpoints.
 
-**Grounding & run limitation.** Grounded in `Nousix-LLC/nswe-demo` at `c805525` (the current SPA —
+**Grounding.** Grounded in `Nousix-LLC/nswe-demo` at `c805525` (the current SPA —
 timeline, compose+sign-in, profile; handle-only login; minimal inline CSS with class hooks but no semantic
 landmarks, no skip link, no managed focus, no live regions), in the product requirements (journeys J1–J8,
-register `REQ-PROD-001..034`), and in the two dependency outputs. The `design`-domain methodology loader
-(Experience Design bundle) was **unavailable in this reconstructed run**; this section was authored from the
-task brief, the frozen the frozen experience seam, the parent id scheme, the dependency outputs, and
-the published WCAG 2.1 specification, per the subtree's recorded contingency. No conclusion here depends on
-bundle content that could not be loaded. Contrast figures are computed from the WCAG 2.1 relative-luminance
+register `REQ-PROD-001..034`), and in the two dependency outputs. Contrast figures are computed from the WCAG 2.1 relative-luminance
 and contrast-ratio formulae (W3C WCAG 2.1 §§ *relative luminance*, *contrast ratio*) applied to the visual
 system's declared token values.
 
@@ -6403,7 +6298,7 @@ text (see §4.2). `accent.base` as *normal text* 3.00:1 — correctly never used
 already routes accent text to `accent.strong`).
 
 **Three required fixes** (token NAME stays stable; only the value darkens — per the visual system's handoff
-rule. These are reported to the synthesis gate as cross-section fixes the visual system owns; this section
+rule. These are flagged for resolution as cross-section fixes the visual system owns; this section
 does not edit the visual system):
 
 1. **`color.border` (1.44:1 → ≥ 3:1).** Where `color.border` is the **sole visual boundary of an essential
@@ -6420,7 +6315,7 @@ does not edit the visual system):
    as a two-tone indicator (§2.2).
 
 Until these three are fixed, the contrast requirement (REQ-UX-113) is **not met** and the visual system's
-REQ-UX-072 is only partially satisfied; the synthesis gate should treat them as release-gating remediations
+REQ-UX-072 is only partially satisfied; these should be treated as release-gating remediations
 on the gating screens.
 
 ##### 4.2 Information not conveyed by colour alone
@@ -6556,7 +6451,7 @@ operator-only surface is a recorded, lower-priority item (§7).
 | `SCR-privacy_terms` | yes | Reachable by keyboard in both nav states; correct heading structure for a long text document (2.4.6/1.3.1) so AT users can navigate sections; readable at 200% / reflow (§4.3). |
 | `SCR-admin_support` | yes (keyboard/labels/contrast/forms); deeper AT = recorded lower-priority | Operator lookup form labelled (§5); results table uses real table semantics (headers associated) so values are perceivable; moderation actions keyboard-operable and confirmed where destructive; monospace ids meet contrast. Kept light per the inventory note; full AT optimisation of the operator surface is a recorded follow-up (§7). |
 
-This table is the coverage evidence the synthesis gate's `SCREEN_COVERAGE` identity checks against: every
+This table is the coverage evidence the coverage requirement checks: every
 inventory screen is covered by the accessibility standard, or (for the three non-gating screens) covered to
 the same standard with its release-gating inherited from the screen.
 
@@ -6692,8 +6587,7 @@ fall within the owned range `REQ-UX-105..119`.
   `color.warning.base` darkened so white-on-fill ≥ 4.5:1 and icon ≥ 3:1 (or warnings use `warning.ink` on
   `warning.bg`); the focus ring drawn so it holds ≥ 3:1 on white, subtle, and accent-tinted backgrounds.
 - **Release gating:** true
-- **Traces to:** J1; REQ-PROD-014. Verifies/completes REQ-UX-072; reports fixes to the visual system via
-  synthesis. (WCAG 1.4.3, 1.4.11.)
+- **Traces to:** J1; REQ-PROD-014. Verifies/completes REQ-UX-072; reports fixes to the visual system. (WCAG 1.4.3, 1.4.11.)
 
 ###### REQ-UX-114 — Information is never conveyed by colour alone
 - **Statement:** Every status, selection, and state signal is conveyed by more than colour.
@@ -6751,7 +6645,7 @@ fall within the owned range `REQ-UX-105..119`.
 - **Acceptance criteria:** Every surface in the screen inventory is covered by the per-screen requirements
   in §6 and passes the §7.1 verification in its applicable states; no inventory screen is omitted; where a
   screen is recorded non-gating, its accessibility is still designed to AA and ships no dead or
-  inaccessible affordance. The §6 coverage table is the evidence the synthesis `SCREEN_COVERAGE` identity
+  inaccessible affordance. The §6 coverage table is the evidence the coverage requirement
   checks.
 - **Release gating:** true (for the gating screens; non-gating screens' a11y inherits their status — §7.2)
 - **Traces to:** J1–J8; REQ-PROD-009, REQ-PROD-014, REQ-PROD-015. (WCAG 2.1 AA applied per screen.)

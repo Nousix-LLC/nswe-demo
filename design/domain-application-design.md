@@ -226,7 +226,7 @@ read-only root and the `emptyDir` `/tmp`), so that the lifecycle of the data is 
 lifecycle of any one pod. This is what makes `REQ-DOM-012` true in operation and what makes more than one
 replica even conceivable. The **concrete store** (an embedded database on a persistent volume, or an
 external managed database), its provisioning, and its backups are a *how* owned by operational readiness
-and the implementing code DAG; this requirement fixes only that durable state must not be bound to a
+and the implementation; this requirement fixes only that durable state must not be bound to a
 single pod.
 
 ### 3.4 Consistency, atomicity, and concurrency
@@ -238,7 +238,7 @@ index, and account deletion's cascade — are applied so that a reader never obs
 disagrees with the edges, even under concurrent requests and even if the process fails mid-operation. The
 in-memory store gets this for free from one global `Mutex`; a durable store MUST provide the equivalent
 guarantee (a transaction, or equivalent atomic unit). The *mechanism* is deferred to the implementing
-code DAG; the *guarantee* is required here.
+implementation; the *guarantee* is required here.
 
 **REQ-DOM-016** — *The persistence seam is safe for concurrent access.* The `ChirpRepository` contract is
 already `Send + Sync` with `&self` methods and interior mutability, so the transport layer can share one
@@ -255,7 +255,7 @@ durable data outlives any one deployment, the design requires that the durable r
 defined schema version and that schema changes be applied through a repeatable migration path, so an
 upgrade does not lose or corrupt existing user data. This is where an architecture "how" (the migration
 tool, the DDL) is tempting: it is stated here as a **design requirement** and its mechanics are deferred
-to the `software`-domain engineering method and the implementing code DAG. (Trace `REQ-PROD-026`,
+to the engineering implementation. (Trace `REQ-PROD-026`,
 `REQ-PROD-034`.)
 
 ---
@@ -530,7 +530,7 @@ trace to `REQ-PROD-*`.
 #### REQ-DOM-022 — The durable schema is versioned with a forward migration path
 - **Statement:** The durable representation carries a defined schema version and schema changes are
   applied through a repeatable migration path, so upgrading the product does not lose or corrupt existing
-  user data. (The migration tooling and DDL are a `software`-domain "how", deferred.)
+  user data. (The migration tooling and DDL are an engineering "how", deferred.)
 - **Acceptance criteria:** The durable store declares an initial schema version; applying the documented
   migration path to a store holding data preserves that data and advances the version; a fresh deploy
   initialises the schema from empty. *(inspection; operational_check)*
@@ -624,7 +624,7 @@ trace to `REQ-PROD-*`.
 ### Deferred "how" (named here, built elsewhere)
 
 To keep this design to *what, not how*, the following are stated above as requirements and their
-implementation is deferred — to the `software`-domain engineering method and later code DAGs, or to the
+implementation is deferred — to engineering and later code work, or to the
 named sibling design area:
 
 - The **concrete durable store** (embedded DB on a volume vs. external database), its provisioning, its
@@ -633,6 +633,6 @@ named sibling design area:
 - The **authentication protocol**, **session lifetime/security**, **recovery flow**, **deletion/export
   authorization**, and **moderation role & tooling** → identity & trust (`REQ-ID-*`), composing with
   `REQ-DOM-005`, `REQ-DOM-006`, `REQ-DOM-009`, `REQ-DOM-010`, `REQ-DOM-011`, `REQ-DOM-020`.
-- The **migration tooling and DDL** → the implementing code DAG, realising `REQ-DOM-022`.
+- The **migration tooling and DDL** → the implementation, realising `REQ-DOM-022`.
 - All **screens and interaction** for sign-up, sign-out, account management, export, and moderation →
   experience design (`REQ-UX-*`), consuming the DTOs and endpoints fixed by `REQ-DOM-017`–`REQ-DOM-019`.

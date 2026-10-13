@@ -589,8 +589,7 @@ reproducibly and run from documented steps, and configured and operated from wha
 ### 2.1 Coverage of release-gating requirements by the bar
 
 Every release-gating `REQ-*` in the five concern designs is enforced by at least one `BAR-*` above. The map
-below is the evidence for contract identity `BAR_COVERS_GATING_REQS`; the inverse map (BAR → REQ) is the
-`references` list on each criterion and is the evidence for `BAR_TESTABLE`. Each `BAR-*` carries only real,
+below is the evidence that every release-gating requirement is covered by the bar; the inverse map (BAR → REQ) is the `references` list on each criterion and is the evidence that each criterion is testable. Each `BAR-*` carries only real,
 schema-conformant `REQ-*` ids in its `references` line.
 
 **REQ-PROD (gating: 001–021, 026–034):**
@@ -708,7 +707,7 @@ file happened to cover, so that an absence is a recorded decision rather than an
   consumer web app is expected to have is either enforced by a `BAR-*` (surfaces 1–5, 8–12, 14–15, 19–23,
   25–37) or recorded out of scope with a reason (6–7, 13, 16–18, 24, 38–42). There is no silent absence.
 - **The single largest gap between the current product and the bar is durable persistence** (surface 26,
-  BAR-019). The repository runs an in-memory store (`_GLOBAL.md` input facts), so on the live product today
+  BAR-019). The repository runs an in-memory store, so on the live product today
   accounts, chirps, follows, likes, and sessions do not survive a restart. This is a `usable_early`-stage
   criterion: chirp is not even *usable-early* until it is closed.
 - **The second structural gap is real identity**: today sign-in is handle-only and anyone who types a handle
@@ -727,7 +726,7 @@ file happened to cover, so that an absence is a recorded decision rather than an
 - The **delivery backlog** turns each `BAR-*` (and the `REQ-*` it references) into issues whose acceptance
   criteria cite them, grouped into epics that reach a *usable-early* product first and the full *releasable*
   bar after; the `stage` field is the natural cut line between the early epics and the rest.
-- The **synthesis gate** measures the live product at the pinned commit against each `BAR-*` using its named
+- **Release-readiness measurement** evaluates the live product at the pinned commit against each `BAR-*` using its named
   `verification_method`, records a `live_status` (met/partial/missing/not_applicable) per the traceability
   schema, and maps every gap to a filed issue — with the two `usable_early` structural gaps (durable
   persistence, real identity) expected to dominate the first measurement.

@@ -336,7 +336,6 @@ vocabulary (`manual_user_check` | `automated_test` | `inspection` | `operational
   authentication, session lifetime, recovery, deletion/export authorization → identity & trust
   (`REQ-ID-*`).
 
-
 ---
 
 ## backups_and_recovery
@@ -519,8 +518,7 @@ deterministic deploy rollback possible, and the rollback requirements below are 
   pruning the app to zero. An operator can demonstrate a rollback returns the service to health
   (`/healthz`, `REQ-DOM-021`) on the prior version. *(Hardening of the deploy/CD path this rollback relies
   on is tracked by follow-ups #23 (native k3s install path) and #24 (Argo CD least-privilege RBAC +
-  supply-chain) — referenced here for relevance; their placement across the areas is left to the synthesis
-  gate and not duplicated as a requirement here.)*
+  supply-chain) — referenced here for relevance; their placement across the areas is tracked on the delivery board and not duplicated as a requirement here.)*
 - **Release gating:** true
 - **Traces to:** `REQ-DOM-019`, `REQ-PROD-031`, `REQ-PROD-032`
 - **Verification method:** operational_check
@@ -545,7 +543,7 @@ deterministic deploy rollback possible, and the rollback requirements below are 
   data and advances the recorded schema version (`REQ-DOM-022`); deploying against an empty store
   initializes the schema cleanly; and a backup satisfying `REQ-OPS-020`/`REQ-OPS-021` is captured
   immediately before the migration runs and is restorable afterward. The migration *tooling and DDL* are a
-  `software`-domain how, deferred to the implementing code work.
+  engineering how, deferred to the implementing code work.
 - **Release gating:** true
 - **Traces to:** `REQ-DOM-022`, `REQ-PROD-026`, `REQ-PROD-034`
 - **Verification method:** operational_check
@@ -576,7 +574,6 @@ deterministic deploy rollback possible, and the rollback requirements below are 
 - **Verification method:** operational_check
 
 ---
-
 
 ---
 
@@ -820,7 +817,6 @@ implementation is deferred:
 | 047 | Limits configurable with documented defaults; `/healthz` + SPA exempt | true | REQ-DOM-019, REQ-PROD-034/030 | inspection |
 
 `REQ-OPS-048..059` are unused, reserved as amendment headroom within this area's allocated range.
-
 
 ---
 
@@ -1095,7 +1091,6 @@ thresholds, page anyone, or specify the status page. Those consume the signals d
   scope (`REQ-DOM-019`); the per-request correlation id (`REQ-OPS-068`) is the proportionate form of
   request-level traceability for one service.
 
-
 ---
 
 ## status_and_incident
@@ -1362,7 +1357,6 @@ recovery runbook) already require; the requirement is the testable bar, and thes
 work that makes meeting it durable. #25 is quality polish with no readiness consequence. Each remains a live
 board item; this section records *where each sits relative to the operational-readiness design*, consistent
 with the delivery backlog's own handling of the same issues.
-
 
 ---
 

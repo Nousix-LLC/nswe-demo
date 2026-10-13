@@ -11,7 +11,7 @@ register of testable `REQ-ID-*` requirements with their acceptance criteria and 
 It states **what must be true** — from the user's, operator's, and attacker's side — not how any of it is
 built. Every implementation "how" (the authentication protocol, session and token mechanics,
 cryptography, the rate-limiting mechanism, the storage schema) is stated here as a requirement with a
-testable bar and deferred, by prose, to later code work in the `software` domain and to the sibling design
+testable bar and deferred, by prose, to later code work in engineering and to the sibling design
 areas that own a mechanism — experience design (`REQ-UX-*`), domain & application design (`REQ-DOM-*`),
 and operational readiness (`REQ-OPS-*`).
 
@@ -49,10 +49,9 @@ accounts_and_lifecycle — a section of design/identity-security.md.
 The identity-side of the account as a thing that is created, lived in, and left.
 Consolidated requirements REQ-ID-001..017 across four surfaces: account creation & credential
 establishment, credential recovery, account deletion (semantics + honoured guarantee), and data export.
-Requirements only — the engineering "how" is deferred by prose to the areas and code DAGs that own it.
+Requirements only — the engineering "how" is deferred by prose to the areas and code work that own it.
 Intra-section couplings are resolved into explicit REQ-ID cross-references below; cross-section couplings
-to authentication_and_sessions / authorization / abuse_and_privacy_basics are carried forward for the
-identity & trust synthesis to resolve — they are NOT resolved here.
+to authentication_and_sessions / authorization / abuse_and_privacy_basics are carried forward for the identity & trust design to resolve — they are NOT resolved here.
 -->
 
 ### accounts_and_lifecycle
@@ -76,7 +75,7 @@ not hypothetical.
 operator's side, with acceptance criteria a person who never met the author can check against the live
 product, a `release_gating` flag, and a trace to at least one `REQ-PROD-*`. No requirement chooses a
 library, protocol, token format, export serialization, or erasure mechanism; each such "how" is deferred by
-prose to the section or the code DAGs (`software` domain) that own it.
+prose to the section or the engineering implementation that owns it.
 
 **What this section defers to sibling identity & trust sections (carried forward, not resolved here):**
 
@@ -90,7 +89,7 @@ prose to the section or the code DAGs (`software` domain) that own it.
   mechanism-side requirement; the right is referenced.
 - The **screens** (sign-up, recovery-entry, deletion confirmation, export control) are experience design
   (`REQ-UX-*`); the **durable-removal operational proof** is operational readiness (`REQ-OPS-*`); the
-  export **format internals** and erasure **mechanics** are code DAGs (`software` domain) / domain design
+  export **format internals** and erasure **mechanics** are the engineering implementation / domain design
   (`REQ-DOM-*`). Each is named at the point it applies.
 
 ---
@@ -118,7 +117,7 @@ account's life the thing that proves ownership is that credential, never the pub
 - **Release gating:** true
 - **Traceability:** REQ-PROD-001, REQ-PROD-004; journeys J2 (sign-up), J3 (sign-in). Credential verification
   & session issuance → `authentication_and_sessions` (`REQ-ID-020..039`); credential storage/verification
-  "how" → `software` domain.
+  "how" → engineering.
 - **Resolved intra-section cross-references:** re-established by recovery — **REQ-ID-006**, **REQ-ID-008**;
   removed by deletion — **REQ-ID-012**, **REQ-ID-005**.
 
@@ -336,12 +335,12 @@ As the product stands today there is **no account-deletion capability anywhere**
   count it as a follower; and likes made by the account are no longer shown or counted. Each of these is
   checkable, by a person who never met the author, against the live product after a deletion. *(This
   requirement states the user-observable scope of removal; the erasure **mechanics** — the cascade
-  implementation and how references from other users' content are handled — are deferred to later code DAGs in
-  the `software` domain and to domain & application design, `REQ-DOM-*`.)*
+  implementation and how references from other users' content are handled — are deferred to later code work in
+  engineering and to domain & application design, `REQ-DOM-*`.)*
 - **Release gating:** true — a deletion that leaves the user's account or content still present and reachable
   has not deleted the account.
 - **Traceability:** REQ-PROD-010 (what deletion removes), REQ-PROD-012 (personal data gone); J7. Erasure
-  **mechanics** → `software`-domain code DAGs / domain & application design (`REQ-DOM-*`).
+  **mechanics** → the engineering implementation / domain & application design (`REQ-DOM-*`).
 - **Resolved intra-section cross-references:** removes the bound account and the credential established at
   creation — **REQ-ID-005**, **REQ-ID-001**; removes the same personal-data inventory that export takes out —
   **REQ-ID-015**.
@@ -390,7 +389,7 @@ lifecycle: a signed-in user can request and obtain **their own data** — their 
 follow list, and their likes — in a usable, portable, documented, machine-readable form they can download and
 open outside chirp. It states what a user can take out and in what shape, as requirements from the user's
 side — not how the export is serialized, scheduled, or delivered. In the product as it stands, **no
-data-export capability exists**. The export format internals are deferred to code DAGs (`software` domain) and
+data-export capability exists**. The export format internals are deferred to the engineering implementation and
 domain design (`REQ-DOM-*`); the export control/screen to experience design (`REQ-UX-*`); and the *data-right*
 this capability satisfies is owned by `abuse_and_privacy_basics` (referenced, not decided here).
 
@@ -429,7 +428,7 @@ this capability satisfies is owned by `abuse_and_privacy_basics` (referenced, no
      it using only the export and its documentation.
 - **Release gating:** true
 - **Traceability:** REQ-PROD-011 (usable, portable, documented, machine-readable, openable outside chirp);
-  journey J7. Export **format internals / schema / serialization** → code DAGs (`software` domain) and domain
+  journey J7. Export **format internals / schema / serialization** → the engineering implementation and domain
   & application design (`REQ-DOM-*`) — this requirement fixes the properties the result must have, not the
   encoding.
 
@@ -450,7 +449,7 @@ this capability satisfies is owned by `abuse_and_privacy_basics` (referenced, no
 - **Traceability:** REQ-PROD-011 (export of **their own** data); journey J7. The authority of who-may-export
   (ordinary owner here; any operator/admin-on-behalf authority) → `authorization` (`REQ-ID-040..059`),
   referenced in prose; the data-right this mechanism satisfies → `abuse_and_privacy_basics`
-  (`REQ-ID-060..079`), carried forward for the identity & trust synthesis.
+  (`REQ-ID-060..079`), carried forward for the identity & trust design.
 
 ---
 
@@ -474,10 +473,10 @@ above):
 4. **Deletion and export are the two "leaving" controls in one account-management home** (REQ-PROD-009).
    → **REQ-ID-010 ↔ REQ-ID-015**.
 
-#### Cross-section couplings (carried forward — resolved by the identity & trust synthesis, not here)
+#### Cross-section couplings (carried forward — resolved in the identity & trust design, not here)
 
 These couplings join this section to sibling identity & trust sections. They are stated here in prose, naming
-the owning section; this section does **not** resolve them — the identity & trust synthesis resolves each into
+the owning section; this section does **not** resolve them — the identity & trust design resolves each into
 an explicit `REQ-ID ↔ REQ-ID` cross-reference once all sections are assembled.
 
 - **Recovery must not become an authentication bypass.** REQ-ID-007 (and the access-supersession part of
@@ -491,7 +490,7 @@ an explicit `REQ-ID ↔ REQ-ID` cross-reference once all sections are assembled.
 - **Data export / erasure: mechanism vs. the data-right it satisfies.** REQ-ID-015 and REQ-ID-017 (export),
   together with the erasure in REQ-ID-012 (deletion), are the *mechanism* by which a user exercises a **data
   right** owned by `abuse_and_privacy_basics` (`REQ-ID-060..079`). The requirement here and the right there
-  describe the same promise from two sides and must be reconciled by the identity & trust synthesis.
+  describe the same promise from two sides and must be reconciled in the identity & trust design.
 
 ---
 
@@ -531,14 +530,13 @@ cross-reference, so no new requirement is warranted.*
 ### authentication_and_sessions
 
 This section defines what **"real authentication, not a stub"** must mean for chirp, and what makes a
-**session safe to expose on the public internet**. It is the identity bar for the whole identity-and-trust
-subtree: a releasable chirp proves who a signer is before letting them act, keeps that proof alive safely
+**session safe to expose on the public internet**. It is the identity bar for the whole identity-and-trust design: a releasable chirp proves who a signer is before letting them act, keeps that proof alive safely
 while they use the product, and ends it cleanly and visibly when they leave.
 
 Everything here is a **requirement** — what must be true from the user's and the attacker's side — not a
 design for how it is built. No authentication protocol, credential format, cryptographic primitive, or
-session-store technology is named; those "how" decisions belong to later code work in the `software` domain
-and are reached by prose below. Requirements carry `REQ-ID-020 .. REQ-ID-039`, owned by this spoke.
+session-store technology is named; those "how" decisions belong to later code work in engineering
+and are reached by prose below. Requirements carry `REQ-ID-020 .. REQ-ID-039`, owned by this section.
 
 #### What the product does today, and the gap this closes
 
@@ -571,25 +569,25 @@ requirements' out-of-scope on multi-tenancy). Against that product kind:
   there are organizations whose identity provider should govern sign-in; chirp has none. The condition that
   would bring it back is the same condition that would reintroduce tenancy.
 
-#### Couplings to resolve in synthesis
+#### Cross-section couplings to resolve
 
-Two couplings from the subtree coupling register are owned jointly by this spoke; stated here in prose for
+Two couplings from the design's cross-section coupling list are owned jointly by this section; stated here in prose for
 the section-assembly step to turn into explicit `REQ-ID ↔ REQ-ID` cross-references:
 
 1. **Recovery must not become an authentication bypass.** The recovery *lifecycle* is owned by
-   the accounts & lifecycle section (`REQ-ID-001..019`). This spoke owns *what recovery must re-prove and must
+   the accounts & lifecycle section (`REQ-ID-001..019`). This section owns *what recovery must re-prove and must
    invalidate* — `REQ-ID-037` (with `REQ-ID-024` on never revealing a credential and `REQ-ID-032` on
-   invalidating existing sessions). Synthesis links `REQ-ID-037` to the accounts-lifecycle recovery
+   invalidating existing sessions). The design links `REQ-ID-037` to the accounts-lifecycle recovery
    requirement.
-2. **Public-internet session safety depends on an authorization check on every mutating action.** This spoke
+2. **Public-internet session safety depends on an authorization check on every mutating action.** This section
    owns *that a valid session is required and what its scope is* — `REQ-ID-034`. The per-action *authority*
-   model (who may act on what) is owned by the authorization section (`REQ-ID-040..059`). Synthesis links `REQ-ID-034`
+   model (who may act on what) is owned by the authorization section (`REQ-ID-040..059`). The design links `REQ-ID-034`
    to the authz per-action-authorization requirement.
 
 A third, lighter coupling: credential-guessing resistance (`REQ-ID-023`) relies on the baseline rate/volume
 limits owned by the abuse & privacy section (`REQ-ID-060..079`); and step-up re-authentication for destructive
 actions (`REQ-ID-025`) references account deletion, owned by the accounts & lifecycle section and authorized by
-the authorization section. These are noted for synthesis to cross-reference.
+the authorization section. These are noted for cross-referencing in the design.
 
 ---
 
@@ -656,7 +654,7 @@ the authorization section. These are noted for synthesis to cross-reference.
   who obtains an unlocked signed-in session but not the credential cannot complete these actions.
 - **Release gating:** true
 - **Traces to:** REQ-PROD-004. (Account deletion is owned by the accounts & lifecycle section; the authority to
-  delete by the authorization section — synthesis cross-references.)
+  delete by the authorization section — cross-referenced in the design.)
 
 ---
 
@@ -752,7 +750,7 @@ the authorization section. These are noted for synthesis to cross-reference.
   resources. A logged-out visitor can still read the public timeline and open public profiles.
 - **Release gating:** true
 - **Traces to:** REQ-PROD-004, REQ-PROD-006. (Also supports REQ-PROD-013 "reading never requires an
-  account." The per-action *authority* model is owned by the authorization section, `REQ-ID-040..059` — synthesis
+  account." The per-action *authority* model is owned by the authorization section, `REQ-ID-040..059` — cross-referenced in the design
   cross-references this requirement to it.)
 
 ##### REQ-ID-035 — Sessions survive normal operation, or end visibly — never silently
@@ -766,7 +764,7 @@ the authorization section. These are noted for synthesis to cross-reference.
   vanish on restart with no notice; this requirement removes that silent failure.)
 - **Release gating:** true
 - **Traces to:** REQ-PROD-006. (Durable session continuity depends on durable data, owned by
-  the operational-readiness design / domain design, enforcing REQ-PROD-026 — synthesis cross-references.)
+  the operational-readiness design / domain design, enforcing REQ-PROD-026 — cross-referenced in the design.)
 
 ##### REQ-ID-036 — A user can see and end their own active sessions
 - **Statement:** A signed-in user SHOULD be able to see that their account has one or more active sessions and
@@ -797,7 +795,7 @@ the authorization section. These are noted for synthesis to cross-reference.
   must have a safe way back, and that way must not become the weakest link.
 - **Traces to:** REQ-PROD-007, REQ-PROD-004. (The recovery *lifecycle/flow* is owned by
   the accounts & lifecycle section, `REQ-ID-001..019`; this requirement is the authentication constraint on it —
-  synthesis cross-references the two.)
+  cross-referenced in the design.)
 
 ##### REQ-ID-038 — Multi-factor authentication: deferred, not precluded
 - **Statement:** A second authentication factor (MFA) is **not required** for the first release bar of this
@@ -834,7 +832,7 @@ bounded, fixation-resistant sessions; no silent sign-out; truthful state; delibe
 invalidation; scoped authority; continuity across operations; and owner-visible session control).
 `REQ-ID-037` ties recovery to authentication without creating a bypass. `REQ-ID-038..039` record the MFA and
 SSO scoping decisions with reasons and revisit conditions. Every requirement states *what must be true* and
-defers *how* to later `software`-domain code work. Couplings to the accounts & lifecycle section, the authorization section,
+defers *how* to later engineering code work. Couplings to the accounts & lifecycle section, the authorization section,
 and the abuse & privacy section are called out above for the section-assembly step to resolve into explicit `REQ-ID`
 cross-references.
 
@@ -854,7 +852,7 @@ This section defines chirp's **authority model**: who each actor is, and **what 
 change**. It states the authorization requirements as testable `REQ-ID-*` requirements — *what must be
 true* from the acting user's or operator's side — and deliberately **defers the "how"** (policy-check
 placement, middleware, how roles are stored and assigned, how a decision is computed) to later
-implementation work in the `software` domain.
+implementation work in engineering.
 
 **Grounding.** Today chirp has **no authorization model at all**: identity is handle-only (anyone who
 types a handle becomes that account — see `authentication_and_sessions`), there are **no roles**, and
@@ -890,7 +888,7 @@ support. These roles are defined for a **single shared consumer product**; organ
 roles are explicitly out of scope (§F).
 
 The authority to act is the only thing settled here. The *mechanism* by which a decision is enforced on
-every request — and the *way* roles are assigned — is a `software`-domain concern.
+every request — and the *way* roles are assigned — is an engineering concern.
 
 ---
 
@@ -900,7 +898,7 @@ every request — and the *way* roles are assigned — is a `software`-domain co
 - **Statement:** A signed-in user may create, edit, or delete only resources that belong to their own account — their own chirps, their own profile, and their own account — and may not create, edit, or delete another account's content, profile, or account.
 - **Acceptance criteria:** With real authentication in place, a person signed in as user A cannot, through the web UI **or** by calling the API directly, edit or delete a chirp authored by user B, edit B's profile, or delete B's account; every such attempt is refused and changes nothing. The same person can edit and delete their own chirps and edit their own profile.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004, REQ-PROD-010; persona P3; journeys J3, J5, J7. Enforcement mechanism → `software` domain.
+- **Traceability:** REQ-PROD-004, REQ-PROD-010; persona P3; journeys J3, J5, J7. Enforcement mechanism → engineering.
 
 ##### REQ-ID-041 — Every action is attributed to, and authorized against, the actor's own identity (no acting-as-another)
 - **Statement:** Every state-changing action a user takes is attributed to, and authorized against, the identity of the account whose session performed it; a user cannot post, follow, like, edit, or delete in a way that is attributed to or performed as another account.
@@ -912,25 +910,25 @@ every request — and the *way* roles are assigned — is a `software`-domain co
 - **Statement:** Following/unfollowing and liking/unliking are authorized as changes to the acting user's own relationships; a user cannot create or remove follows or likes that belong to another account.
 - **Acceptance criteria:** A person signed in as A can follow/unfollow accounts and like/unlike chirps as A, and these change only A's own following set and A's own likes; no UI or direct API call lets A add or remove a follow or like on behalf of account B.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004; persona P3; journey J5. Enforcement mechanism → `software` domain.
+- **Traceability:** REQ-PROD-004; persona P3; journey J5. Enforcement mechanism → engineering.
 
 ##### REQ-ID-043 — Only the account owner (or an authorized administrator) may delete an account
 - **Statement:** The authority to delete an account rests with the account's owner, and with an authorized operator/administrator acting through the provided surface; no other principal may delete an account.
 - **Acceptance criteria:** A signed-in user can initiate deletion of **their own** account; a user cannot initiate deletion of another account; an unauthenticated request cannot delete any account. An authorized administrator can delete an account through the operator surface. Each unauthorized attempt is refused and removes nothing. (What deletion removes and the guarantee it is honoured are owned by the accounts & lifecycle requirements.)
 - **Release gating:** true
-- **Traceability:** REQ-PROD-010, REQ-PROD-012; persona P3; journey J7. Deletion semantics & guarantee → `accounts_and_lifecycle`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-010, REQ-PROD-012; persona P3; journey J7. Deletion semantics & guarantee → `accounts_and_lifecycle`; enforcement → engineering.
 
 ##### REQ-ID-044 — Only the account owner (or an authorized administrator on the owner's behalf) may export an account's data
 - **Statement:** The authority to export an account's data rests with the account's owner, and with an authorized administrator acting on the owner's behalf through the provided surface; one user cannot export another user's data.
 - **Acceptance criteria:** A signed-in user can request an export of **their own** data and obtains only their own account's data; a user cannot obtain another account's export; an unauthenticated request obtains no export. Each unauthorized attempt is refused and discloses nothing.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-011; persona P3; journey J7. Export mechanism/shape → `accounts_and_lifecycle`; the data-right it satisfies → `abuse_and_privacy_basics`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-011; persona P3; journey J7. Export mechanism/shape → `accounts_and_lifecycle`; the data-right it satisfies → `abuse_and_privacy_basics`; enforcement → engineering.
 
 ##### REQ-ID-045 — Holding an account grants ownership-scoped authority only (no elevated authority by default)
 - **Statement:** Creating or signing into an ordinary account grants ownership-scoped authority only; it never grants moderator or operator/administrator authority. Elevated authority exists only where it has been explicitly assigned.
 - **Acceptance criteria:** A freshly created, ordinary signed-in account cannot remove another user's chirp, suspend another account, or look up another account through an operator surface; each such attempt is refused. Elevated actions succeed only for an account that has been explicitly granted the corresponding elevated authority.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004, REQ-PROD-033; security baseline for a public product. Role assignment mechanism → `software` domain.
+- **Traceability:** REQ-PROD-004, REQ-PROD-033; security baseline for a public product. Role assignment mechanism → engineering.
 
 ---
 
@@ -946,37 +944,37 @@ every request — and the *way* roles are assigned — is a `software`-domain co
 - **Statement:** A principal holding moderator authority may act on abusive content and accounts across the product — remove or hide a chirp, and suspend, restore, or remove an account — and the effect of the action is visible to users.
 - **Acceptance criteria:** An account **without** moderator authority cannot remove another user's chirp or suspend another account (the action is refused); an account **with** moderator authority can, and after it acts the removed/hidden chirp no longer appears to users and a suspended account is treated as acted-upon. (The user-facing report/block capability and the exact presentation of the effect are owned by `abuse_and_privacy_basics`.)
 - **Release gating:** true
-- **Traceability:** REQ-PROD-028; the absent moderator persona; journey J8. Capability & visible effect → `abuse_and_privacy_basics`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-028; the absent moderator persona; journey J8. Capability & visible effect → `abuse_and_privacy_basics`; enforcement → engineering.
 
 ##### REQ-ID-048 — Operator/administrator support-lookup and account-administration authority
 - **Statement:** A principal holding operator/administrator authority may look up an account and see the information needed to answer a support request, and may perform account-administration actions through a provided operator surface rather than by manipulating storage directly.
 - **Acceptance criteria:** An account **without** operator authority cannot look up another account through the operator surface (the attempt is refused); an account **with** operator authority can look up an account by its handle/identifier and see the support-relevant fields sufficient to answer requests such as "my account is gone" or "I can't sign in," performed through the provided surface. The lookup never exposes the account's credential.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-033; persona P4; journey J8. The privacy limit on *what* support may see → `abuse_and_privacy_basics`; operator surface → `operational_readiness`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-033; persona P4; journey J8. The privacy limit on *what* support may see → `abuse_and_privacy_basics`; operator surface → `operational_readiness`; enforcement → engineering.
 
 ##### REQ-ID-049 — Elevated authority is least-privilege: no impersonation, no over-reach, no credential access
 - **Statement:** Elevated authority is bounded. No elevated role may impersonate a user (perform an action attributed to a user's account), read a user's personal data beyond what the specific moderation or support action requires, or read or recover any account's credential.
 - **Acceptance criteria:** No moderator or operator/administrator action can produce a chirp, follow, or like attributed to a user as its author; content acted on via moderation is never re-attributed to an operator as the author. An elevated lookup returns only the information the support/moderation action needs and never returns a credential. An attempt by an elevated principal to view personal data unrelated to a legitimate action is refused.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004, REQ-PROD-028, REQ-PROD-033; persona P4. The scope of "personal data support may see" → `abuse_and_privacy_basics`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-004, REQ-PROD-028, REQ-PROD-033; persona P4. The scope of "personal data support may see" → `abuse_and_privacy_basics`; enforcement → engineering.
 
 ##### REQ-ID-050 — Elevated actions are attributable to an identified elevated principal
 - **Statement:** Every moderation or administration action is performed under, and attributable to, a distinct, identified elevated principal — not an anonymous, shared, or un-attributed "god mode."
 - **Acceptance criteria:** For any moderation or admin action that has taken effect (a removed chirp, a suspended account, a support lookup), it is possible to determine which elevated principal performed it; elevated actions cannot be performed by an unidentified or shared super-user with no attributable identity.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-028, REQ-PROD-033; persona P4; trust baseline for elevated power over user data. *A richer, reviewable action history (an audit trail an operator can browse and review over time) is a real improvement beyond this attribution baseline and is recorded as a non-gating enhancement, not a release blocker.* Recording mechanism → `software` domain / `operational_readiness`.
+- **Traceability:** REQ-PROD-028, REQ-PROD-033; persona P4; trust baseline for elevated power over user data. *A richer, reviewable action history (an audit trail an operator can browse and review over time) is a real improvement beyond this attribution baseline and is recorded as a non-gating enhancement, not a release blocker.* Recording mechanism → engineering / `operational_readiness`.
 
 ##### REQ-ID-051 — Elevated authority is explicitly assigned, revocable, and minimal
 - **Statement:** A principal holds an elevated authority only by explicit assignment; the assignment can be removed; and the number of principals holding elevated authority is kept to the minimum needed to operate the product.
 - **Acceptance criteria:** There is a defined way (even if operational rather than in-product, for a first release) to grant and to remove moderator and operator/administrator authority; after an assignment is removed, the former holder can no longer perform the corresponding elevated actions; an ordinary account that was never assigned an elevated authority holds none.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-033; persona P4; least-privilege baseline. Assignment/revocation mechanism → `software` domain / `operational_readiness`.
+- **Traceability:** REQ-PROD-033; persona P4; least-privilege baseline. Assignment/revocation mechanism → engineering / `operational_readiness`.
 
 ##### REQ-ID-052 — An account acted on by moderation loses authority consistent with the action
 - **Statement:** When moderation suspends or removes an account, that account's authority is curtailed consistent with the action: a suspended or removed account cannot authenticate or perform mutating actions while in that state, enforced on the server.
 - **Acceptance criteria:** After an account is suspended or removed by an authorized moderator, attempts to sign in as, or act as, that account are refused server-side (not merely hidden in the UI); a restored account regains its ordinary authority. This holds whether the action is attempted through the web UI or directly against the API.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-028, REQ-PROD-012; the absent moderator persona; journey J8. The user-visible effect of moderation → `abuse_and_privacy_basics`; durable effect across restart → `operational_readiness`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-028, REQ-PROD-012; the absent moderator persona; journey J8. The user-visible effect of moderation → `abuse_and_privacy_basics`; durable effect across restart → `operational_readiness`; enforcement → engineering.
 
 ---
 
@@ -989,7 +987,7 @@ C: the role model only means something if it is checked, on the server, on every
 - **Statement:** Every state-changing action is authorized on the server against the acting principal's identity and its specific authority for the target resource. Authorization is never enforced by the client alone, and cannot be bypassed by calling the API directly.
 - **Acceptance criteria:** For a representative set of mutating actions (post, edit, delete chirp; edit profile; follow/unfollow; like/unlike; delete account; export; each elevated action), an unauthorized attempt made **directly against the API** — bypassing the web UI — is refused exactly as it is in the UI; no mutating action succeeds merely because the client allowed it.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004, REQ-PROD-013; personas P3, P4. Depends on safe sessions from `authentication_and_sessions`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-004, REQ-PROD-013; personas P3, P4. Depends on safe sessions from `authentication_and_sessions`; enforcement → engineering.
 
 ##### REQ-ID-054 — Public reads are explicitly allowed without a session
 - **Statement:** Reading public content — the public/home timeline, public profiles, and public chirps — requires no account and no session. The authorization model's default-deny applies to mutating actions, not to public reads.
@@ -1001,53 +999,52 @@ C: the role model only means something if it is checked, on the server, on every
 - **Statement:** Any state-changing request that does not carry a granting authority — no valid session, or a session that lacks the required ownership or elevated authority for the target — is denied, not silently allowed, partially applied, or ignored.
 - **Acceptance criteria:** A mutating request with no session, an expired/invalid session, or a session lacking the required authority results in a clear refusal and no change to any data; there is no action that "falls open" to success when its authority cannot be established.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004, REQ-PROD-013; personas P3, P4. Session validity → `authentication_and_sessions`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-004, REQ-PROD-013; personas P3, P4. Session validity → `authentication_and_sessions`; enforcement → engineering.
 
 ##### REQ-ID-056 — A verified identity is necessary but not sufficient for a mutation
 - **Statement:** Performing a mutating action requires both an authenticated identity (a valid session proving who the actor is) **and** an authority check establishing that this actor may perform this action on this resource. A valid session alone never authorizes an action; the per-resource authority must also hold.
 - **Acceptance criteria:** A user with a perfectly valid session is still refused when they attempt an action outside their authority (e.g. deleting another user's chirp, or performing a moderator action without moderator authority); authority is evaluated per action and per target, not granted wholesale by the mere existence of a session.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004; personas P3, P4. Session issuance/safety → `authentication_and_sessions`; enforcement → `software` domain.
+- **Traceability:** REQ-PROD-004; personas P3, P4. Session issuance/safety → `authentication_and_sessions`; enforcement → engineering.
 
 ##### REQ-ID-057 — Authorization is consistent across every entry point
 - **Statement:** The same authority rules apply to every entry point into the product. The REST API is not a privileged back door: an action refused in the web UI for lack of authority is refused when attempted directly against the API, and vice versa.
 - **Acceptance criteria:** For the representative mutating actions, the authorization outcome (allowed/refused) is the same whether the action is attempted through the SPA or directly against the API, for the same principal and target; no entry point grants authority another denies.
 - **Release gating:** true
-- **Traceability:** REQ-PROD-004, REQ-PROD-013; personas P3, P4. Enforcement → `software` domain.
+- **Traceability:** REQ-PROD-004, REQ-PROD-013; personas P3, P4. Enforcement → engineering.
 
 ---
 
-#### E. Cross-spoke couplings (for the synthesis to resolve into explicit cross-references)
+#### E. Cross-section couplings (to resolve into explicit cross-references)
 
 The authority model is coupled to the other identity/security concerns. Each coupling below names the two
-facets so the synthesis gate can resolve it into an explicit `REQ-ID ↔ REQ-ID` cross-reference in the
+facets to resolve into an explicit `REQ-ID ↔ REQ-ID` cross-reference in the
 assembled document.
 
 1. **Deletion — authority vs. lifecycle semantics.** The *authority* "only the owner or an authorized
    administrator may delete an account" (**REQ-ID-043**) is coupled to the *deletion semantics and the
    guarantee that deletion is honoured* owned by the **`accounts_and_lifecycle`** section
-   (`REQ-ID-001..019`). Synthesis to cross-reference REQ-ID-043 ↔ the accounts-lifecycle deletion
+   (`REQ-ID-001..019`). Cross-reference REQ-ID-043 ↔ the accounts-lifecycle deletion
    requirement(s).
 2. **Export/erasure — authority vs. mechanism vs. data-right.** The *authority* to export
    (**REQ-ID-044**) is coupled to the *export mechanism* in **`accounts_and_lifecycle`**
    (`REQ-ID-001..019`) and to the *data-right it satisfies* in **`abuse_and_privacy_basics`**
-   (`REQ-ID-060..079`). Synthesis to cross-reference REQ-ID-044 ↔ both.
+   (`REQ-ID-060..079`). Cross-reference REQ-ID-044 ↔ both.
 3. **Moderation — authority vs. capability and visible effect.** The *authority* to act on abuse
    (**REQ-ID-047**) and the *loss of a suspended/removed account's authority* (**REQ-ID-052**) are
    coupled to the *user-facing report/block capability and the visible moderation effect* owned by
-   **`abuse_and_privacy_basics`** (`REQ-ID-060..079`). Synthesis to cross-reference REQ-ID-047 and
+   **`abuse_and_privacy_basics`** (`REQ-ID-060..079`). Cross-reference REQ-ID-047 and
    REQ-ID-052 ↔ the abuse/privacy capability-and-effect requirement(s).
 4. **Admin/support lookup — authority vs. privacy limit.** The operator *authority* to look up an
    account (**REQ-ID-048**) and the least-privilege *bound* on it (**REQ-ID-049**) are coupled to the
    *privacy limit on what personal data support may see* owned by **`abuse_and_privacy_basics`**
-   (`REQ-ID-060..079`). Synthesis to cross-reference REQ-ID-048 and REQ-ID-049 ↔ the privacy-limit
+   (`REQ-ID-060..079`). Cross-reference REQ-ID-048 and REQ-ID-049 ↔ the privacy-limit
    requirement(s).
 5. **Public-internet session safety — session safety vs. per-action authorization.** The cross-cutting
    *server-side authorization on every mutation* (**REQ-ID-053**) and *verified-identity-is-necessary-
    but-not-sufficient* (**REQ-ID-056**) are coupled to the *public-internet session-safety* properties
    owned by **`authentication_and_sessions`** (`REQ-ID-020..039`): safe sessions provide the verified
-   identity; per-action authorization is what makes that identity safe to expose. Synthesis to
-   cross-reference REQ-ID-053 and REQ-ID-056 ↔ the session-safety requirement(s).
+   identity; per-action authorization is what makes that identity safe to expose. Cross-reference REQ-ID-053 and REQ-ID-056 ↔ the session-safety requirement(s).
 
 ---
 
@@ -1063,8 +1060,8 @@ assembled document.
   paid-tier entitlement or billing-administration authority to design.
 - **Enforcement "how" — deferred, not omitted.** How each authorization decision is computed and
   enforced on every request (check placement, middleware, policy representation), and how elevated roles
-  are stored and assigned, are **`software`-domain** concerns. This section fixes *what must be true*; the
-  code DAGs own *how it is made true*.
+  are stored and assigned, are **engineering** concerns. This section fixes *what must be true*; the
+  code work own *how it is made true*.
 - **Richer elevated-action audit — non-gating enhancement.** Beyond the attribution baseline
   (REQ-ID-050), a browsable, reviewable history of moderation/admin actions is a real improvement a first
   releasable version may ship without.
@@ -1094,12 +1091,12 @@ surface** of any kind. Everything below is a real gap against a releasable bar, 
 **Boundary — requirements, not mechanism.** This section specifies *what must be true* from the user's
 and operator's side. It does **not** choose a spam filter, a rate-limiter, a consent-management library, a
 moderation-queue design, or an export file format — those "how" decisions belong to later code work in the
-`software` domain, and to the operational-readiness area for the enforcement of limits and quotas
+engineering domain, and to the operational-readiness area for the enforcement of limits and quotas
 (`REQ-OPS-*`, section `limits_and_quotas`). Where a requirement here depends on an **authority** to act,
 that authority is owned by the authorization model (`authorization`, `REQ-ID-040..059`); where it depends
 on an account-lifecycle **mechanism** (export, erasure), that mechanism is owned by
 `accounts_and_lifecycle` (`REQ-ID-001..019`). Those couplings are listed explicitly at the end of this
-section for the synthesis to resolve into cross-references.
+section to resolve into cross-references.
 
 This section owns `REQ-ID-060 .. REQ-ID-079` and uses `REQ-ID-060 .. REQ-ID-075`.
 
@@ -1127,7 +1124,7 @@ the user holds and the effect the user sees.
 - **Statement:** A signed-in user can block another account so that the blocked account can no longer interact with them, and is told the block is in place.
 - **Acceptance criteria:** A signed-in user can block an account from that account's profile; after blocking, the blocked account cannot follow, reply to, or like the blocking user's chirps, and the blocking user is shown clear confirmation that the block is active. The user can later see which accounts they have blocked and can unblock, with the interaction restrictions lifted on unblock.
 - **Release gating:** true — this is the exposure-reducing control REQ-PROD-027 requires a releasable product to provide.
-- **Traceability:** REQ-PROD-027. Block UI/affordance → experience design (`REQ-UX-*`). Enforcement of interaction restrictions → `software` domain.
+- **Traceability:** REQ-PROD-027. Block UI/affordance → experience design (`REQ-UX-*`). Enforcement of interaction restrictions → engineering.
 
 ##### REQ-ID-062 — Mute an account
 - **Statement:** A signed-in user can mute another account so that account's chirps no longer appear in the muting user's own timeline and views, without affecting the muted account.
@@ -1159,26 +1156,25 @@ This is a *preventive* complement to the *reactive* response in part 1.
 
 These are **requirements, not mechanisms.** This section states that limits must exist and how they must
 behave from the user's side; the enforcement mechanism (where limits live, how they are counted, the
-thresholds) is owned by operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and the `software`
-domain. No rate-limiter or spam-filter is designed here.
+thresholds) is owned by operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and engineering. No rate-limiter or spam-filter is designed here.
 
 ##### REQ-ID-065 — Baseline limit on account creation
 - **Statement:** The rate and volume at which accounts can be created is limited, so that a public, anonymous sign-up cannot be used to create accounts in unlimited bulk.
 - **Acceptance criteria:** Repeated automated account creation beyond a reasonable human rate is refused or throttled rather than always succeeding; a normal person signing up once is unaffected. The limit is enforced on the server side (not only in the browser), so bypassing the UI does not bypass the limit.
 - **Release gating:** true — a public anonymous-signup product with no creation limit is not responsibly releasable. The specific thresholds are an operational choice; the *existence* of a baseline limit is the requirement.
-- **Traceability:** REQ-PROD-027, REQ-PROD-028 (a public product must be releasable responsibly against abuse). Enforcement mechanism and thresholds → operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and `software` domain.
+- **Traceability:** REQ-PROD-027, REQ-PROD-028 (a public product must be releasable responsibly against abuse). Enforcement mechanism and thresholds → operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and engineering.
 
 ##### REQ-ID-066 — Baseline limit on posting and high-volume actions
 - **Statement:** The rate and volume at which a single account can post chirps and perform high-volume social actions (such as following and liking) is limited, so that one account cannot flood the product.
 - **Acceptance criteria:** A single account posting or acting far faster or in far greater volume than a human plausibly would is throttled or refused rather than always succeeding; ordinary posting and interaction by a real user is unaffected. The limit is enforced server-side.
 - **Release gating:** true — baseline anti-flood protection of the shared timeline and social graph is part of a responsibly releasable public product.
-- **Traceability:** REQ-PROD-027, REQ-PROD-028. Enforcement mechanism and thresholds → operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and `software` domain.
+- **Traceability:** REQ-PROD-027, REQ-PROD-028. Enforcement mechanism and thresholds → operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and engineering.
 
 ##### REQ-ID-067 — Limits are enforced safely and communicated, never silent
 - **Statement:** When a baseline limit is reached, the product refuses the action safely and tells the user, rather than silently dropping it or appearing to succeed.
 - **Acceptance criteria:** A user who hits a limit sees a clear, honest message that the action was rate-limited and can understand when they may retry; the limited action is not silently discarded and is not falsely shown as succeeded. Limits default to protecting the product (fail safe) rather than failing open under load.
 - **Release gating:** true — consistent with the product-wide "no silent failure" expectation for user actions.
-- **Traceability:** REQ-PROD-027, REQ-PROD-028. Message presentation → experience design (`REQ-UX-*`); fail-safe behaviour of the enforcement path → operational readiness (`REQ-OPS-*`) and `software` domain.
+- **Traceability:** REQ-PROD-027, REQ-PROD-028. Message presentation → experience design (`REQ-UX-*`); fail-safe behaviour of the enforcement path → operational readiness (`REQ-OPS-*`) and engineering.
 
 ---
 
@@ -1243,30 +1239,29 @@ section fixes the *right*; that section fixes the *how*.
 
 ---
 
-#### Cross-spoke couplings (for the synthesis to resolve into REQ-ID cross-references)
+#### Cross-section couplings (to resolve into REQ-ID cross-references)
 
-These requirements depend on, or are depended on by, requirements owned by sibling spokes. Each is stated
-here in prose so the synthesis gate can resolve it into an explicit `REQ-ID ↔ REQ-ID` cross-reference.
+These requirements depend on, or are depended on by, requirements owned by sibling sections. Each is stated
+here in prose to resolve into an explicit `REQ-ID ↔ REQ-ID` cross-reference.
 
 1. **Moderation: user-facing capability/effect ↔ authority to act.** The report capability (REQ-ID-060)
    and the visible moderation effect (REQ-ID-063) require an authorised operator/moderator to act; that
-   **authority** is owned by the `authorization` spoke (`REQ-ID-040..059`). Synthesis: cross-reference
+   **authority** is owned by the `authorization` section (`REQ-ID-040..059`). Cross-reference:
    REQ-ID-060/063 ↔ the authz requirement(s) that grant moderation authority.
 2. **Data export: data-right ↔ export mechanism.** The right of access/export (REQ-ID-070) is satisfied
    by the **export mechanism and format** owned by `accounts_and_lifecycle` (`REQ-ID-001..019`).
-   Synthesis: cross-reference REQ-ID-070 ↔ the accounts-lifecycle export requirement.
+   Cross-reference: REQ-ID-070 ↔ the accounts-lifecycle export requirement.
 3. **Data erasure: data-right ↔ deletion/erasure mechanism.** The right to erasure (REQ-ID-071) is
    satisfied by the **deletion/erasure semantics and guarantee** owned by `accounts_and_lifecycle`
-   (`REQ-ID-001..019`). Synthesis: cross-reference REQ-ID-071 ↔ the accounts-lifecycle deletion/erasure
+   (`REQ-ID-001..019`). Cross-reference: REQ-ID-071 ↔ the accounts-lifecycle deletion/erasure
    requirement.
 4. **Admin/support: privacy limit ↔ admin lookup authority.** The privacy limit on the admin/support view
    (REQ-ID-072) constrains the **admin/support lookup authority** owned by `authorization`
-   (`REQ-ID-040..059`). Synthesis: cross-reference REQ-ID-072 ↔ the authz admin/support authority
+   (`REQ-ID-040..059`). Cross-reference: REQ-ID-072 ↔ the authz admin/support authority
    requirement.
 5. **Baseline limits: abuse-resistance requirement ↔ operational enforcement.** The baseline limits
    (REQ-ID-065/066/067) state the requirement; their **enforcement mechanism and thresholds** belong to
-   operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and the `software` domain. Noted for the
-   synthesis/traceability as a cross-area dependency rather than an intra-section REQ-ID coupling.
+   operational readiness (`REQ-OPS-*`, `limits_and_quotas`) and engineering. Noted for the design's traceability as a cross-area dependency rather than an intra-section REQ-ID coupling.
 
 ---
 
@@ -1317,13 +1312,13 @@ Judgments recorded honestly, each with a reason — not silent omissions:
 
 ## threat_model
 
-This section is a **synthesis of the four concerns above**. It names the concrete threats chirp's public
+This section **integrates the four concerns above**. It names the concrete threats chirp's public
 surface implies — grounded in the product as it stands at `c805525` (handle-only sign-in, in-memory bearer
 sessions with no expiry/sign-out, no credential, no recovery, no deletion/export, no moderation, no rate
 limits, no privacy surface) — and, for each, names the requirement(s) that mitigate it, or records it as
 accepted or out-of-scope with a reason. It is not a catalogue of generic web risks: every threat below is
 one this product is actually exposed to today, and every mitigation is a `REQ-ID-*` elsewhere in this
-document (or a deliberate cut). Where a threat was not already closed by a spoke requirement, the threat
+document (or a deliberate cut). Where a threat was not already closed by a section requirement, the threat
 model mints a net-new requirement in its own range (`REQ-ID-080..081`); those are stated in full in the
 requirements section that follows.
 
@@ -1504,15 +1499,15 @@ token in transit, enabling T1/T3.
 
 **Mitigated by.** `REQ-ID-027` (all exchange of the credential and session secret occurs over a
 confidential, integrity-protected channel; the product refuses to transmit them over an unprotected one).
-The specific transport mechanism is a `software`/`REQ-OPS-*` "how"; the property is required here.
+The specific transport mechanism is an engineering/`REQ-OPS-*` "how"; the property is required here.
 
 ### T14 — Cross-site request forgery (forged authenticated mutations) — *net-new: `REQ-ID-080`*
 
 **Threat.** chirp is a browser product whose mutating actions are authenticated. A third-party site a
 signed-in user visits could attempt to make the user's browser perform an authenticated mutation (post,
 follow, delete, export) without the user's intent. Whether this is exploitable depends on how the session
-is carried — a "how" owned by `software` — but the *property* that forged cross-origin mutations must not
-succeed is a release-relevant security requirement no spoke currently owns.
+is carried — a "how" owned by engineering — but the *property* that forged cross-origin mutations must not
+succeed is a release-relevant security requirement no section currently owns.
 
 **Mitigated by.** `REQ-ID-080` (a mutating action must originate from the product's own authenticated
 client; a third-party site cannot cause a user's browser to perform an authenticated mutation without the
@@ -1523,11 +1518,11 @@ user's intent). Composes with `REQ-ID-053`/`REQ-ID-056` (server-side per-action 
 **Threat.** chirp renders attacker-controlled text (chirps, display name, bio) to every reader of the
 shared timeline and profiles. If that content can execute as code in another user's browser, a single
 malicious chirp becomes a vector to steal sessions (T3) or credentials (T9) from everyone who views it —
-the highest-leverage attack a public posting product faces. No spoke owns content-rendering safety.
+the highest-leverage attack a public posting product faces. No section owns content-rendering safety.
 
 **Mitigated by.** `REQ-ID-081` (user-submitted content is treated as data, not code: it cannot execute in
 another user's browser or break out of its display context). The escaping/sanitisation/CSP mechanism is a
-`software`/`REQ-UX-*` "how"; the property is required here.
+engineering/`REQ-UX-*` "how"; the property is required here.
 
 ### T16 — Destructive action from a hijacked but unlocked session
 
@@ -1577,7 +1572,7 @@ private to the user who set them — non-gating).
 - **Mature trust-and-safety tooling** (moderation queues, automated classification, strikes, appeals) is
   out of scope for the first release; the bar is report → act → visible-effect plus baseline limits.
 - **Clickjacking / UI-redress** of the product's own controls is noted as a lower-severity browser threat
-  whose mitigation (frame-protection) is a `software`/`REQ-OPS-*` hardening item; it is accepted for the
+  whose mitigation (frame-protection) is an engineering/`REQ-OPS-*` hardening item; it is accepted for the
   first bar as lower-leverage than T14/T15 given the actions it could redress are already step-up-gated for
   the destructive ones (`REQ-ID-025`).
 - **Regulatory certification** against a named legal regime is an engagement/legal decision, not a design
@@ -1623,7 +1618,7 @@ accepted/deferred/out-of-scope with a reason.
 This section consolidates the whole `REQ-ID-*` register for the identity, security and trust surface. Each
 requirement's **full statement and acceptance criteria** live in its owning section above; this section
 (a) states in full the two **net-new, threat-derived** requirements the threat model surfaced that no
-spoke owns (`REQ-ID-080`, `REQ-ID-081`), (b) resolves every **cross-section coupling** into an explicit
+section owns (`REQ-ID-080`, `REQ-ID-081`), (b) resolves every **cross-section coupling** into an explicit
 `REQ-ID ↔ REQ-ID` reference, and (c) gives the **consolidated register** with each requirement's release
 gating and its `REQ-PROD-*` trace. Every requirement in this register has a statement, testable acceptance
 criteria (checkable by someone who never met the author), a `release_gating` flag, and a trace to at least
@@ -1646,7 +1641,7 @@ one `REQ-PROD-*`.
   version must resist.
 - **Traceability:** REQ-PROD-004, REQ-PROD-006; threat T14. Composes with REQ-ID-053 and REQ-ID-056
   (server-side per-action authorization). The carrier/mechanism (token placement, same-site policy,
-  anti-forgery token) is a `software`-domain "how"; this fixes the property.
+  anti-forgery token) is an engineering "how"; this fixes the property.
 
 #### REQ-ID-081 — User-submitted content cannot execute as code in another user's browser (stored-injection resistance)
 - **Statement:** Content a user submits — chirp text, display name, bio — is treated as data, not code.
@@ -1661,13 +1656,12 @@ one `REQ-PROD-*`.
   stored script execution (T15) is the highest-leverage attack on a public posting product and a
   releasable version must prevent it.
 - **Traceability:** REQ-PROD-016 (compose/post), REQ-PROD-013 (public reading), REQ-PROD-029 (safety of
-  the public surface); threat T15. The escaping/sanitisation/CSP mechanism is a `software`/`REQ-UX-*`
+  the public surface); threat T15. The escaping/sanitisation/CSP mechanism is an engineering/`REQ-UX-*`
   "how"; this fixes the property.
 
 ### Cross-section coupling resolution
 
-The four concern sections are parts of one design and share a real seam. Each coupling declared for this
-subtree is resolved below into an explicit `REQ-ID ↔ REQ-ID` cross-reference, so no surface silently drifts
+The four concern sections are parts of one design and share a real seam. Each coupling declared for this design is resolved below into an explicit `REQ-ID ↔ REQ-ID` cross-reference, so no surface silently drifts
 from its counterpart.
 
 | # | Coupling | Owning facets | Resolved cross-reference |
@@ -1780,5 +1774,5 @@ Every identity/trust-related `REQ-PROD-*` is carried by at least one `REQ-ID-*` 
 032, 036), 006 (026–030, 033–035, 080), 007 (006–009, 037), 009 (010, 015), 010 (010–014, 040, 043),
 011 (015–017, 044, 070), 012 (012, 013, 052, 071), 013 (034, 054, 057, 073, 081), 016 (081), 027
 (060–067, 075), 028 (063, 065–067, 046–052), 029 (068–075, 081), 033 (046, 048–051, 072). Requirements
-whose *mechanism* lands in another area (REQ-UX-*, REQ-DOM-*, REQ-OPS-*, or `software`) are referenced by
+whose *mechanism* lands in another area (REQ-UX-*, REQ-DOM-*, REQ-OPS-*, or engineering) are referenced by
 prose at the point of coupling, not re-minted here.
