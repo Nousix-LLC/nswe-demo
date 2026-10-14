@@ -32,14 +32,14 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 use chirp_types::api::{
-    AuthResponse, CreateChirpRequest, CreateUserRequest, FollowResponse, LikeResponse,
+    AuthResponse, CreateChirpRequest, CreateUserRequest, Cursor, FollowResponse, LikeResponse,
     LoginRequest, Page, SessionToken, TimelineQuery,
 };
 use chirp_types::domain::{Chirp, User, Username};
 use chirp_types::ids::{ChirpId, Timestamp, UserId};
 
 use crate::error::ServerError;
-use crate::repository::ChirpRepository;
+use crate::repository::{export, ChirpRepository, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT};
 
 /// The embedded, forward-only migration set for the durable store.
 ///
@@ -380,24 +380,175 @@ impl ChirpRepository for PostgresRepository {
         }
     }
 
+    /// Durably posts a chirp: verifies the author exists and, for a reply, that the reply target
+    /// exists; allocates an opaque chirp id; and inserts the row with a **zeroed `like_count`** —
+    /// all inside one confirmed-write transaction, returning the created [`Chirp`] only after the
+    /// write has durably committed (`confirmed_write_durable`).
+    ///
+    /// The author and reply-target existence checks run in the **same** transaction as the id
+    /// allocation and insert, so the [`NotFound`](ServerError::NotFound) decisions and the write are
+    /// one atomic unit (the `chirps.author_id` / `chirps.reply_to` foreign keys are the in-store
+    /// backstop). `request.text` is a [`ChirpText`](chirp_types::domain::ChirpText) —
+    /// unrepresentable-if-invalid — so an invalid body cannot reach the store (`domain_boundary_validated`).
+    /// The id is drawn from `chirp_id_seq` on the transaction's own connection (opaque, monotonic,
+    /// stable across restart, never reused — `ids_opaque_monotonic_stable`), and the row is lowered
+    /// through the committed mapping ([`mapping::ChirpRow::from_chirp`]) so `chirp-types` is the
+    /// single source of the column shape. The denormalized `like_count` is **initialised to 0** here;
+    /// its atomic maintenance under like/unlike is the graph stage's.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the author does not exist, or the reply target does not
+    /// exist; [`Internal`](ServerError::Internal) if the id cannot be allocated or the write cannot be
+    /// durably committed — an undurable write is reported as failed, never falsely confirmed.
     async fn create_chirp(
         &self,
-        _author: UserId,
-        _request: CreateChirpRequest,
+        author: UserId,
+        request: CreateChirpRequest,
     ) -> Result<Chirp, ServerError> {
-        Err(ServerError::Internal(format!(
-            "create_chirp: {NOT_IMPLEMENTED}"
-        )))
+        let created_at = now_millis();
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let author_column = mapping::user_id_to_column(author)?;
+                // Author existence, decided in the same transaction as the write.
+                let author_exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                        .bind(author_column)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                                "failed to check author {author} before posting a chirp: {error}"
+                            ))
+                        })?;
+                if !author_exists {
+                    return Err(ServerError::NotFound(format!("author {author}")));
+                }
+
+                // Reply-target existence (referential integrity, REQ-DOM-007), when this is a reply.
+                if let Some(parent) = request.reply_to {
+                    let parent_exists: bool =
+                        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chirps WHERE id = $1)")
+                            .bind(mapping::chirp_id_to_column(parent)?)
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(|error| {
+                                ServerError::Internal(format!(
+                                    "failed to check reply target {parent}: {error}"
+                                ))
+                            })?;
+                    if !parent_exists {
+                        return Err(ServerError::NotFound(format!("reply target {parent}")));
+                    }
+                }
+
+                // Allocate the opaque chirp id on the SAME connection, so allocation and insert are
+                // one atomic unit.
+                let id = PostgresRepository::allocate_chirp_id(&mut *conn).await?;
+                let chirp = Chirp {
+                    id,
+                    author_id: author,
+                    text: request.text,
+                    created_at,
+                    like_count: 0,
+                    reply_to: request.reply_to,
+                };
+                // Lower through the committed mapping; `like_count` is initialised to 0 and the
+                // moderation columns take their schema defaults (not removed).
+                let row = mapping::ChirpRow::from_chirp(&chirp)?;
+                sqlx::query(
+                    "INSERT INTO chirps (id, author_id, text, created_at, like_count, reply_to) \
+                     VALUES ($1, $2, $3, $4, $5, $6)",
+                )
+                .bind(row.id)
+                .bind(row.author_id)
+                .bind(row.text)
+                .bind(row.created_at)
+                .bind(row.like_count)
+                .bind(row.reply_to)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to durably insert a chirp: {error}"))
+                })?;
+
+                Ok(chirp)
+            })
+        })
+        .await
     }
 
+    /// Returns one reverse-chronological page of `viewer`'s home timeline (the viewer's own chirps
+    /// plus those of everyone the viewer follows), excluding soft-removed chirps, read as a
+    /// consistent durable view.
+    ///
+    /// The viewer-existence check and the page read run in one read transaction, so an absent viewer
+    /// is [`NotFound`](ServerError::NotFound) (not an empty page) against a consistent snapshot. The
+    /// scan orders by `id DESC` — the stable reverse-chronological proxy the schema's
+    /// `chirps_timeline_idx` supports and the in-memory backing uses — and takes `limit + 1` rows to
+    /// learn whether a further page exists. `query.limit` is clamped to
+    /// `1..=`[`MAX_TIMELINE_LIMIT`] (default [`DEFAULT_TIMELINE_LIMIT`]); `query.cursor`, when present
+    /// and parseable, restricts the scan to `id <` the cursor, and a malformed cursor fails safe to
+    /// the first page (cursors are server-minted). The returned
+    /// [`next_cursor`](chirp_types::api::Page::next_cursor) is the last returned id iff more remain —
+    /// so paging is **exactly-once** (no skips, no duplicates) and **stable across restart** (the ids
+    /// are durable sequence values).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the viewer does not exist;
+    /// [`Validation`](ServerError::Validation) if a stored row violates a `chirp-types` invariant;
+    /// [`Internal`](ServerError::Internal) if the read fails or a stored column is corrupt.
     async fn timeline(
         &self,
-        _viewer: UserId,
-        _query: TimelineQuery,
+        viewer: UserId,
+        query: TimelineQuery,
     ) -> Result<Page<Chirp>, ServerError> {
-        Err(ServerError::Internal(format!(
-            "timeline: {NOT_IMPLEMENTED}"
-        )))
+        let limit = clamp_limit(query.limit);
+        let cursor = decode_cursor(query.cursor.as_ref());
+        let viewer_column = mapping::user_id_to_column(viewer)?;
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let viewer_exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                        .bind(viewer_column)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                                "failed to check viewer {viewer} for the timeline: {error}"
+                            ))
+                        })?;
+                if !viewer_exists {
+                    return Err(ServerError::NotFound(format!("viewer {viewer}")));
+                }
+
+                let rows: Vec<mapping::ChirpRow> = sqlx::query_as(
+                    "SELECT id, author_id, text, created_at, like_count, reply_to, removed, \
+                     removed_at FROM chirps \
+                     WHERE removed = FALSE \
+                       AND (author_id = $1 \
+                            OR author_id IN (SELECT followee_id FROM follows WHERE follower_id = $1)) \
+                       AND ($2::BIGINT IS NULL OR id < $2) \
+                     ORDER BY id DESC LIMIT $3",
+                )
+                .bind(viewer_column)
+                .bind(cursor)
+                .bind(fetch_limit(limit))
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read the timeline: {error}"))
+                })?;
+
+                let chirps = rows
+                    .into_iter()
+                    .map(mapping::ChirpRow::into_chirp)
+                    .collect::<Result<Vec<Chirp>, ServerError>>()?;
+                Ok(paginate(chirps, limit, |chirp| chirp.id.get()))
+            })
+        })
+        .await
     }
 
     async fn follow(
@@ -808,36 +959,173 @@ impl ChirpRepository for PostgresRepository {
         )))
     }
 
-    async fn export_user_data(&self, _user: UserId) -> Result<String, ServerError> {
-        Err(ServerError::Internal(format!(
-            "export_user_data: {NOT_IMPLEMENTED}"
-        )))
+    /// Materializes a user's full data export as a consistent durable view: the user's profile, their
+    /// authored **non-removed** chirps (newest-first), their follow graph (the ids they follow and
+    /// the ids that follow them), and the ids of the chirps they like — serialized through the shared
+    /// [`ExportDocument`](export::ExportDocument) so the durable and in-memory backings produce
+    /// byte-identical exports.
+    ///
+    /// Every read runs inside one transaction, so the export is a single consistent snapshot rather
+    /// than a set of statements that could straddle a concurrent write. The profile read is also the
+    /// [`NotFound`](ServerError::NotFound) decision; each stored row is lifted back through the
+    /// committed mapping, so a corrupt row surfaces as an error, never a bad value
+    /// (`domain_boundary_validated`). The export is **not** persisted to `export_artifacts` here —
+    /// materialized-artifact retention / lifetime is the retention stage's concern; this method
+    /// produces and returns the document.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
+    /// [`Validation`](ServerError::Validation) if a stored row violates a `chirp-types` invariant;
+    /// [`Internal`](ServerError::Internal) if a read fails, a stored column is corrupt, or the
+    /// document cannot be serialized.
+    async fn export_user_data(&self, user: UserId) -> Result<String, ServerError> {
+        let user_column = mapping::user_id_to_column(user)?;
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                // The profile read is also the existence decision.
+                let profile_row: Option<mapping::UserRow> = sqlx::query_as(
+                    "SELECT id, username, display_name, bio, created_at, follower_count, \
+                     following_count, suspended, suspended_at FROM users WHERE id = $1",
+                )
+                .bind(user_column)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read user {user} for export: {error}"))
+                })?;
+                let profile = match profile_row {
+                    Some(row) => row.into_user()?,
+                    None => return Err(ServerError::NotFound(format!("user {user}"))),
+                };
+
+                let chirp_rows: Vec<mapping::ChirpRow> = sqlx::query_as(
+                    "SELECT id, author_id, text, created_at, like_count, reply_to, removed, \
+                     removed_at FROM chirps WHERE author_id = $1 AND removed = FALSE ORDER BY id DESC",
+                )
+                .bind(user_column)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read chirps for export: {error}"))
+                })?;
+                let chirps = chirp_rows
+                    .into_iter()
+                    .map(mapping::ChirpRow::into_chirp)
+                    .collect::<Result<Vec<Chirp>, ServerError>>()?;
+
+                let following = fetch_user_ids(
+                    &mut *conn,
+                    "SELECT followee_id FROM follows WHERE follower_id = $1",
+                    user_column,
+                )
+                .await?;
+                let followers = fetch_user_ids(
+                    &mut *conn,
+                    "SELECT follower_id FROM follows WHERE followee_id = $1",
+                    user_column,
+                )
+                .await?;
+
+                let liked_columns: Vec<i64> =
+                    sqlx::query_scalar("SELECT chirp_id FROM likes WHERE user_id = $1")
+                        .bind(user_column)
+                        .fetch_all(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!("failed to read likes for export: {error}"))
+                        })?;
+                let likes = liked_columns
+                    .into_iter()
+                    .map(mapping::column_to_chirp_id)
+                    .collect::<Result<Vec<ChirpId>, ServerError>>()?;
+
+                export::ExportDocument::new(profile, chirps, following, followers, likes).to_json()
+            })
+        })
+        .await
     }
 
+    /// Returns one page of the accounts following `user`, newest-first, with the same opaque-cursor
+    /// paging as [`timeline`](ChirpRepository::timeline).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
+    /// [`Validation`](ServerError::Validation) if a stored row violates a `chirp-types` invariant;
+    /// [`Internal`](ServerError::Internal) if the read fails or a stored column is corrupt.
     async fn list_followers(
         &self,
-        _user: UserId,
-        _query: TimelineQuery,
+        user: UserId,
+        query: TimelineQuery,
     ) -> Result<Page<User>, ServerError> {
-        Err(ServerError::Internal(format!(
-            "list_followers: {NOT_IMPLEMENTED}"
-        )))
+        self.list_follow_edge(user, query, FollowListing::Followers)
+            .await
     }
 
+    /// Returns one page of the accounts `user` follows, newest-first, with the same opaque-cursor
+    /// paging as [`timeline`](ChirpRepository::timeline).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
+    /// [`Validation`](ServerError::Validation) if a stored row violates a `chirp-types` invariant;
+    /// [`Internal`](ServerError::Internal) if the read fails or a stored column is corrupt.
     async fn list_following(
         &self,
-        _user: UserId,
-        _query: TimelineQuery,
+        user: UserId,
+        query: TimelineQuery,
     ) -> Result<Page<User>, ServerError> {
-        Err(ServerError::Internal(format!(
-            "list_following: {NOT_IMPLEMENTED}"
-        )))
+        self.list_follow_edge(user, query, FollowListing::Following)
+            .await
     }
 
-    async fn remove_chirp(&self, _actor: UserId, _chirp: ChirpId) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "remove_chirp: {NOT_IMPLEMENTED}"
-        )))
+    /// Durably soft-removes `chirp` so it is no longer served, inside a confirmed-write transaction,
+    /// returning only after the write has committed (`confirmed_write_durable`).
+    ///
+    /// A single `UPDATE ... RETURNING` both decides [`NotFound`](ServerError::NotFound) (a zero-row
+    /// update means no such chirp) and performs the soft-removal. The row is retained (so a reply
+    /// target or a like edge still resolves — distinct from the account-deletion cascade, which
+    /// hard-removes rows); its `removed = TRUE` flag excludes it from timelines and exports. The
+    /// first removal stamps `removed_at`; `COALESCE` preserves it, so repeated removal is an
+    /// idempotent no-op that keeps the original audit time.
+    ///
+    /// The author-vs-moderator **authorization** boundary (`REQ-DOM-020`) is fixed in the model and
+    /// enforced downstream of the repository (`REQ-ID-*`); this persistence layer accepts `actor` and
+    /// performs the durable removal, exactly as the sibling
+    /// [`set_account_suspension`](ChirpRepository::set_account_suspension) defers the moderator-authority
+    /// determination for a distinct actor upstream.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the chirp does not exist;
+    /// [`Internal`](ServerError::Internal) if the write cannot be durably committed — an undurable
+    /// write is reported as failed, never falsely confirmed.
+    async fn remove_chirp(&self, _actor: UserId, chirp: ChirpId) -> Result<(), ServerError> {
+        let chirp_column = mapping::chirp_id_to_column(chirp)?;
+        let removed_at = mapping::timestamp_to_column(now_millis());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let updated: Option<i64> = sqlx::query_scalar(
+                    "UPDATE chirps SET removed = TRUE, removed_at = COALESCE(removed_at, $1) \
+                     WHERE id = $2 RETURNING id",
+                )
+                .bind(removed_at)
+                .bind(chirp_column)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably remove chirp {chirp}: {error}"
+                    ))
+                })?;
+                match updated {
+                    Some(_) => Ok(()),
+                    None => Err(ServerError::NotFound(format!("chirp {chirp}"))),
+                }
+            })
+        })
+        .await
     }
 
     /// Durably sets (`suspended = true`) or clears (`suspended = false`) the moderation suspension
@@ -935,6 +1223,158 @@ impl ChirpRepository for PostgresRepository {
             .map_err(|error| {
                 ServerError::Internal(format!("durable store health check failed: {error}"))
             })
+    }
+}
+
+// =================================================================================================
+// Content / timeline helpers (EPIC-PERSIST, SUBTASK_content_timeline_impl, #64/#65).
+//
+// The shared paging + listing machinery the content/timeline capability methods above compose
+// against, so the opaque-cursor scheme lives once rather than being re-derived per method. The
+// cursor decode matches the in-memory backing exactly (parse a u64; a malformed or out-of-range
+// cursor fails safe to the first page), so the two backings page identically.
+// =================================================================================================
+
+/// Which side of the follow graph a listing walks.
+#[derive(Debug, Clone, Copy)]
+enum FollowListing {
+    /// The accounts that follow the user (filter `follows.followee_id`, join `follows.follower_id`).
+    Followers,
+    /// The accounts the user follows (filter `follows.follower_id`, join `follows.followee_id`).
+    Following,
+}
+
+/// Clamps a requested page limit to `1..=`[`MAX_TIMELINE_LIMIT`], defaulting to
+/// [`DEFAULT_TIMELINE_LIMIT`] when absent — identical to the in-memory backing.
+fn clamp_limit(requested: Option<u32>) -> u32 {
+    requested
+        .unwrap_or(DEFAULT_TIMELINE_LIMIT)
+        .clamp(1, MAX_TIMELINE_LIMIT)
+}
+
+/// The `LIMIT` to fetch for a page of size `limit`: one extra row, so the caller learns whether a
+/// further page exists without a second query.
+fn fetch_limit(limit: u32) -> i64 {
+    i64::from(limit) + 1
+}
+
+/// Decodes an opaque cursor to the exclusive upper-bound id for the next page.
+///
+/// Cursors are server-minted stringified ids; a value we did not mint — unparseable, or larger than
+/// the signed id space — decodes to `None`, which fails safe to the first page (no filter), exactly
+/// as the in-memory backing treats an unrecognised cursor.
+fn decode_cursor(cursor: Option<&Cursor>) -> Option<i64> {
+    cursor
+        .and_then(|c| c.0.parse::<u64>().ok())
+        .and_then(|value| i64::try_from(value).ok())
+}
+
+/// Turns the `limit + 1` rows a page query fetched (already ordered newest-first) into a [`Page`]:
+/// trims to `limit`, and sets [`next_cursor`](Page::next_cursor) to the last returned id iff a
+/// further row was fetched — the exactly-once opaque-cursor contract shared by the timeline and the
+/// follow listings.
+fn paginate<T>(mut items: Vec<T>, limit: u32, id_of: impl Fn(&T) -> u64) -> Page<T> {
+    let limit = limit as usize;
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    let next_cursor = if has_more {
+        items.last().map(|item| Cursor(id_of(item).to_string()))
+    } else {
+        None
+    };
+    Page::new(items, next_cursor)
+}
+
+/// Runs a single-column `BIGINT` id query bound to `user_column` and lifts each value back to a
+/// [`UserId`] through the committed mapping (a corrupt id column surfaces as an error). Shared by the
+/// export's `following` / `followers` reads.
+async fn fetch_user_ids(
+    conn: &mut sqlx::PgConnection,
+    query: &'static str,
+    user_column: i64,
+) -> Result<Vec<UserId>, ServerError> {
+    let columns: Vec<i64> = sqlx::query_scalar(query)
+        .bind(user_column)
+        .fetch_all(conn)
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!("failed to read follow edges for export: {error}"))
+        })?;
+    columns
+        .into_iter()
+        .map(mapping::column_to_user_id)
+        .collect()
+}
+
+impl PostgresRepository {
+    /// The shared body of [`list_followers`](ChirpRepository::list_followers) and
+    /// [`list_following`](ChirpRepository::list_following): verifies the user exists and returns one
+    /// page of the accounts on the requested side of its follow graph, newest-account-first
+    /// (`id DESC` — the same stable id proxy the timeline and the in-memory backing use, since the
+    /// retained follow edges carry no per-edge timestamp), with the shared opaque-cursor paging.
+    ///
+    /// The existence check and the page read run in one read transaction (a consistent snapshot), so
+    /// an absent user is [`NotFound`](ServerError::NotFound) rather than an empty page. Each stored
+    /// row is lifted back through the committed mapping (`domain_boundary_validated`).
+    async fn list_follow_edge(
+        &self,
+        user: UserId,
+        query: TimelineQuery,
+        listing: FollowListing,
+    ) -> Result<Page<User>, ServerError> {
+        let limit = clamp_limit(query.limit);
+        let cursor = decode_cursor(query.cursor.as_ref());
+        let user_column = mapping::user_id_to_column(user)?;
+        // Fixed, crate-controlled SQL per listing side; `$1` is the only user input and is bound.
+        let sql: &'static str = match listing {
+            FollowListing::Followers => {
+                "SELECT u.id, u.username, u.display_name, u.bio, u.created_at, u.follower_count, \
+                 u.following_count, u.suspended, u.suspended_at \
+                 FROM follows f JOIN users u ON u.id = f.follower_id \
+                 WHERE f.followee_id = $1 AND ($2::BIGINT IS NULL OR u.id < $2) \
+                 ORDER BY u.id DESC LIMIT $3"
+            }
+            FollowListing::Following => {
+                "SELECT u.id, u.username, u.display_name, u.bio, u.created_at, u.follower_count, \
+                 u.following_count, u.suspended, u.suspended_at \
+                 FROM follows f JOIN users u ON u.id = f.followee_id \
+                 WHERE f.follower_id = $1 AND ($2::BIGINT IS NULL OR u.id < $2) \
+                 ORDER BY u.id DESC LIMIT $3"
+            }
+        };
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let user_exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                        .bind(user_column)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                                "failed to check user {user} for a follow listing: {error}"
+                            ))
+                        })?;
+                if !user_exists {
+                    return Err(ServerError::NotFound(format!("user {user}")));
+                }
+
+                let rows: Vec<mapping::UserRow> = sqlx::query_as(sql)
+                    .bind(user_column)
+                    .bind(cursor)
+                    .bind(fetch_limit(limit))
+                    .fetch_all(&mut *conn)
+                    .await
+                    .map_err(|error| {
+                        ServerError::Internal(format!("failed to read a follow listing: {error}"))
+                    })?;
+                let users = rows
+                    .into_iter()
+                    .map(mapping::UserRow::into_user)
+                    .collect::<Result<Vec<User>, ServerError>>()?;
+                Ok(paginate(users, limit, |listed| listed.id.get()))
+            })
+        })
+        .await
     }
 }
 
@@ -3089,5 +3529,449 @@ mod store_health_tests {
             .await
             .expect_err("an unreachable store is reported unhealthy, never falsely Ok");
         assert_eq!(error.code(), ErrorCode::Internal);
+    }
+}
+
+#[cfg(test)]
+mod content_timeline_durability_tests {
+    //! End-to-end tests for the durable content/timeline capability methods — `create_chirp`,
+    //! `remove_chirp`, `timeline`, `export_user_data`, and `list_followers` / `list_following` —
+    //! against a REAL PostgreSQL backing, composing on the committed store-access substrate and the
+    //! domain schema from `SUBTASK_store_substrate` and the identity/auth stage.
+    //!
+    //! Like the other durable suites they are **skipped** unless `CHIRP_TEST_DATABASE_URL` names a
+    //! reachable test database, so the default `cargo test` (which does not compile this
+    //! `postgres`-gated module) and `cargo test --features postgres` without a database both stay
+    //! green and store-free. When a store IS provided they demonstrate, against the durable backing:
+    //!
+    //!   * `confirmed_write_durable` — a posted chirp and a soft-removal are visible after returning
+    //!     and across a fresh reconnect; the chirp's `like_count` is initialised to 0.
+    //!   * `ids_opaque_monotonic_stable` — the timeline's opaque cursor paginates **exactly once**
+    //!     (no skips, no duplicates) and the pages are stable across a reconnect.
+    //!   * `domain_boundary_validated` error contract — `create_chirp` is [`NotFound`] for an absent
+    //!     author or reply target; `timeline` / `export_user_data` / the follow listings are
+    //!     [`NotFound`] for an absent user — never a panic.
+    //!
+    //! Handles are derived from the durable token counter so repeated runs never collide on the
+    //! unique-handle index, and each test uses fresh users so their content is isolated on a shared
+    //! store.
+    //!
+    //! [`NotFound`]: crate::error::ServerError::NotFound
+
+    use super::PostgresRepository;
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{
+        CreateChirpRequest, CreateUserRequest, Cursor, ErrorCode, TimelineQuery,
+    };
+    use chirp_types::domain::{ChirpText, User, Username};
+    use chirp_types::ids::{ChirpId, UserId};
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Creates a durable user with a unique handle and returns the created profile.
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    /// Posts a top-level chirp authored by `author` and returns it.
+    async fn seed_chirp(
+        repo: &PostgresRepository,
+        author: UserId,
+        body: &str,
+    ) -> chirp_types::domain::Chirp {
+        repo.create_chirp(
+            author,
+            CreateChirpRequest {
+                text: ChirpText::parse(body).expect("valid body"),
+                reply_to: None,
+            },
+        )
+        .await
+        .expect("create_chirp succeeds")
+    }
+
+    /// Inserts a `follows` edge directly, as test scaffolding.
+    ///
+    /// The durable `follow` write (with its atomic denormalized-count maintenance) is the NEXT
+    /// serial stage's (`SUBTASK_graph_counts_atomic`); it is still a scaffold stub here. These
+    /// content/timeline read methods only need the edge rows to exist, so the tests seed them
+    /// directly against the committed `follows` schema (mirroring the proving slice's direct-SQL row
+    /// injection). The denormalized counts are deliberately left unmaintained — the read methods
+    /// under test do not depend on them, and `counts_match_edges` is the next stage's identity.
+    async fn insert_follow(repo: &PostgresRepository, follower: UserId, followee: UserId) {
+        sqlx::query(
+            "INSERT INTO follows (follower_id, followee_id, created_at) VALUES ($1, $2, $3)",
+        )
+        .bind(i64::try_from(follower.get()).unwrap())
+        .bind(i64::try_from(followee.get()).unwrap())
+        .bind(0_i64)
+        .execute(repo.pool())
+        .await
+        .expect("seed a follow edge directly");
+    }
+
+    /// Inserts a `likes` edge directly, as test scaffolding (the durable `like` write is the next
+    /// stage's; see [`insert_follow`]).
+    async fn insert_like(repo: &PostgresRepository, user: UserId, chirp: ChirpId) {
+        sqlx::query("INSERT INTO likes (user_id, chirp_id, created_at) VALUES ($1, $2, $3)")
+            .bind(i64::try_from(user.get()).unwrap())
+            .bind(i64::try_from(chirp.get()).unwrap())
+            .bind(0_i64)
+            .execute(repo.pool())
+            .await
+            .expect("seed a like edge directly");
+    }
+
+    #[tokio::test]
+    async fn create_chirp_is_durable_with_zeroed_like_count_and_round_trips_on_the_timeline() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let author = seed_user(&repo).await;
+        let chirp = seed_chirp(&repo, author.id, "hello durable world").await;
+        assert_eq!(chirp.author_id, author.id);
+        assert_eq!(
+            chirp.like_count, 0,
+            "a fresh chirp starts with a zeroed like_count"
+        );
+        assert_eq!(chirp.reply_to, None);
+
+        // confirmed_write_durable + round trip: the chirp shows on the author's own timeline, and
+        // still does from a FRESH connection to the same store (stable across restart).
+        let reconnected = PostgresRepository::connect(&url).await.unwrap();
+        let page = reconnected
+            .timeline(author.id, TimelineQuery::default())
+            .await
+            .expect("timeline after reconnect");
+        assert_eq!(
+            page.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![chirp.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_chirp_rejects_an_absent_author_or_reply_target_and_accepts_a_valid_reply() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let author = seed_user(&repo).await;
+
+        // Absent author: an id drawn from the counter but never used to create a user.
+        let absent_author = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        let err = repo
+            .create_chirp(
+                absent_author,
+                CreateChirpRequest {
+                    text: ChirpText::parse("orphan").unwrap(),
+                    reply_to: None,
+                },
+            )
+            .await
+            .expect_err("absent author");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+
+        // Absent reply target.
+        let err = repo
+            .create_chirp(
+                author.id,
+                CreateChirpRequest {
+                    text: ChirpText::parse("reply to nothing").unwrap(),
+                    reply_to: Some(ChirpId::new(9_999_999)),
+                },
+            )
+            .await
+            .expect_err("absent reply target");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+
+        // A valid reply to an existing chirp succeeds and records the parent.
+        let parent = seed_chirp(&repo, author.id, "parent").await;
+        let reply = repo
+            .create_chirp(
+                author.id,
+                CreateChirpRequest {
+                    text: ChirpText::parse("a real reply").unwrap(),
+                    reply_to: Some(parent.id),
+                },
+            )
+            .await
+            .expect("valid reply");
+        assert_eq!(reply.reply_to, Some(parent.id));
+    }
+
+    #[tokio::test]
+    async fn timeline_is_reverse_chronological_scoped_to_self_plus_followees_and_excludes_removed()
+    {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let alice = seed_user(&repo).await;
+        let bob = seed_user(&repo).await;
+        let carol = seed_user(&repo).await;
+
+        let a1 = seed_chirp(&repo, alice.id, "alice one").await;
+        let _b1 = seed_chirp(&repo, bob.id, "bob one (unfollowed)").await;
+        let a2 = seed_chirp(&repo, alice.id, "alice two").await;
+        insert_follow(&repo, alice.id, carol.id).await;
+        let c1 = seed_chirp(&repo, carol.id, "carol one (followed)").await;
+        let doomed = seed_chirp(&repo, alice.id, "to be removed").await;
+
+        // Remove one of alice's own chirps; it must drop out of the served timeline.
+        repo.remove_chirp(alice.id, doomed.id).await.unwrap();
+
+        let page = repo
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .expect("timeline");
+        // Newest-first: carol's followed chirp, alice two, alice one. Bob (unfollowed) and the
+        // removed chirp are excluded.
+        assert_eq!(
+            page.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![c1.id, a2.id, a1.id]
+        );
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn timeline_paginates_exactly_once_and_is_stable_across_restart() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let alice = seed_user(&repo).await;
+
+        let mut posted = Vec::new();
+        for i in 0..5 {
+            posted.push(seed_chirp(&repo, alice.id, &format!("chirp {i}")).await);
+        }
+        let mut expected: Vec<ChirpId> = posted.iter().map(|c| c.id).collect();
+        expected.sort_by_key(|id| std::cmp::Reverse(id.get())); // newest-first
+
+        // Page through two at a time; the union must be every chirp EXACTLY ONCE, in order.
+        let mut seen = Vec::new();
+        let mut cursor: Option<Cursor> = None;
+        loop {
+            let page = repo
+                .timeline(
+                    alice.id,
+                    TimelineQuery {
+                        limit: Some(2),
+                        cursor: cursor.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            seen.extend(page.items.iter().map(|c| c.id));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen, expected,
+            "every chirp appears exactly once, newest-first"
+        );
+
+        // Stable across restart: a fresh connection returns the same first page.
+        let reconnected = PostgresRepository::connect(&url).await.unwrap();
+        let first_again = reconnected
+            .timeline(
+                alice.id,
+                TimelineQuery {
+                    limit: Some(2),
+                    cursor: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first_again.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+            expected[..2].to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_chirp_is_durable_idempotent_and_not_found_for_an_absent_chirp() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let alice = seed_user(&repo).await;
+        let chirp = seed_chirp(&repo, alice.id, "removable").await;
+
+        repo.remove_chirp(alice.id, chirp.id).await.expect("remove");
+        // Durable across restart: a fresh connection no longer serves the removed chirp.
+        let reconnected = PostgresRepository::connect(&url).await.unwrap();
+        let page = reconnected
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .unwrap();
+        assert!(
+            !page.items.iter().any(|c| c.id == chirp.id),
+            "a soft-removed chirp is not served after reconnect"
+        );
+
+        // Idempotent re-removal.
+        repo.remove_chirp(alice.id, chirp.id)
+            .await
+            .expect("re-removal is an idempotent no-op");
+
+        // Absent chirp is NotFound.
+        let err = repo
+            .remove_chirp(alice.id, ChirpId::new(9_999_999))
+            .await
+            .expect_err("no such chirp");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn export_user_data_captures_a_consistent_view_and_is_not_found_for_an_absent_user() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let alice = seed_user(&repo).await;
+        let bob = seed_user(&repo).await;
+
+        let c1 = seed_chirp(&repo, alice.id, "alice one").await;
+        let c2 = seed_chirp(&repo, alice.id, "alice two").await;
+        let removed = seed_chirp(&repo, alice.id, "removed").await;
+        repo.remove_chirp(alice.id, removed.id).await.unwrap();
+        insert_follow(&repo, alice.id, bob.id).await;
+        let bob_chirp = seed_chirp(&repo, bob.id, "bob chirp").await;
+        insert_like(&repo, alice.id, bob_chirp.id).await;
+
+        let json = repo.export_user_data(alice.id).await.expect("export");
+        let doc: crate::repository::export::ExportDocument =
+            serde_json::from_str(&json).expect("the export is valid JSON of the export shape");
+
+        assert_eq!(doc.profile.id, alice.id);
+        // Authored, non-removed chirps, newest-first; the removed chirp is excluded.
+        assert_eq!(
+            doc.chirps.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![c2.id, c1.id]
+        );
+        assert_eq!(doc.following, vec![bob.id]);
+        assert_eq!(doc.likes, vec![bob_chirp.id]);
+
+        // Absent user → NotFound.
+        let absent = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        let err = repo
+            .export_user_data(absent)
+            .await
+            .expect_err("no such user");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn follow_listings_return_the_right_accounts_page_exactly_once_and_are_not_found_for_absent(
+    ) {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let alice = seed_user(&repo).await;
+
+        // Five accounts follow alice; alice follows exactly one of them.
+        let mut followers = Vec::new();
+        for _ in 0..5 {
+            let u = seed_user(&repo).await;
+            insert_follow(&repo, u.id, alice.id).await;
+            followers.push(u);
+        }
+        insert_follow(&repo, alice.id, followers[0].id).await;
+
+        // list_followers pages through exactly once, newest-account-first (id DESC).
+        let mut expected: Vec<UserId> = followers.iter().map(|u| u.id).collect();
+        expected.sort_by_key(|id| std::cmp::Reverse(id.get()));
+        let mut seen = Vec::new();
+        let mut cursor: Option<Cursor> = None;
+        loop {
+            let page = repo
+                .list_followers(
+                    alice.id,
+                    TimelineQuery {
+                        limit: Some(2),
+                        cursor: cursor.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            seen.extend(page.items.iter().map(|u| u.id));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen, expected,
+            "every follower appears exactly once, newest-first"
+        );
+
+        // list_following returns exactly the one account alice follows.
+        let following = repo
+            .list_following(alice.id, TimelineQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            following.items.iter().map(|u| u.id).collect::<Vec<_>>(),
+            vec![followers[0].id]
+        );
+
+        // Absent user → NotFound on both listings.
+        let absent = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.list_followers(absent, TimelineQuery::default())
+                .await
+                .expect_err("no such user")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            repo.list_following(absent, TimelineQuery::default())
+                .await
+                .expect_err("no such user")
+                .code(),
+            ErrorCode::NotFound
+        );
     }
 }

@@ -55,6 +55,13 @@ struct Store {
     follows: HashSet<(UserId, UserId)>,
     /// Like edges `(user, chirp)`; the set membership enforces at-most-one-like-per-pair.
     likes: HashSet<(UserId, ChirpId)>,
+    /// Chirps under moderation soft-removal — the in-memory mirror of the durable `chirps.removed`
+    /// column (`chirp_removal`, REQ-DOM-011). Membership means removed: the chirp row is retained
+    /// (so a reply target or a like edge still resolves) but the chirp is **not served** — excluded
+    /// from timelines and from data exports, exactly as the durable backing excludes `removed` rows.
+    /// The durable backing also records a `removed_at` audit timestamp; the in-memory mirror tracks
+    /// only the behavioural flag the two backings must agree on.
+    removed: HashSet<ChirpId>,
     /// Issued session tokens → the user they authenticate.
     tokens: HashMap<String, UserId>,
     /// Durable credential per user: user id → the at-rest secret representation. One per user,
@@ -101,6 +108,44 @@ impl InMemoryRepository {
         self.store
             .lock()
             .map_err(|_| ServerError::Internal("repository lock poisoned".to_owned()))
+    }
+
+    /// Pages a set of candidate account ids newest-first with the same opaque-cursor scheme as the
+    /// timeline, resolving each surviving id to its [`User`]. Shared by
+    /// [`list_followers`](ChirpRepository::list_followers) and
+    /// [`list_following`](ChirpRepository::list_following) so the paging logic lives once.
+    ///
+    /// "Newest-first" is id descending — the same stable id-as-reverse-chronological proxy the
+    /// timeline uses — because the retained follow edges carry no per-edge timestamp (edge creation
+    /// time is the graph stage's concern), so the account id is the stable, unique key both backings
+    /// agree on. `query.cursor` (when present and parseable) excludes ids `>=` it; a malformed
+    /// cursor fails safe to the first page. The returned
+    /// [`next_cursor`](chirp_types::api::Page::next_cursor) is `Some` iff a further page remains, and
+    /// is the last returned id — so paging is **exactly-once** (no skips, no duplicates).
+    fn page_users(store: &Store, mut candidates: Vec<UserId>, query: &TimelineQuery) -> Page<User> {
+        let limit = query
+            .limit
+            .unwrap_or(DEFAULT_TIMELINE_LIMIT)
+            .clamp(1, MAX_TIMELINE_LIMIT) as usize;
+        let cursor_id: Option<u64> = query.cursor.as_ref().and_then(|c| c.0.parse::<u64>().ok());
+
+        candidates.retain(|id| cursor_id.is_none_or(|cid| id.get() < cid));
+        candidates.sort_by_key(|id| std::cmp::Reverse(id.get()));
+
+        let has_more = candidates.len() > limit;
+        candidates.truncate(limit);
+        let next_cursor = if has_more {
+            candidates.last().map(|id| Cursor(id.get().to_string()))
+        } else {
+            None
+        };
+
+        // Resolve each surviving id to its profile (an id in an edge set always has a user record).
+        let items: Vec<User> = candidates
+            .into_iter()
+            .filter_map(|id| store.users.get(&id).cloned())
+            .collect();
+        Page::new(items, next_cursor)
     }
 
     /// Whether `user` is currently under moderation suspension — the in-memory mirror of reading the
@@ -291,6 +336,9 @@ impl ChirpRepository for InMemoryRepository {
         let mut visible: Vec<&Chirp> = store
             .chirps
             .values()
+            // Soft-removed chirps are not served (chirp_removal), mirroring the durable
+            // `WHERE removed = FALSE`.
+            .filter(|chirp| !store.removed.contains(&chirp.id))
             .filter(|chirp| is_visible(chirp.author_id))
             .filter(|chirp| cursor_id.is_none_or(|cid| chirp.id.get() < cid))
             .collect();
@@ -584,36 +632,112 @@ impl ChirpRepository for InMemoryRepository {
         ))
     }
 
-    async fn export_user_data(&self, _user: UserId) -> Result<String, ServerError> {
-        Err(ServerError::Internal(
-            "export_user_data is not yet implemented in the in-memory backing".to_owned(),
-        ))
+    /// Materializes a user's full data export, mirroring the durable backing: the user's profile,
+    /// their authored **non-removed** chirps, their follow graph, and the chirps they like —
+    /// serialized through the shared [`ExportDocument`](super::export::ExportDocument) so the two
+    /// backings produce byte-identical exports.
+    ///
+    /// Read under a single lock, so the export is a consistent snapshot (the in-memory analogue of
+    /// the durable backing's single read transaction). [`NotFound`](ServerError::NotFound) if no
+    /// user has that id, matching the durable backing. Soft-removed chirps are excluded, matching
+    /// both the durable `WHERE removed = FALSE` and this backing's timeline.
+    async fn export_user_data(&self, user: UserId) -> Result<String, ServerError> {
+        let store = self.lock()?;
+        let profile = store
+            .users
+            .get(&user)
+            .cloned()
+            .ok_or_else(|| ServerError::NotFound(format!("user {user}")))?;
+
+        let chirps: Vec<Chirp> = store
+            .chirps
+            .values()
+            .filter(|chirp| chirp.author_id == user && !store.removed.contains(&chirp.id))
+            .cloned()
+            .collect();
+        let following: Vec<UserId> = store
+            .follows
+            .iter()
+            .filter(|(follower, _)| *follower == user)
+            .map(|(_, followee)| *followee)
+            .collect();
+        let followers: Vec<UserId> = store
+            .follows
+            .iter()
+            .filter(|(_, followee)| *followee == user)
+            .map(|(follower, _)| *follower)
+            .collect();
+        let likes: Vec<ChirpId> = store
+            .likes
+            .iter()
+            .filter(|(liker, _)| *liker == user)
+            .map(|(_, chirp)| *chirp)
+            .collect();
+
+        super::export::ExportDocument::new(profile, chirps, following, followers, likes).to_json()
     }
 
+    /// Returns one page of the accounts following `user`, newest-first, mirroring the durable backing.
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist.
     async fn list_followers(
         &self,
-        _user: UserId,
-        _query: TimelineQuery,
+        user: UserId,
+        query: TimelineQuery,
     ) -> Result<Page<User>, ServerError> {
-        Err(ServerError::Internal(
-            "list_followers is not yet implemented in the in-memory backing".to_owned(),
-        ))
+        let store = self.lock()?;
+        if !store.users.contains_key(&user) {
+            return Err(ServerError::NotFound(format!("user {user}")));
+        }
+        let candidates: Vec<UserId> = store
+            .follows
+            .iter()
+            .filter(|(_, followee)| *followee == user)
+            .map(|(follower, _)| *follower)
+            .collect();
+        Ok(Self::page_users(&store, candidates, &query))
     }
 
+    /// Returns one page of the accounts `user` follows, newest-first, mirroring the durable backing.
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist.
     async fn list_following(
         &self,
-        _user: UserId,
-        _query: TimelineQuery,
+        user: UserId,
+        query: TimelineQuery,
     ) -> Result<Page<User>, ServerError> {
-        Err(ServerError::Internal(
-            "list_following is not yet implemented in the in-memory backing".to_owned(),
-        ))
+        let store = self.lock()?;
+        if !store.users.contains_key(&user) {
+            return Err(ServerError::NotFound(format!("user {user}")));
+        }
+        let candidates: Vec<UserId> = store
+            .follows
+            .iter()
+            .filter(|(follower, _)| *follower == user)
+            .map(|(_, followee)| *followee)
+            .collect();
+        Ok(Self::page_users(&store, candidates, &query))
     }
 
-    async fn remove_chirp(&self, _actor: UserId, _chirp: ChirpId) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "remove_chirp is not yet implemented in the in-memory backing".to_owned(),
-        ))
+    /// Soft-removes `chirp` so it is no longer served, mirroring the durable backing's
+    /// `UPDATE chirps SET removed = TRUE`.
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the chirp does not exist. Idempotent: removing an
+    /// already-removed chirp succeeds (a repeated set-membership insert is a no-op). The chirp row
+    /// is retained (so a reply target or a like edge still resolves); it is excluded from timelines
+    /// and exports by its membership in the removed set.
+    ///
+    /// The author-vs-moderator **authorization** boundary (`REQ-DOM-020`) is fixed in the model and
+    /// enforced downstream of the repository (`REQ-ID-*`); this persistence layer accepts `actor`
+    /// and performs the durable removal, exactly as the sibling `set_account_suspension` defers the
+    /// moderator-authority determination upstream.
+    async fn remove_chirp(&self, _actor: UserId, chirp: ChirpId) -> Result<(), ServerError> {
+        let mut store = self.lock()?;
+        if !store.chirps.contains_key(&chirp) {
+            return Err(ServerError::NotFound(format!("chirp {chirp}")));
+        }
+        store.removed.insert(chirp);
+        Ok(())
     }
 
     /// Sets or clears the moderation suspension state of `target` on behalf of moderator `actor`,
@@ -1347,5 +1471,200 @@ mod tests {
         repo.store_health()
             .await
             .expect("the in-process store is always healthy");
+    }
+
+    // ---- Chirp removal (store-free) -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn remove_chirp_excludes_it_from_the_timeline_and_is_idempotent() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let keep = seed_chirp(&repo, alice.id, "kept").await;
+        let gone = seed_chirp(&repo, alice.id, "removed").await;
+
+        // Both chirps are visible before removal.
+        let before = repo
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            before.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![gone.id, keep.id]
+        );
+
+        repo.remove_chirp(alice.id, gone.id)
+            .await
+            .expect("the author removes their own chirp");
+
+        // The removed chirp is no longer served on the timeline; the other remains.
+        let after = repo
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            after.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![keep.id]
+        );
+
+        // Idempotent: removing an already-removed chirp succeeds.
+        repo.remove_chirp(alice.id, gone.id)
+            .await
+            .expect("re-removal is an idempotent no-op");
+    }
+
+    #[tokio::test]
+    async fn remove_chirp_is_not_found_for_an_absent_chirp() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let err = repo
+            .remove_chirp(alice.id, ChirpId::new(4242))
+            .await
+            .expect_err("no such chirp");
+        assert!(matches!(err, ServerError::NotFound(_)));
+    }
+
+    // ---- Data export (store-free) ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn export_user_data_captures_profile_chirps_graph_and_likes_excluding_removed() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let bob = seed_user(&repo, "bob").await;
+        let carol = seed_user(&repo, "carol").await;
+
+        let c1 = seed_chirp(&repo, alice.id, "alice one").await;
+        let c2 = seed_chirp(&repo, alice.id, "alice two").await;
+        let removed = seed_chirp(&repo, alice.id, "to be removed").await;
+        repo.remove_chirp(alice.id, removed.id).await.unwrap();
+
+        // alice follows bob; carol follows alice; alice likes bob's chirp.
+        repo.follow(alice.id, bob.id).await.unwrap();
+        repo.follow(carol.id, alice.id).await.unwrap();
+        let bob_chirp = seed_chirp(&repo, bob.id, "bob chirp").await;
+        repo.like(alice.id, bob_chirp.id).await.unwrap();
+
+        let json = repo
+            .export_user_data(alice.id)
+            .await
+            .expect("export succeeds for an existing user");
+        let doc: crate::repository::export::ExportDocument =
+            serde_json::from_str(&json).expect("the export is valid JSON of the export shape");
+
+        // The export captures the CURRENT profile (its denormalized counts reflect the edges added
+        // above), so compare against a fresh read rather than the pre-follow snapshot.
+        assert_eq!(doc.profile, repo.get_user(alice.id).await.unwrap());
+        // Authored, non-removed chirps, newest-first; the removed chirp is excluded.
+        assert_eq!(
+            doc.chirps.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![c2.id, c1.id]
+        );
+        assert_eq!(doc.following, vec![bob.id]);
+        assert_eq!(doc.followers, vec![carol.id]);
+        assert_eq!(doc.likes, vec![bob_chirp.id]);
+    }
+
+    #[tokio::test]
+    async fn export_user_data_is_not_found_for_an_absent_user() {
+        let repo = InMemoryRepository::new();
+        let err = repo
+            .export_user_data(UserId::new(999))
+            .await
+            .expect_err("no such user");
+        assert!(matches!(err, ServerError::NotFound(_)));
+    }
+
+    // ---- Follower / following listing (store-free) ----------------------------------------------
+
+    #[tokio::test]
+    async fn list_followers_and_following_return_the_right_accounts_newest_first() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let bob = seed_user(&repo, "bob").await;
+        let carol = seed_user(&repo, "carol").await;
+
+        // bob and carol follow alice; alice follows carol.
+        repo.follow(bob.id, alice.id).await.unwrap();
+        repo.follow(carol.id, alice.id).await.unwrap();
+        repo.follow(alice.id, carol.id).await.unwrap();
+
+        // alice's followers are bob and carol, newest-account-first (higher id first): carol, bob.
+        let followers = repo
+            .list_followers(alice.id, TimelineQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            followers.items.iter().map(|u| u.id).collect::<Vec<_>>(),
+            vec![carol.id, bob.id]
+        );
+        assert!(followers.next_cursor.is_none());
+
+        // alice follows only carol.
+        let following = repo
+            .list_following(alice.id, TimelineQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            following.items.iter().map(|u| u.id).collect::<Vec<_>>(),
+            vec![carol.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_followers_paginates_exactly_once_with_the_cursor() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+
+        // Five accounts all follow alice.
+        let mut followers = Vec::new();
+        for i in 0..5 {
+            let u = seed_user(&repo, &format!("f{i}")).await;
+            repo.follow(u.id, alice.id).await.unwrap();
+            followers.push(u);
+        }
+
+        // Page through two at a time and collect; the union must be every follower exactly once.
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = repo
+                .list_followers(
+                    alice.id,
+                    TimelineQuery {
+                        limit: Some(2),
+                        cursor: cursor.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            seen.extend(page.items.iter().map(|u| u.id));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+
+        let mut expected: Vec<UserId> = followers.iter().map(|u| u.id).collect();
+        expected.sort_by_key(|id| std::cmp::Reverse(id.get()));
+        assert_eq!(
+            seen, expected,
+            "every follower appears exactly once, newest-first"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_is_not_found_for_an_absent_user() {
+        let repo = InMemoryRepository::new();
+        assert!(matches!(
+            repo.list_followers(UserId::new(1), TimelineQuery::default())
+                .await
+                .unwrap_err(),
+            ServerError::NotFound(_)
+        ));
+        assert!(matches!(
+            repo.list_following(UserId::new(1), TimelineQuery::default())
+                .await
+                .unwrap_err(),
+            ServerError::NotFound(_)
+        ));
     }
 }

@@ -67,6 +67,11 @@
 
 pub mod in_memory;
 
+/// The serialized shape of a user's data export (the `data_export` capability), shared by both
+/// backings so they produce identical export documents. Crate-internal: the export is an opaque
+/// string on the seam, not a `chirp-types` wire type.
+mod export;
+
 /// The durable PostgreSQL backing (compiling scaffold), behind the optional `postgres` feature.
 ///
 /// Gated so the default build and the store-free test suite pull in neither `sqlx` nor a database;
