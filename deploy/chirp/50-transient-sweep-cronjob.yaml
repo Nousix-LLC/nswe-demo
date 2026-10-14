@@ -1,0 +1,141 @@
+# Scheduled sweep of expired transient durable state (REQ-OPS-010 / BAR-022).
+#
+# The server code already MODELS transient-state expiry — sessions, recovery_tokens, and
+# export_artifacts carry an `expires_at` (migration 0002_domain_schema.sql), expired sessions are
+# treated as absent at serve time, and `ChirpRepository::sweep_expired_transient_state()` reclaims
+# the expired rows (crates/chirp-server/src/repository/postgres.rs). What the code does NOT do is
+# INVOKE that sweep on a schedule: `main.rs` is a thin serve loop with no background task. This
+# CronJob is that schedule.
+#
+# Mechanism choice (CronJob, not an in-process timer) — rationale:
+#   * It touches NO server code. The held expiry/sweep code (durable-impl commit 45a5ace) stays
+#     exactly as verified for #65/#66; this task schedules it, it does not reimplement it.
+#   * It needs NO chirp-server image rebuild. The durable image digest is produced by main's CI
+#     after merge and is owned by the image/wiring tasks; an in-process timer would only run inside
+#     a rebuilt-and-re-pinned image, entangling this retention work with that unresolved
+#     publish-on-main sequencing. A CronJob is independent of the chirp-server image entirely.
+#   * It is GitOps-delivered like every other manifest here: committed, reconciled by Argo CD. The
+#     `batch/CronJob` kind is already (additively) whitelisted in deploy/argocd/appproject.yaml.
+#   * It invokes the sweep's exact durable EFFECT. The three statements below are verbatim the
+#     DELETEs in sweep_expired_transient_state() (postgres.rs ~L1622-1649); `expires_at` is BIGINT
+#     epoch-milliseconds UTC (migration 0002, matching chirp_types::ids::Timestamp), so `now` is
+#     computed as (extract(epoch from now())*1000)::bigint. Under --single-transaction, now() is
+#     fixed at transaction start, so all three DELETEs share one instant — mirroring the code, which
+#     computes `now` once before its transaction. The policy for WHICH rows expire lives in the
+#     schema and the lifetime constants; this job only triggers reclamation on a cadence.
+#
+# Schedule rationale: expiry is already honoured at read time (an expired session resolves as
+# absent; an expired recovery token is rejected), so this sweep is storage RECLAMATION, not a
+# correctness gate. The shortest window is the 24h recovery token; hourly keeps expired rows from
+# lingering more than ~1h past expiry at negligible cost (three index-supported DELETEs —
+# sessions_expires_at_idx / recovery_tokens_expires_at_idx exist in migration 0002).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: chirp-transient-sweep
+  namespace: chirp
+  labels:
+    app.kubernetes.io/name: chirp-transient-sweep
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/component: retention-sweep
+    app.kubernetes.io/managed-by: argocd
+spec:
+  schedule: "0 * * * *"            # hourly, on the hour
+  timeZone: "Etc/UTC"             # cadence-based; UTC stated explicitly (no DST/wall-clock dependence)
+  concurrencyPolicy: Forbid        # a sweep writes shared state; never overlap a slow run into itself
+  startingDeadlineSeconds: 200     # run a just-missed schedule; also avoids the >100-missed-schedules stall
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3              # retry a transient DB/connection hiccup a few times, then surface failure
+      activeDeadlineSeconds: 120   # a sweep is seconds of work; bound a hung run
+      ttlSecondsAfterFinished: 3600 # reap finished Jobs/Pods after an hour rather than accumulating them
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: chirp-transient-sweep
+            app.kubernetes.io/part-of: chirp
+            app.kubernetes.io/component: retention-sweep
+            app.kubernetes.io/managed-by: argocd
+        spec:
+          restartPolicy: Never
+          # This job calls only the database; it never touches the Kubernetes API.
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 10
+          # restricted-PSA-compliant (the chirp namespace enforces `restricted`): run as a nonroot
+          # uid, drop all caps, seccomp RuntimeDefault, no privilege escalation, read-only root fs.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sweep
+              # Same digest-pinned image the Postgres StatefulSet uses (provisioning_notes.md): a
+              # version-matched psql client, already present in-cluster, pinned by immutable digest
+              # (never a movable tag).
+              image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+              imagePullPolicy: IfNotPresent
+              command: ["psql"]
+              args:
+                - "--no-psqlrc"
+                - "-v"
+                - "ON_ERROR_STOP=1"
+                - "--single-transaction"
+                - "-c"
+                - "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= (extract(epoch from now())*1000)::bigint;"
+                - "-c"
+                - "DELETE FROM recovery_tokens WHERE expires_at <= (extract(epoch from now())*1000)::bigint;"
+                - "-c"
+                - "DELETE FROM export_artifacts WHERE expires_at <= (extract(epoch from now())*1000)::bigint;"
+              env:
+                # libpq connection parameters. The host/port are the frozen headless-Service DNS from
+                # the operational contract; the database/user/password come from the SAME out-of-band
+                # Secret chirp-db-credentials the server and StatefulSet use (never committed, not
+                # Argo CD-managed). sslmode matches the in-cluster server connection (TLS in transit
+                # is a documented hardening follow-up, owned with the Secret model, not this task).
+                - name: PGHOST
+                  value: chirp-postgres.chirp.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                - name: PGSSLMODE
+                  value: disable
+                - name: PGCONNECT_TIMEOUT
+                  value: "10"
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: chirp-db-credentials
+                      key: POSTGRES_DB
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: chirp-db-credentials
+                      key: POSTGRES_USER
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: chirp-db-credentials
+                      key: POSTGRES_PASSWORD
+                - name: HOME
+                  value: /tmp     # psql scratch under the read-only root fs
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}
