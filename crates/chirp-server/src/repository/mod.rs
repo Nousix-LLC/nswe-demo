@@ -79,6 +79,28 @@
 //! bounded lifetime with a documented durable default and sweeps what has expired — it does not
 //! choose the security policy. *When* the sweep runs (a scheduled job, an operational cron) is an
 //! operational concern owned by deployment, not by this store seam.
+//!
+//! # Life-of-account content retention (REQ-OPS-010, #67 / BAR-022)
+//!
+//! The opposite-polarity guarantee to the transient-state sweep above, and a first-class store
+//! invariant in its own right: **user content is retained for the life of the account, with no
+//! silent expiry.** The content classes — users, chirps, follows, and likes — carry **no
+//! `expires_at` column** and are reachable by **no** lifetime, expiry, or sweep path.
+//! [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state) deletes only
+//! from the three transient tables and never references a content table, so running it — on any
+//! schedule, any number of times — never removes live content.
+//!
+//! Content leaves the durable store on exactly one path: an explicit, caller-initiated
+//! [`delete_account`](ChirpRepository::delete_account) (the `account_deletion_cascade` capability),
+//! which hard-removes the account and cascades its whole content graph atomically. The remaining
+//! content mutations retract only what the caller explicitly asked for, never anything by the
+//! passage of time — [`unfollow`](ChirpRepository::unfollow) / [`unlike`](ChirpRepository::unlike)
+//! remove the one named edge, and [`remove_chirp`](ChirpRepository::remove_chirp) is a *soft*
+//! moderation removal that **retains the row** (the chirp is no longer served, not deleted). There
+//! is therefore no mechanism by which content ages out of the store on its own: absent an explicit
+//! account deletion, an account's content persists for the account's lifetime. This is the
+//! `content_retained_life_of_account` identity, upheld by every implementor of [`ChirpRepository`]
+//! and asserted by the `content_retained_life_of_account` test in each backing.
 
 pub mod in_memory;
 
@@ -157,6 +179,10 @@ impl TransientSweep {
 /// * **At most one like per `(user, chirp)`** — [`like`](Self::like) / [`unlike`](Self::unlike) are
 ///   idempotent.
 /// * **Timelines are reverse-chronological** — newest chirp first.
+/// * **User content is retained for the life of the account** — users, chirps, follows, and likes
+///   carry no expiry and are removed by no lifetime/sweep/expiry path; content leaves the store only
+///   by an explicit [`delete_account`](Self::delete_account) cascade (the
+///   `content_retained_life_of_account` identity; see the [module docs](self)).
 ///
 /// The trait is object-safe (`Arc<dyn ChirpRepository>`) and `Send + Sync` so it can be shared as
 /// axum application state across concurrent requests.

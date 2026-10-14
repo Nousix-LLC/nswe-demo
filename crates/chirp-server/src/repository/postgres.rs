@@ -1236,6 +1236,13 @@ impl ChirpRepository for PostgresRepository {
     /// mid-operation failure rolls the whole cascade back rather than leaving the account
     /// half-deleted.
     ///
+    /// This cascade is the **sole path** by which user content leaves the durable store. The content
+    /// tables (`users`, `chirps`, `follows`, `likes`) carry no `expires_at` and are touched by no
+    /// lifetime/expiry/sweep mechanism, so — absent this explicit, caller-initiated deletion —
+    /// content is retained for the life of the account (the `content_retained_life_of_account`
+    /// identity; see the [`repository`](crate::repository) module docs, and the
+    /// `content_retention_tests` durable proof).
+    ///
     /// # Errors
     ///
     /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
@@ -5590,6 +5597,149 @@ mod deletion_cascade_tests {
                 .expect_err("already deleted")
                 .code(),
             ErrorCode::NotFound
+        );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod content_retention_tests {
+    //! Durable-behaviour proof of the life-of-account content-retention identity
+    //! (`content_retained_life_of_account`) against a REAL PostgreSQL backing: user content (users,
+    //! chirps, follows, likes) carries no expiry and is removed by NO lifetime/expiry/sweep path — it
+    //! leaves the store only by an explicit `account_deletion_cascade`.
+    //!
+    //! This is the opposite polarity of `transient_lifetime_sweep_tests` (which proves the sweep
+    //! RECLAIMS expired transient rows): here we assert, end to end, that the sweep never removes
+    //! content and that the sole content-removal path is the explicit deletion cascade. Assertions
+    //! are robust to a shared store that may hold other tests' rows — they verify the SPECIFIC seeded
+    //! content survives and that this account's own content is gone after its deletion, never a
+    //! brittle global count. Skipped unless `CHIRP_TEST_DATABASE_URL` names a reachable test database,
+    //! so the default `cargo test` (which does not compile this `postgres`-gated module) and
+    //! `cargo test --features postgres` without a database both stay green and store-free; the
+    //! store-free proof is `in_memory::tests::content_retained_life_of_account`.
+
+    use super::{mapping, now_millis, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateChirpRequest, CreateUserRequest, TimelineQuery};
+    use chirp_types::domain::{ChirpText, User, Username};
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    #[tokio::test]
+    async fn content_retained_life_of_account() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        // A full live content graph: two users, a chirp, a follow edge, a like edge. None of these
+        // classes carries an expiry column, so none is reachable by the transient sweep.
+        let alice = seed_user(&repo).await;
+        let bob = seed_user(&repo).await;
+        let chirp = repo
+            .create_chirp(
+                alice.id,
+                CreateChirpRequest {
+                    text: ChirpText::parse("kept for the life of the account").unwrap(),
+                    reply_to: None,
+                },
+            )
+            .await
+            .expect("post a chirp");
+        repo.follow(alice.id, bob.id).await.expect("follow");
+        repo.like(bob.id, chirp.id).await.expect("like");
+
+        // Inject one expired session so every sweep has transient work to do, then sweep repeatedly:
+        // content retention must hold no matter how often cleanup runs.
+        let alice_col = mapping::user_id_to_column(alice.id).unwrap();
+        let past = mapping::timestamp_to_column(now_millis()) - 1;
+        let expired_session = format!("tok-expired-{}", alice.id.get());
+        sqlx::query(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&expired_session)
+        .bind(alice_col)
+        .bind(past)
+        .bind(Some(past))
+        .execute(repo.pool())
+        .await
+        .expect("inject an expired session");
+
+        for _ in 0..3 {
+            repo.sweep_expired_transient_state()
+                .await
+                .expect("sweep succeeds");
+        }
+
+        // Every content family survives the sweeps intact — no silent expiry.
+        assert_eq!(
+            repo.get_user(alice.id).await.expect("alice retained").id,
+            alice.id
+        );
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob retained").id,
+            bob.id
+        );
+        let timeline = repo
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .expect("timeline");
+        let retained = timeline
+            .items
+            .iter()
+            .find(|c| c.id == chirp.id)
+            .expect("alice's chirp is retained through the sweeps");
+        assert_eq!(retained.like_count, 1, "the like edge is retained");
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob").follower_count,
+            1,
+            "the follow edge is retained"
+        );
+
+        // The ONLY path by which content leaves the durable store is the explicit deletion cascade.
+        repo.delete_account(alice.id).await.expect("delete alice");
+        assert_eq!(
+            repo.get_user(alice.id).await.unwrap_err().code(),
+            chirp_types::api::ErrorCode::NotFound,
+            "content leaves the store only by explicit account_deletion_cascade"
+        );
+        // Bob survives; only alice's content graph cascaded, and his follower_count was reconciled
+        // by the cascade — not by any sweep.
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob still present").id,
+            bob.id
+        );
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob").follower_count,
+            0,
+            "alice's follow edge was removed by the deletion cascade"
         );
     }
 }

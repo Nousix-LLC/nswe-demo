@@ -2200,4 +2200,75 @@ mod tests {
             alice.id
         );
     }
+
+    /// The life-of-account content-retention identity (`content_retained_life_of_account`), store-free:
+    /// user content persists across any number of transient sweeps and leaves the store ONLY by an
+    /// explicit `delete_account` cascade — no lifetime/expiry/sweep path removes live content.
+    ///
+    /// Complements `sweep_never_removes_live_user_content` (which checks the sweep's scoping from the
+    /// transient side) by asserting the FULL guarantee end to end: seed every content family (users,
+    /// a chirp, a follow edge, a like edge), sweep repeatedly and confirm nothing is lost, then show
+    /// the only content-removal path is the explicit account-deletion cascade.
+    #[tokio::test]
+    async fn content_retained_life_of_account() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let bob = seed_user(&repo, "bob").await;
+        let chirp = seed_chirp(&repo, alice.id, "kept for the life of the account").await;
+        repo.follow(alice.id, bob.id).await.expect("follow");
+        repo.like(bob.id, chirp.id).await.expect("like");
+
+        // Force non-empty, repeated sweeps: an expired session always gives the sweep transient work
+        // to do, yet it must never reach content. Running it several times shows content retention is
+        // independent of how often (or on what schedule) cleanup runs.
+        inject_session(&repo, "tok-expired", alice.id, now_millis().as_millis() - 1);
+        for _ in 0..3 {
+            repo.sweep_expired_transient_state()
+                .await
+                .expect("sweep succeeds");
+        }
+
+        // Every content family survives the sweeps intact — no silent expiry.
+        assert_eq!(
+            repo.get_user(alice.id).await.expect("alice retained").id,
+            alice.id
+        );
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob retained").id,
+            bob.id
+        );
+        let timeline = repo
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .expect("timeline");
+        assert_eq!(timeline.items.len(), 1, "alice's chirp is retained");
+        assert_eq!(timeline.items[0].id, chirp.id);
+        assert_eq!(timeline.items[0].like_count, 1, "the like edge is retained");
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob").follower_count,
+            1,
+            "the follow edge is retained"
+        );
+
+        // The ONLY path by which content leaves the store is an explicit account-deletion cascade.
+        repo.delete_account(alice.id).await.expect("delete alice");
+        assert!(
+            matches!(
+                repo.get_user(alice.id).await.unwrap_err(),
+                ServerError::NotFound(_)
+            ),
+            "content leaves the store only by explicit account_deletion_cascade"
+        );
+        // Bob survives; deleting alice cascaded only alice's content graph, and his follower_count
+        // was reconciled by the cascade — not by any sweep.
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob still present").id,
+            bob.id
+        );
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob").follower_count,
+            0,
+            "alice's follow edge was removed by the deletion cascade"
+        );
+    }
 }
