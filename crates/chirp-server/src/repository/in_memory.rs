@@ -66,6 +66,11 @@ struct Store {
     /// and when the challenge expires. Mirrors the durable `recovery_tokens` table (token primary
     /// key, `user_id`, `expires_at`); a validated challenge is consumed (removed) so it is single-use.
     recovery_tokens: HashMap<String, RecoveryChallenge>,
+    /// Accounts currently under moderation suspension — the in-memory mirror of the durable
+    /// `users.suspended` column (`account_suspension`, REQ-DOM-011). Membership means suspended;
+    /// `set_account_suspension` toggles it. The durable backing also records a `suspended_at` audit
+    /// timestamp; the in-memory mirror tracks only the behavioral flag the two backings must agree on.
+    suspended: HashSet<UserId>,
     /// Next user id to assign.
     next_user_id: u64,
     /// Next chirp id to assign.
@@ -96,6 +101,18 @@ impl InMemoryRepository {
         self.store
             .lock()
             .map_err(|_| ServerError::Internal("repository lock poisoned".to_owned()))
+    }
+
+    /// Whether `user` is currently under moderation suspension — the in-memory mirror of reading the
+    /// durable `users.suspended` column. Test-only observation of `set_account_suspension`'s effect,
+    /// which the [`ChirpRepository`] seam does not otherwise surface (suspension is honoured on reads
+    /// by a separate capability sibling).
+    #[cfg(test)]
+    fn is_suspended(&self, user: UserId) -> bool {
+        self.lock()
+            .expect("store lock is not poisoned in tests")
+            .suspended
+            .contains(&user)
     }
 }
 
@@ -599,15 +616,37 @@ impl ChirpRepository for InMemoryRepository {
         ))
     }
 
+    /// Sets or clears the moderation suspension state of `target` on behalf of moderator `actor`,
+    /// mirroring the durable backing.
+    ///
+    /// [`Forbidden`](ServerError::Forbidden) if `actor == target` — moderation acts on *another*
+    /// account (REQ-DOM-020), so a self-targeted moderation is refused exactly as the durable backing
+    /// refuses it (and as no-self-follow is refused); the moderator-authority gate for a distinct
+    /// actor is `REQ-ID-*` and enforced upstream. [`NotFound`](ServerError::NotFound) if `target`
+    /// does not exist. On success the target's membership in the suspended set reflects `suspended`.
     async fn set_account_suspension(
         &self,
-        _actor: UserId,
-        _target: UserId,
-        _suspended: bool,
+        actor: UserId,
+        target: UserId,
+        suspended: bool,
     ) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "set_account_suspension is not yet implemented in the in-memory backing".to_owned(),
-        ))
+        // Mirror the durable backing's model-level authorization result: a moderation action targets
+        // ANOTHER account, so a self-targeted moderation is refused regardless of store state.
+        if actor == target {
+            return Err(ServerError::Forbidden(
+                "a moderation action cannot target the acting account".to_owned(),
+            ));
+        }
+        let mut store = self.lock()?;
+        if !store.users.contains_key(&target) {
+            return Err(ServerError::NotFound(format!("user {target}")));
+        }
+        if suspended {
+            store.suspended.insert(target);
+        } else {
+            store.suspended.remove(&target);
+        }
+        Ok(())
     }
 
     /// The in-memory store is in-process and always reachable, so it is genuinely healthy — this is
@@ -1251,5 +1290,51 @@ mod tests {
             .await
             .expect_err("no such user");
         assert!(matches!(err, ServerError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn set_account_suspension_sets_and_clears_the_target_state() {
+        let repo = InMemoryRepository::new();
+        let moderator = seed_user(&repo, "moderator").await;
+        let target = seed_user(&repo, "target").await;
+
+        assert!(!repo.is_suspended(target.id), "accounts start unsuspended");
+
+        repo.set_account_suspension(moderator.id, target.id, true)
+            .await
+            .expect("a moderator can suspend another account");
+        assert!(repo.is_suspended(target.id), "the target is now suspended");
+
+        repo.set_account_suspension(moderator.id, target.id, false)
+            .await
+            .expect("a moderator can clear the suspension");
+        assert!(!repo.is_suspended(target.id), "the suspension is cleared");
+
+        // Moderating another account never suspends the acting moderator.
+        assert!(!repo.is_suspended(moderator.id));
+    }
+
+    #[tokio::test]
+    async fn set_account_suspension_is_not_found_for_an_absent_target() {
+        let repo = InMemoryRepository::new();
+        let moderator = seed_user(&repo, "moderator").await;
+        let err = repo
+            .set_account_suspension(moderator.id, UserId::new(999), true)
+            .await
+            .expect_err("no such target");
+        assert!(matches!(err, ServerError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn set_account_suspension_is_forbidden_when_actor_targets_themselves() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let err = repo
+            .set_account_suspension(alice.id, alice.id, true)
+            .await
+            .expect_err("a self-targeted moderation is refused");
+        assert!(matches!(err, ServerError::Forbidden(_)));
+        // The refused action left no suspension behind.
+        assert!(!repo.is_suspended(alice.id));
     }
 }

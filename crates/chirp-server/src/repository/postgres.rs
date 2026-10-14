@@ -840,15 +840,82 @@ impl ChirpRepository for PostgresRepository {
         )))
     }
 
+    /// Durably sets (`suspended = true`) or clears (`suspended = false`) the moderation suspension
+    /// state of `target`, on behalf of moderator `actor`.
+    ///
+    /// Realizes the durable `account_suspension` capability (`REQ-DOM-011`). The `suspended` flag and
+    /// its `suspended_at` audit timestamp are the committed `users` columns; a single
+    /// `UPDATE ... RETURNING` both decides [`NotFound`](ServerError::NotFound) (a zero-row update
+    /// means no such target) and performs the mutation inside
+    /// [`with_transaction`](PostgresRepository::with_transaction), so success is returned only after
+    /// the write is durably committed (`confirmed_write_durable`). Setting stamps `suspended_at` with
+    /// the current time; clearing resets it to `NULL`.
+    ///
+    /// # Authorization boundary
+    ///
+    /// Moderation is reserved to an operator/moderator acting on **another** account (`REQ-DOM-020`);
+    /// the ordinary self-service surface, where a user acts only on their own account, cannot suspend
+    /// (`REQ-ID-041`). This persistence stage enforces the one model-level result it owns from the
+    /// committed data — a self-targeted moderation (`actor == target`) is
+    /// [`Forbidden`](ServerError::Forbidden) — mirroring the committed no-self-follow guard. The
+    /// *authority* determination (whether a distinct `actor` actually holds moderator authority) is
+    /// owned by identity & trust (`REQ-ID-047`) and enforced upstream of the repository, exactly as
+    /// the sibling [`remove_chirp`](ChirpRepository::remove_chirp) defers its author-vs-moderator
+    /// check; this stage persists the state durably and does not model the (deliberately-absent)
+    /// moderator role.
+    ///
+    /// # Errors
+    ///
+    /// [`Forbidden`](ServerError::Forbidden) if `actor == target` (a moderation action cannot target
+    /// the acting account); [`NotFound`](ServerError::NotFound) if `target` does not exist;
+    /// [`Internal`](ServerError::Internal) if the write cannot be durably committed — an undurable
+    /// write is reported as failed, never falsely confirmed (`confirmed_write_durable`).
     async fn set_account_suspension(
         &self,
-        _actor: UserId,
-        _target: UserId,
-        _suspended: bool,
+        actor: UserId,
+        target: UserId,
+        suspended: bool,
     ) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "set_account_suspension: {NOT_IMPLEMENTED}"
-        )))
+        // The model-level authorization result this persistence layer owns: moderation acts on
+        // ANOTHER account (REQ-DOM-020), so a self-targeted moderation is refused — mirroring the
+        // committed no-self-follow guard. The moderator-authority gate for a distinct actor is
+        // REQ-ID-* and enforced upstream of the repository.
+        if actor == target {
+            return Err(ServerError::Forbidden(
+                "a moderation action cannot target the acting account".to_owned(),
+            ));
+        }
+
+        // Stamp the audit timestamp when setting; clearing resets it to NULL.
+        let suspended_at = suspended.then(|| mapping::timestamp_to_column(now_millis()));
+
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let target_column = mapping::user_id_to_column(target)?;
+
+                // One statement decides NotFound AND performs the mutation: a matching row is updated
+                // and its id RETURNED; a zero-row update means no such target.
+                let updated: Option<i64> = sqlx::query_scalar(
+                    "UPDATE users SET suspended = $1, suspended_at = $2 WHERE id = $3 RETURNING id",
+                )
+                .bind(suspended)
+                .bind(suspended_at)
+                .bind(target_column)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably set the suspension state of user {target}: {error}"
+                    ))
+                })?;
+
+                match updated {
+                    Some(_) => Ok(()),
+                    None => Err(ServerError::NotFound(format!("user {target}"))),
+                }
+            })
+        })
+        .await
     }
 
     /// Truthful durable-store health: round-trips the live connection pool with a trivial query.
@@ -2769,5 +2836,168 @@ mod profile_update_tests {
             .await
             .expect_err("no such user");
         assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+}
+
+#[cfg(test)]
+mod set_account_suspension_tests {
+    //! End-to-end tests for durable `set_account_suspension` against a REAL PostgreSQL backing,
+    //! composing on the committed store-access substrate
+    //! ([`with_transaction`](super::PostgresRepository::with_transaction)) and the `mapping` boundary
+    //! pattern, persisting into the committed `users.suspended` / `users.suspended_at` moderation
+    //! columns.
+    //!
+    //! Like the proving-slice, credential, session, recovery, and profile tests they are **skipped**
+    //! unless `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the default `cargo test`
+    //! (which does not compile this `postgres`-gated module) and `cargo test --features postgres`
+    //! without a database both stay green and store-free. When a store IS provided they demonstrate,
+    //! against the durable backing:
+    //!
+    //!   * `confirmed_write_durable` — a moderator durably sets the target's suspension (stamping
+    //!     `suspended_at`) and durably clears it (resetting `suspended_at` to `NULL`), and each state
+    //!     survives a FRESH reconnect to the same store (durable, pod-independent).
+    //!   * the error contract — suspending an absent target is [`NotFound`], and a self-targeted
+    //!     moderation (`actor == target`) is [`Forbidden`], never a panic.
+    //!
+    //! Handles are derived from the durable token counter so repeated runs never collide on the
+    //! unique-handle index.
+    //!
+    //! [`NotFound`]: crate::error::ServerError::NotFound
+    //! [`Forbidden`]: crate::error::ServerError::Forbidden
+
+    use super::{mapping, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateUserRequest, ErrorCode};
+    use chirp_types::domain::{User, Username};
+    use chirp_types::ids::UserId;
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter, so repeated
+    /// runs against the same store never collide on `users_username_key`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Creates a durable user with a unique handle and returns the created profile.
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    /// Reads the committed `(suspended, suspended_at)` moderation columns straight from the `users`
+    /// row — the durable analogue of observing the persisted suspension state.
+    async fn stored_suspension(repo: &PostgresRepository, user: &User) -> (bool, Option<i64>) {
+        sqlx::query_as("SELECT suspended, suspended_at FROM users WHERE id = $1")
+            .bind(mapping::user_id_to_column(user.id).expect("user id lowers to a column"))
+            .fetch_one(repo.pool())
+            .await
+            .expect("the user row exists")
+    }
+
+    #[tokio::test]
+    async fn set_account_suspension_durably_sets_and_clears_across_reconnect() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let moderator = seed_user(&repo).await;
+        let target = seed_user(&repo).await;
+
+        // Accounts start unsuspended with no audit timestamp.
+        let (suspended, suspended_at) = stored_suspension(&repo, &target).await;
+        assert!(!suspended, "a fresh account is not suspended");
+        assert_eq!(suspended_at, None);
+
+        // Setting durably records the suspension and stamps suspended_at.
+        repo.set_account_suspension(moderator.id, target.id, true)
+            .await
+            .expect("a moderator durably suspends another account");
+        let (suspended, suspended_at) = stored_suspension(&repo, &target).await;
+        assert!(suspended, "the target is suspended");
+        assert!(suspended_at.is_some(), "setting stamps suspended_at");
+
+        // confirmed_write_durable: a FRESH reconnect reads the suspension (durable, pod-independent).
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        assert!(
+            stored_suspension(&reconnected, &target).await.0,
+            "the suspension is durable across a reconnect"
+        );
+
+        // Clearing durably resets the flag and the audit timestamp to NULL.
+        repo.set_account_suspension(moderator.id, target.id, false)
+            .await
+            .expect("a moderator durably clears the suspension");
+        let (suspended, suspended_at) = stored_suspension(&repo, &target).await;
+        assert!(!suspended, "the suspension is cleared");
+        assert_eq!(suspended_at, None, "clearing resets suspended_at to NULL");
+
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        assert!(
+            !stored_suspension(&reconnected, &target).await.0,
+            "the cleared state is durable across a reconnect"
+        );
+
+        // The moderator's own account is never touched by moderating another.
+        assert!(!stored_suspension(&repo, &moderator).await.0);
+    }
+
+    #[tokio::test]
+    async fn set_account_suspension_is_not_found_for_an_absent_target() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let moderator = seed_user(&repo).await;
+
+        // An id far above the monotonic `user_id_seq` (MINVALUE 1) is guaranteed absent.
+        let error = repo
+            .set_account_suspension(moderator.id, UserId::new(9_000_000_000_000), true)
+            .await
+            .expect_err("no such target");
+        assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn set_account_suspension_is_forbidden_when_actor_targets_themselves() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let alice = seed_user(&repo).await;
+
+        let error = repo
+            .set_account_suspension(alice.id, alice.id, true)
+            .await
+            .expect_err("a self-targeted moderation is refused");
+        assert_eq!(error.code(), ErrorCode::Forbidden);
+
+        // The refused action left no suspension behind.
+        assert!(!stored_suspension(&repo, &alice).await.0);
     }
 }
