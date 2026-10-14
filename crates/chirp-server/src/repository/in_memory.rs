@@ -536,15 +536,29 @@ impl ChirpRepository for InMemoryRepository {
         Ok(())
     }
 
+    /// Updates the mutable profile fields (`display_name`, `bio`) of `user` and returns the updated
+    /// profile, mirroring the durable backing.
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no user has that id, matching the durable backing's
+    /// zero-row update. Only the mutable fields change: the stored [`UserId`] and [`Username`] are the
+    /// account's immutable identity and are never rewritten here (`REQ-DOM-008`), and `created_at` and
+    /// the denormalized counts are left untouched, so the returned profile differs from the stored one
+    /// only in `display_name`/`bio`.
     async fn update_profile(
         &self,
-        _user: UserId,
-        _display_name: String,
-        _bio: Option<String>,
+        user: UserId,
+        display_name: String,
+        bio: Option<String>,
     ) -> Result<User, ServerError> {
-        Err(ServerError::Internal(
-            "update_profile is not yet implemented in the in-memory backing".to_owned(),
-        ))
+        let mut store = self.lock()?;
+        let record = store
+            .users
+            .get_mut(&user)
+            .ok_or_else(|| ServerError::NotFound(format!("user {user}")))?;
+        // Identity (id, username) and created_at/counts are immutable here; only the profile changes.
+        record.display_name = display_name;
+        record.bio = bio;
+        Ok(record.clone())
     }
 
     async fn delete_account(&self, _user: UserId) -> Result<(), ServerError> {
@@ -1172,5 +1186,70 @@ mod tests {
                 .unwrap_err(),
             ServerError::Unauthorized(_)
         ));
+    }
+
+    // ---- Profile update (store-free) ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_profile_changes_mutable_fields_and_preserves_immutable_identity() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+
+        let updated = repo
+            .update_profile(
+                alice.id,
+                "Alice In Wonderland".to_owned(),
+                Some("hi".to_owned()),
+            )
+            .await
+            .expect("update succeeds for an existing user");
+
+        // The mutable fields changed and the returned profile reflects the update.
+        assert_eq!(updated.display_name, "Alice In Wonderland");
+        assert_eq!(updated.bio.as_deref(), Some("hi"));
+        // Immutable identity and non-profile fields are untouched (REQ-DOM-008).
+        assert_eq!(updated.id, alice.id);
+        assert_eq!(updated.username, alice.username);
+        assert_eq!(updated.created_at, alice.created_at);
+        assert_eq!(updated.follower_count, alice.follower_count);
+        assert_eq!(updated.following_count, alice.following_count);
+
+        // The change is durable in the backing: a fresh read returns the updated profile.
+        let fetched = repo.get_user(alice.id).await.expect("user exists");
+        assert_eq!(fetched, updated);
+    }
+
+    #[tokio::test]
+    async fn update_profile_can_clear_the_optional_bio() {
+        let repo = InMemoryRepository::new();
+        let alice = repo
+            .create_user(CreateUserRequest {
+                username: Username::parse("alice").unwrap(),
+                display_name: "Alice".to_owned(),
+                bio: Some("original".to_owned()),
+            })
+            .await
+            .expect("create");
+
+        let updated = repo
+            .update_profile(alice.id, "Alice".to_owned(), None)
+            .await
+            .expect("update succeeds");
+        assert_eq!(updated.bio, None);
+        assert_eq!(
+            repo.get_user(alice.id).await.expect("exists").bio,
+            None,
+            "the cleared bio is durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_profile_is_not_found_for_an_absent_user() {
+        let repo = InMemoryRepository::new();
+        let err = repo
+            .update_profile(UserId::new(999), "ghost".to_owned(), None)
+            .await
+            .expect_err("no such user");
+        assert!(matches!(err, ServerError::NotFound(_)));
     }
 }

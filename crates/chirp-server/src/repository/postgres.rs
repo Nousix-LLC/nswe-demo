@@ -740,15 +740,66 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
+    /// Durably updates the mutable profile fields (`display_name`, `bio`) of `user` and returns the
+    /// updated [`User`], confirmed durable before success is returned (`confirmed_write_durable`).
+    ///
+    /// The write is a single `UPDATE ... RETURNING` run inside
+    /// [`with_transaction`](Self::with_transaction), so the existence decision and the mutation are
+    /// one atomic, confirmed-durable unit: a matching row is updated and lifted back through the
+    /// committed mapping ([`mapping::UserRow::into_user`], which re-parses the stored handle at the
+    /// durable boundary — a corrupt row surfaces as an error, never a panic —
+    /// `domain_boundary_validated`), while a zero-row update (no such id) is reported
+    /// [`NotFound`](ServerError::NotFound). The `SET` list names only `display_name` and `bio`; the
+    /// `WHERE` keys on the immutable `id` and `username` is never written, so the handle and id are
+    /// immutable identity by construction (`REQ-DOM-008`). The new values are bound as parameters
+    /// (never concatenated), so the update carries no injection surface, and — `display_name` /`bio`
+    /// being unconstrained `chirp-types` strings — any value is admissible; the returned [`User`]
+    /// reflects the durable post-update state (its immutable `created_at` and denormalized counts
+    /// unchanged).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
+    /// [`Validation`](ServerError::Validation) if the returned row violates a `chirp-types` invariant
+    /// (a corrupt stored handle); [`Internal`](ServerError::Internal) if the write cannot be durably
+    /// committed or a stored id/count column is corrupt — an undurable write is reported as failed,
+    /// never falsely confirmed (`confirmed_write_durable`).
     async fn update_profile(
         &self,
-        _user: UserId,
-        _display_name: String,
-        _bio: Option<String>,
+        user: UserId,
+        display_name: String,
+        bio: Option<String>,
     ) -> Result<User, ServerError> {
-        Err(ServerError::Internal(format!(
-            "update_profile: {NOT_IMPLEMENTED}"
-        )))
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let user_column = mapping::user_id_to_column(user)?;
+
+                // One statement decides NotFound AND performs the mutation: a matching row is updated
+                // and RETURNED (then lifted through the boundary mapping); a zero-row update means no
+                // such id. `id`/`username` are never in the SET list, so identity is immutable here.
+                let row: Option<mapping::UserRow> = sqlx::query_as(
+                    "UPDATE users SET display_name = $1, bio = $2 WHERE id = $3 \
+                     RETURNING id, username, display_name, bio, created_at, follower_count, \
+                     following_count, suspended, suspended_at",
+                )
+                .bind(&display_name)
+                .bind(&bio)
+                .bind(user_column)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably update the profile for user {user}: {error}"
+                    ))
+                })?;
+
+                match row {
+                    Some(row) => row.into_user(),
+                    None => Err(ServerError::NotFound(format!("user {user}"))),
+                }
+            })
+        })
+        .await
     }
 
     async fn delete_account(&self, _user: UserId) -> Result<(), ServerError> {
@@ -2577,5 +2628,146 @@ mod account_recovery_tests {
                 .code(),
             ErrorCode::Unauthorized
         );
+    }
+}
+
+#[cfg(test)]
+mod profile_update_tests {
+    //! End-to-end tests for durable `update_profile` against a REAL PostgreSQL backing, composing on
+    //! the committed store-access substrate (`with_transaction`) and the `mapping` boundary pattern.
+    //!
+    //! Like the proving-slice, credential, session, and recovery tests they are **skipped** unless
+    //! `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the default `cargo test` (which
+    //! does not compile this `postgres`-gated module) and `cargo test --features postgres` without a
+    //! database both stay green and store-free. When a store IS provided they demonstrate, against the
+    //! durable backing:
+    //!
+    //!   * `confirmed_write_durable` + immutable identity — the mutable `display_name`/`bio` are
+    //!     durably updated and the updated [`User`] returned, while the handle and id are never
+    //!     rewritten (`REQ-DOM-008`); the change survives a FRESH reconnect to the same store (durable,
+    //!     pod-independent), and the optional `bio` can be durably cleared to `NULL`.
+    //!   * the error contract — updating an absent id is [`NotFound`], never a panic.
+    //!
+    //! Handles are derived from the durable token counter so repeated runs never collide on the
+    //! unique-handle index.
+    //!
+    //! [`NotFound`]: crate::error::ServerError::NotFound
+
+    use super::PostgresRepository;
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateUserRequest, ErrorCode};
+    use chirp_types::domain::{User, Username};
+    use chirp_types::ids::UserId;
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter, so repeated
+    /// runs against the same store never collide on `users_username_key`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Creates a durable user with a unique handle and an initial `bio`, returning the created profile.
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: Some("initial bio".to_owned()),
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    #[tokio::test]
+    async fn update_profile_durably_changes_fields_preserves_identity_and_is_pod_independent() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let user = seed_user(&repo).await;
+
+        let updated = repo
+            .update_profile(
+                user.id,
+                "New Display".to_owned(),
+                Some("new bio".to_owned()),
+            )
+            .await
+            .expect("update succeeds for an existing user");
+
+        // The mutable fields changed; the returned profile reflects the durable post-update state.
+        assert_eq!(updated.display_name, "New Display");
+        assert_eq!(updated.bio.as_deref(), Some("new bio"));
+        // Immutable identity and non-profile fields are untouched (REQ-DOM-008).
+        assert_eq!(updated.id, user.id);
+        assert_eq!(updated.username, user.username);
+        assert_eq!(updated.created_at, user.created_at);
+        assert_eq!(updated.follower_count, user.follower_count);
+        assert_eq!(updated.following_count, user.following_count);
+
+        // confirmed_write_durable: a FRESH reconnect to the same store reads the updated profile
+        // (durable, pod-independent) — and the handle and id are unchanged in the store.
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        let fetched = reconnected
+            .get_user(user.id)
+            .await
+            .expect("the user is still present after update");
+        assert_eq!(fetched, updated);
+        assert_eq!(fetched.username, user.username);
+    }
+
+    #[tokio::test]
+    async fn update_profile_can_durably_clear_the_optional_bio() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        let user = seed_user(&repo).await; // seeded with Some("initial bio")
+        let updated = repo
+            .update_profile(user.id, user.display_name.clone(), None)
+            .await
+            .expect("update succeeds");
+        assert_eq!(updated.bio, None);
+
+        // The cleared bio is durable (NULL in the store), read back across a fresh reconnect.
+        let reconnected = PostgresRepository::connect(&url).await.unwrap();
+        assert_eq!(
+            reconnected.get_user(user.id).await.expect("exists").bio,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn update_profile_is_not_found_for_an_absent_user() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // An id far above the monotonic `user_id_seq` (MINVALUE 1) is guaranteed absent.
+        let error = repo
+            .update_profile(UserId::new(9_000_000_000_000), "ghost".to_owned(), None)
+            .await
+            .expect_err("no such user");
+        assert_eq!(error.code(), ErrorCode::NotFound);
     }
 }
