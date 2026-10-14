@@ -3001,3 +3001,93 @@ mod set_account_suspension_tests {
         assert!(!stored_suspension(&repo, &alice).await.0);
     }
 }
+
+#[cfg(test)]
+mod store_health_tests {
+    //! End-to-end tests for durable `store_health` against a REAL PostgreSQL backing. Unlike the
+    //! other durable methods `store_health` takes no domain input and owns no table — it reports
+    //! store *reachability* (`REQ-DOM-021`) by round-tripping the live connection pool, so these
+    //! tests exercise the backing store directly rather than through the `mapping`/`with_transaction`
+    //! substrate.
+    //!
+    //! Like the proving-slice, credential, session, recovery, profile, and suspension tests they are
+    //! **skipped** unless `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the default
+    //! `cargo test` (which does not compile this `postgres`-gated module) and `cargo test --features
+    //! postgres` without a database both stay green and store-free. When a store IS provided they
+    //! demonstrate, against the durable backing:
+    //!
+    //!   * reachable → `Ok(())` — a connected repository reports healthy, and still reports healthy
+    //!     across a FRESH reconnect to the same store (the signal tracks live reachability, not a
+    //!     one-shot constant).
+    //!   * unreachable → [`Internal`] — once the live pool is closed the SAME method reports a failed
+    //!     health check, never a false `Ok`. This is what makes the check a real round-trip of the
+    //!     backing store rather than a hardcoded value.
+    //!
+    //! [`Internal`]: crate::error::ServerError::Internal
+
+    use super::PostgresRepository;
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::ErrorCode;
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    #[tokio::test]
+    async fn store_health_reports_ok_when_the_store_is_reachable() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        // A reachable store reports healthy, and repeating the probe stays healthy (the check is a
+        // repeatable round-trip of the live pool, not a one-shot).
+        repo.store_health()
+            .await
+            .expect("a reachable store is healthy");
+        repo.store_health()
+            .await
+            .expect("the health probe is repeatable while the store stays reachable");
+
+        // Reachability is pod-independent: a FRESH connection to the same store is healthy too.
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        reconnected
+            .store_health()
+            .await
+            .expect("the same store is healthy across a fresh connection");
+    }
+
+    #[tokio::test]
+    async fn store_health_reports_internal_when_the_store_is_unreachable() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        // Sanity: healthy while reachable.
+        repo.store_health()
+            .await
+            .expect("a reachable store is healthy before we close the pool");
+
+        // Make the backing store unreachable by closing the live pool, then probe the SAME method.
+        // Because the check actually round-trips the pool (it is not a constant), it now fails.
+        repo.pool().close().await;
+
+        let error = repo
+            .store_health()
+            .await
+            .expect_err("an unreachable store is reported unhealthy, never falsely Ok");
+        assert_eq!(error.code(), ErrorCode::Internal);
+    }
+}

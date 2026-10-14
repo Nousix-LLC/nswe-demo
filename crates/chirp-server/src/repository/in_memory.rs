@@ -1337,4 +1337,15 @@ mod tests {
         // The refused action left no suspension behind.
         assert!(!repo.is_suspended(alice.id));
     }
+
+    #[tokio::test]
+    async fn store_health_is_ok_for_the_in_process_store() {
+        // The in-memory store is in-process and always reachable, so its health is trivially `Ok` —
+        // a truthful result (the store genuinely is serving), not a placeholder. This keeps the
+        // store-free `cargo test` suite exercising the retained implementor's `store_health` parity.
+        let repo = InMemoryRepository::new();
+        repo.store_health()
+            .await
+            .expect("the in-process store is always healthy");
+    }
 }
