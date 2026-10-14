@@ -6,7 +6,9 @@
 //! 1. **The API** — every handler in [`crate::api::handlers`], mounted under `/api/…` over the
 //!    shared [`AppState`] (see the authoritative method/path table in `HANDLERS_NOTES.md`).
 //! 2. **Liveness** — `GET /healthz`, an unauthenticated health probe that touches no state.
-//! 3. **The SPA** — a static-file service rooted at the static directory, with an `index.html`
+//! 3. **Readiness** — `GET /readyz`, an unauthenticated probe that invokes the repository's
+//!    store-health capability and reports `200` ready / `503` not-ready.
+//! 4. **The SPA** — a static-file service rooted at the static directory, with an `index.html`
 //!    fallback so client-side routes (anything not matched above) resolve to the single-page app.
 //!
 //! A `tower-http` [`TraceLayer`] wraps the whole stack so every request is traced (the spans are
@@ -31,6 +33,8 @@
 
 use std::path::PathBuf;
 
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -42,8 +46,9 @@ use crate::AppState;
 
 /// Build the fully-wired application [`Router`] over the supplied [`AppState`].
 ///
-/// Mounts every API handler (`/api/…`), the `GET /healthz` probe, and the static/SPA fallback
-/// service, then wraps the result in a request [`TraceLayer`] and binds the state. The returned
+/// Mounts every API handler (`/api/…`), the `GET /healthz` liveness and `GET /readyz` readiness
+/// probes, and the static/SPA fallback service, then wraps the result in a request [`TraceLayer`]
+/// and binds the state. The returned
 /// `Router` is state-erased (`Router<()>`), ready to hand to [`axum::serve()`] or to an in-process
 /// test harness.
 ///
@@ -59,6 +64,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         // Liveness probe — unauthenticated, state-free.
         .route("/healthz", get(healthz))
+        // Readiness probe — unauthenticated; invokes the store-health capability.
+        .route("/readyz", get(readyz))
         // --- API surface (see HANDLERS_NOTES.md for the authoritative table) ---
         .route("/api/users", post(handlers::create_user))
         .route("/api/users/{id}", get(handlers::get_user))
@@ -91,6 +98,48 @@ async fn healthz() -> Json<Value> {
         "service": "chirp-server",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// `GET /readyz` — an unauthenticated readiness probe.
+///
+/// Where [`healthz`] is a state-free *liveness* probe (is the process up?), this is a *readiness*
+/// probe (can the process serve traffic?). It invokes
+/// [`ChirpRepository::store_health`](crate::repository::ChirpRepository::store_health) over the
+/// shared [`AppState`] and reports the result on the readiness convention a Kubernetes readiness
+/// probe observes:
+///
+/// * `Ok(())` → **200 OK** with `status: "ready"` — the backing store is reachable and able to serve.
+/// * `Err(_)` → **503 Service Unavailable** with `status: "not_ready"` — the store is unhealthy, so
+///   the instance should be taken out of the serving rotation until it recovers.
+///
+/// The 503 is deliberate and distinct from the `500` that a store-health
+/// [`ServerError`](crate::error::ServerError) renders as through the API error seam
+/// (`impl IntoResponse for ServerError`): a readiness failure means "do not route traffic here
+/// yet", not "this request errored internally". The probe therefore maps the result to a status
+/// directly rather than propagating the error through the `ServerError` response path, and it does
+/// not leak the underlying error detail onto the wire. The mapping is backing-agnostic — it depends
+/// only on the `store_health` trait method, so it behaves correctly for every
+/// [`ChirpRepository`](crate::repository::ChirpRepository) implementor (the in-memory default and
+/// the durable PostgreSQL backing alike).
+async fn readyz(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    match state.repo.store_health().await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "ready",
+                "service": "chirp-server",
+                "version": env!("CARGO_PKG_VERSION"),
+            })),
+        ),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "service": "chirp-server",
+                "version": env!("CARGO_PKG_VERSION"),
+            })),
+        ),
+    }
 }
 
 /// Resolve the static-asset root directory.

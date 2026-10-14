@@ -30,6 +30,12 @@
 //! | [`NotFound`](ServerError::NotFound)        | `NOT_FOUND`        | 404 |
 //! | [`Conflict`](ServerError::Conflict)        | `CONFLICT`         | 409 |
 //! | [`Internal`](ServerError::Internal)        | `INTERNAL`         | 500 |
+//! | [`Unavailable`](ServerError::Unavailable)  | `INTERNAL`         | 500 |
+//!
+//! [`Unavailable`](ServerError::Unavailable) is an **additive** failure mode (the durable store is
+//! out of capacity / resource-exhausted) that deliberately shares the `INTERNAL`/500 wire cell: it
+//! adds a distinct, typed, loggable server-side category **without** introducing a new
+//! [`ErrorCode`] or HTTP status, so the variant ↔ code ↔ status correspondence above stays frozen.
 
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
@@ -99,6 +105,25 @@ pub enum ServerError {
     /// human-readable message is for logs; the wire response deliberately stays generic.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// The durable store could not service a write because it is out of capacity or otherwise
+    /// resource-exhausted (HTTP 500 / `INTERNAL`).
+    ///
+    /// This is the **capacity-fail-safe** category: a write that cannot be durably committed
+    /// because the backing store is out of capacity (disk full, out of memory, too many
+    /// connections — PostgreSQL SQLSTATE class `53`, *insufficient_resources*, or a connection-pool
+    /// acquire timeout) is reported through this variant as a **failed action**, never as a false
+    /// confirmation, and the transaction mechanism guarantees committed data is never left partial
+    /// or corrupt (the `confirmed_write_durable` / `capacity_fail_safe_never_false_confirms`
+    /// identities).
+    ///
+    /// It is an *additive* variant that maps to the same `INTERNAL`/500 wire cell as
+    /// [`Internal`](ServerError::Internal) (so the frozen error-code ↔ HTTP-status correspondence is
+    /// unchanged), but it is a distinct, typed, loggable category so operators and callers can
+    /// recognise capacity exhaustion specifically. Like [`Internal`](ServerError::Internal), the
+    /// human-readable message is for logs; the wire response deliberately stays generic.
+    #[error("durable store unavailable: {0}")]
+    Unavailable(String),
 }
 
 impl ServerError {
@@ -113,7 +138,7 @@ impl ServerError {
             ServerError::Forbidden(_) => ErrorCode::Forbidden,
             ServerError::NotFound(_) => ErrorCode::NotFound,
             ServerError::Conflict(_) => ErrorCode::Conflict,
-            ServerError::Internal(_) => ErrorCode::Internal,
+            ServerError::Internal(_) | ServerError::Unavailable(_) => ErrorCode::Internal,
         }
     }
 
@@ -204,6 +229,10 @@ impl IntoResponse for ServerError {
                 tracing::error!(error = %message, "internal server error");
                 ApiError::new(ErrorCode::Internal, "an internal server error occurred")
             }
+            ServerError::Unavailable(message) => {
+                tracing::error!(error = %message, "durable store unavailable (capacity exhausted)");
+                ApiError::new(ErrorCode::Internal, "an internal server error occurred")
+            }
             other => other.into_api_error(),
         };
 
@@ -265,6 +294,24 @@ mod tests {
     fn non_validation_errors_have_no_field_details() {
         let api = ServerError::NotFound("chirp chirp-9".into()).into_api_error();
         assert_eq!(api.code, ErrorCode::NotFound);
+        assert!(api.details.is_empty());
+    }
+
+    #[test]
+    fn unavailable_maps_to_internal_code_within_the_frozen_contract() {
+        // The additive capacity-exhaustion category surfaces through the preserved error contract:
+        // it maps to the existing INTERNAL code (HTTP 500), introducing no new wire code or status.
+        assert_eq!(
+            ServerError::Unavailable("durable store is out of capacity".into()).code(),
+            ErrorCode::Internal
+        );
+    }
+
+    #[test]
+    fn unavailable_carries_no_field_details_and_renders_as_internal() {
+        // Like Internal, a capacity-exhaustion failure carries no field-level details on the wire.
+        let api = ServerError::Unavailable("disk full".into()).into_api_error();
+        assert_eq!(api.code, ErrorCode::Internal);
         assert!(api.details.is_empty());
     }
 
