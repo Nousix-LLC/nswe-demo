@@ -1927,6 +1927,65 @@ where
     sequence_value_to_u64(raw)
 }
 
+/// Does this PostgreSQL `SQLSTATE` denote capacity / resource exhaustion?
+///
+/// SQLSTATE **class `53`** is *insufficient_resources* — the backing store could not service the
+/// statement because a resource ran out: `53100` disk_full, `53200` out_of_memory, `53300`
+/// too_many_connections, `53400` configuration_limit_exceeded, and the class-generic `53000`. A
+/// SQLSTATE is five characters whose first two are the class, so the whole `53` class (including any
+/// future `53xxx` member, which is by definition still *insufficient_resources*) is matched by its
+/// class prefix. Every other class (`23` integrity, `08` connection, `42` syntax, `40`
+/// transaction-rollback, …) is NOT capacity exhaustion and is left to map to a generic internal
+/// failure.
+///
+/// This is the pure, store-free core of capacity detection; it is unit-tested directly against the
+/// SQLSTATE strings with no database (`capacity_failsafe_tests`).
+fn is_capacity_exhaustion_sqlstate(sqlstate: &str) -> bool {
+    sqlstate.starts_with("53")
+}
+
+/// Classifies a raw [`sqlx::Error`] as capacity / resource exhaustion of the durable store.
+///
+/// Two shapes count as the store being out of capacity:
+/// * a database error whose [`SQLSTATE`](sqlx::error::DatabaseError::code) is in the
+///   *insufficient_resources* class (see [`is_capacity_exhaustion_sqlstate`]); and
+/// * [`sqlx::Error::PoolTimedOut`] — no connection could be acquired within the pool's timeout, i.e.
+///   the connection-pool capacity is exhausted.
+///
+/// Anything else (a constraint violation, a dropped connection, a decode error) is not capacity
+/// exhaustion and is classified as a generic internal failure by [`classify_write_error`].
+fn is_capacity_exhaustion(error: &sqlx::Error) -> bool {
+    match error {
+        // The acquire timeout fired: every pooled connection is in use — connection capacity is
+        // exhausted.
+        sqlx::Error::PoolTimedOut => true,
+        // A resource ran out inside the server (disk, memory, connection slots, configured limits).
+        sqlx::Error::Database(db) => db
+            .code()
+            .is_some_and(|sqlstate| is_capacity_exhaustion_sqlstate(sqlstate.as_ref())),
+        _ => false,
+    }
+}
+
+/// Maps a durable write-path [`sqlx::Error`] onto the preserved [`ServerError`] contract, failing
+/// **safe**: a capacity / resource-exhaustion failure becomes a typed [`ServerError::Unavailable`],
+/// every other failure becomes a [`ServerError::Internal`]. Both are *failed actions* — this
+/// function never maps an error onto a success, so a write that could not be durably committed is
+/// never falsely confirmed (`capacity_fail_safe_never_false_confirms`). The original `sqlx` error is
+/// preserved in the (log-only) message so the underlying cause is never lost.
+///
+/// This is the single detection point the durable write path routes through, so every write that
+/// commits via [`PostgresRepository::with_transaction`] — including the cleanup writes a later
+/// retention / transient-lifetime stage adds — inherits the same fail-safe mapping by construction.
+fn classify_write_error(error: &sqlx::Error, context: &str) -> ServerError {
+    let detail = format!("{context}: {error}");
+    if is_capacity_exhaustion(error) {
+        ServerError::Unavailable(detail)
+    } else {
+        ServerError::Internal(detail)
+    }
+}
+
 impl PostgresRepository {
     /// Borrows the shared connection pool for a single-statement read that needs no transaction.
     ///
@@ -1946,8 +2005,9 @@ impl PostgresRepository {
     /// the same connection keeps the allocation inside the atomic unit). Control flow:
     ///
     /// * the closure returns `Ok(value)` → the transaction is committed; **only if the commit itself
-    ///   succeeds** is `Ok(value)` returned to the caller. A failed commit is reported as
-    ///   [`ServerError::Internal`] and the write is NOT confirmed;
+    ///   succeeds** is `Ok(value)` returned to the caller. A failed commit is reported as a *failed
+    ///   action* ([`ServerError::Unavailable`] when the store is out of capacity, otherwise
+    ///   [`ServerError::Internal`]) and the write is NOT confirmed;
     /// * the closure returns `Err(e)` → the transaction is rolled back and `Err(e)` is propagated
     ///   unchanged, so a partial write never becomes durable.
     ///
@@ -1956,23 +2016,27 @@ impl PostgresRepository {
     ///
     /// # Errors
     ///
-    /// [`ServerError::Internal`] if the transaction cannot be started or the commit fails; otherwise
-    /// whatever error the closure returns.
+    /// A failed start or commit is mapped through [`classify_write_error`]: a capacity /
+    /// resource-exhaustion failure (PostgreSQL SQLSTATE class `53`, or a connection-pool acquire
+    /// timeout) becomes [`ServerError::Unavailable`] and any other failure becomes
+    /// [`ServerError::Internal`] — both *failed actions*, so a write that could not be durably
+    /// committed is never falsely confirmed. Otherwise whatever error the closure returns.
     pub async fn with_transaction<F, T>(&self, operations: F) -> Result<T, ServerError>
     where
         F: for<'c> FnOnce(&'c mut sqlx::PgConnection) -> TransactionFuture<'c, T>,
         T: Send,
     {
         let mut transaction = self.pool.begin().await.map_err(|error| {
-            ServerError::Internal(format!("failed to begin a durable transaction: {error}"))
+            classify_write_error(&error, "failed to begin a durable transaction")
         })?;
 
         match operations(&mut transaction).await {
             Ok(value) => {
                 transaction.commit().await.map_err(|error| {
-                    ServerError::Internal(format!(
-                        "durable commit failed; the write was NOT confirmed: {error}"
-                    ))
+                    classify_write_error(
+                        &error,
+                        "durable commit failed; the write was NOT confirmed",
+                    )
                 })?;
                 Ok(value)
             }
@@ -2492,6 +2556,47 @@ mod substrate_tests {
 }
 
 #[cfg(test)]
+mod capacity_failsafe_tests {
+    //! Store-free unit tests for the capacity-fail-safe classification logic — the pure SQLSTATE
+    //! predicate that decides whether a durable write-path failure is capacity / resource
+    //! exhaustion. These need no database: they fault-inject the SQLSTATE strings directly and
+    //! assert the classification, so they run under `--features postgres` without a live store and
+    //! the default `cargo test` stays store-free. The end-to-end behaviour against a real,
+    //! capacity-constrained backing — a `sqlx::Error` carrying one of these codes, and an exhausted
+    //! connection pool — is covered by the bounded-capacity live test in `substrate_live_tests`
+    //! (gated on `CHIRP_TEST_DATABASE_URL`), because `sqlx::Error` is `#[non_exhaustive]` and cannot
+    //! be constructed outside `sqlx`.
+
+    use super::is_capacity_exhaustion_sqlstate;
+
+    #[test]
+    fn insufficient_resources_class_53_is_capacity_exhaustion() {
+        // SQLSTATE class 53 = insufficient_resources: every member is capacity/resource exhaustion.
+        assert!(is_capacity_exhaustion_sqlstate("53000")); // insufficient_resources (class-generic)
+        assert!(is_capacity_exhaustion_sqlstate("53100")); // disk_full
+        assert!(is_capacity_exhaustion_sqlstate("53200")); // out_of_memory
+        assert!(is_capacity_exhaustion_sqlstate("53300")); // too_many_connections
+        assert!(is_capacity_exhaustion_sqlstate("53400")); // configuration_limit_exceeded
+    }
+
+    #[test]
+    fn other_sqlstate_classes_are_not_capacity_exhaustion() {
+        // Real failures, but NOT capacity exhaustion — they must map to a generic internal failure,
+        // never to Unavailable, so the capacity category stays truthful.
+        assert!(!is_capacity_exhaustion_sqlstate("23505")); // unique_violation
+        assert!(!is_capacity_exhaustion_sqlstate("23503")); // foreign_key_violation
+        assert!(!is_capacity_exhaustion_sqlstate("08006")); // connection_failure
+        assert!(!is_capacity_exhaustion_sqlstate("42601")); // syntax_error
+        assert!(!is_capacity_exhaustion_sqlstate("40001")); // serialization_failure
+        assert!(!is_capacity_exhaustion_sqlstate("")); // absent/empty code
+                                                       // The match is on the leading class, so a non-53 class whose code merely ends in "53" or
+                                                       // contains "53" is not mistaken for exhaustion.
+        assert!(!is_capacity_exhaustion_sqlstate("40053"));
+        assert!(!is_capacity_exhaustion_sqlstate("25301"));
+    }
+}
+
+#[cfg(test)]
 mod substrate_live_tests {
     //! Mechanism tests that require a real PostgreSQL store. They are **skipped** unless
     //! `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the default `cargo test` (which
@@ -2620,6 +2725,73 @@ mod substrate_live_tests {
         assert_eq!(
             stored, None,
             "a write inside a failed transaction must never be durable"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_connection_pool_fails_safe_as_unavailable() {
+        // Bounded-capacity fault injection: a pool with a single connection, held open, leaves no
+        // capacity for a second concurrent transaction. The acquire times out, and the durable
+        // write path must report that as a *failed action* through ServerError::Unavailable — never
+        // a false confirmation (capacity_fail_safe_never_false_confirms), and the atomicity of the
+        // transaction mechanism is untouched (nothing was committed).
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+
+        use sqlx::postgres::PgPoolOptions;
+        use std::time::Duration;
+
+        // A deliberately capacity-of-one pool with a short acquire timeout.
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(250))
+            .connect(&url)
+            .await
+            .expect("connect a single-connection test pool");
+        let repo = PostgresRepository { pool };
+
+        // Hold the one and only connection open, exhausting the pool for the rest of the test.
+        let _held = repo
+            .pool()
+            .acquire()
+            .await
+            .expect("acquire the single pooled connection");
+
+        // A transaction now cannot obtain a connection within the acquire timeout; begin() times
+        // out and the write path classifies that as capacity exhaustion.
+        let result: Result<(), ServerError> = repo
+            .with_transaction(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("INSERT INTO chirp_store_meta (key, value) VALUES ($1, $2)")
+                        .bind("capacity-failsafe-should-not-persist")
+                        .bind("x")
+                        .execute(&mut *conn)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| ServerError::Internal(error.to_string()))
+                })
+            })
+            .await;
+
+        match result {
+            Err(ServerError::Unavailable(_)) => { /* fail-safe: capacity exhaustion reported */ }
+            other => panic!(
+                "an exhausted pool must fail safe as ServerError::Unavailable, got {other:?}"
+            ),
+        }
+
+        // And nothing was committed: the failed, uncommitted write left no durable row.
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT value FROM chirp_store_meta WHERE key = $1")
+                .bind("capacity-failsafe-should-not-persist")
+                .fetch_optional(repo.pool())
+                .await
+                .expect("read back the neutral key");
+        assert_eq!(
+            stored, None,
+            "a write that failed safe on capacity exhaustion must never be durable"
         );
     }
 }
