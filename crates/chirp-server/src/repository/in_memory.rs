@@ -430,10 +430,16 @@ impl ChirpRepository for InMemoryRepository {
         }
     }
 
-    async fn invalidate_session(&self, _token: &SessionToken) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "invalidate_session is not yet implemented in the in-memory backing".to_owned(),
-        ))
+    /// Invalidates a session by removing its issued token, so the token no longer
+    /// [`resolve_token`](ChirpRepository::resolve_token)s — mirroring the durable backing's session
+    /// delete.
+    ///
+    /// Idempotent: invalidating a token that was never issued (or was already invalidated) succeeds,
+    /// matching the durable backing's zero-row delete.
+    async fn invalidate_session(&self, token: &SessionToken) -> Result<(), ServerError> {
+        let mut store = self.lock()?;
+        store.tokens.remove(&token.0);
+        Ok(())
     }
 
     async fn begin_account_recovery(&self, _username: &Username) -> Result<(), ServerError> {
@@ -628,6 +634,35 @@ mod tests {
             .await
             .expect_err("bogus token");
         assert!(matches!(err, ServerError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn invalidate_session_stops_the_token_resolving_and_is_idempotent() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+
+        let auth = repo
+            .login(LoginRequest {
+                username: Username::parse("alice").unwrap(),
+            })
+            .await
+            .expect("known handle logs in");
+        // The freshly issued token resolves...
+        assert_eq!(repo.resolve_token(&auth.token).await.unwrap(), alice.id);
+
+        // ...invalidation removes it, so it stops resolving...
+        repo.invalidate_session(&auth.token)
+            .await
+            .expect("invalidate the live session");
+        assert!(matches!(
+            repo.resolve_token(&auth.token).await.unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+
+        // ...and invalidating again is an idempotent no-op, never an error.
+        repo.invalidate_session(&auth.token)
+            .await
+            .expect("invalidating an already-invalid token succeeds");
     }
 
     #[tokio::test]

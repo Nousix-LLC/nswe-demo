@@ -242,14 +242,120 @@ impl ChirpRepository for PostgresRepository {
         }
     }
 
-    async fn login(&self, _request: LoginRequest) -> Result<AuthResponse, ServerError> {
-        Err(ServerError::Internal(format!("login: {NOT_IMPLEMENTED}")))
+    /// Authenticates by handle and issues a **durable** session: resolves the handle to its user,
+    /// mints an opaque token from the durable counter, and persists the session row inside a
+    /// confirmed-write transaction, returning the [`AuthResponse`] only after the session has durably
+    /// committed (`confirmed_write_durable`).
+    ///
+    /// The handle lookup and the session insert run in the **same** transaction, so the
+    /// [`NotFound`](ServerError::NotFound) decision and the write are one atomic unit, and the stored
+    /// user row is lifted back through the committed mapping ([`mapping::UserRow::into_user`]) so a
+    /// corrupt stored row surfaces as an error, never a panic (`domain_boundary_validated`). The token
+    /// is composed from the durable `token_seq` value allocated on the transaction's own connection —
+    /// opaque, server-assigned, monotonic, stable across restart, never reused
+    /// (`ids_opaque_monotonic_stable`). The session's `expires_at` is deliberately left unset: this
+    /// stage **persists and resolves** sessions durably; the session *lifetime value* and its
+    /// enforcement are owned by EPIC-IDENTITY and the retention stage (`REQ-ID-*`), not decided here.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no user has the requested handle;
+    /// [`Internal`](ServerError::Internal) if the token cannot be allocated or the session cannot be
+    /// durably committed — an undurable write is reported as failed, never falsely confirmed.
+    async fn login(&self, request: LoginRequest) -> Result<AuthResponse, ServerError> {
+        let created_at = mapping::timestamp_to_column(now_millis());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                // Resolve the handle to its stored row INSIDE the transaction, so NotFound and the
+                // session insert are one atomic decision. The row is lifted back through the
+                // committed mapping (a corrupt stored handle surfaces as an error, never a panic).
+                let row: Option<mapping::UserRow> = sqlx::query_as(
+                    "SELECT id, username, display_name, bio, created_at, follower_count, \
+                     following_count, suspended, suspended_at FROM users WHERE username = $1",
+                )
+                .bind(request.username.as_str())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to read user '{}' for login: {error}",
+                        request.username
+                    ))
+                })?;
+                let user = match row {
+                    Some(row) => row.into_user()?,
+                    None => {
+                        return Err(ServerError::NotFound(format!(
+                            "user '{}'",
+                            request.username
+                        )))
+                    }
+                };
+
+                // Mint an opaque token from the durable `token_seq` on the SAME connection, so the
+                // allocation and the session insert are one atomic unit. The value is monotonic and
+                // never reused, so the composed token string is globally unique.
+                let token_value = PostgresRepository::allocate_token_value(&mut *conn).await?;
+                let token = format!("tok-{token_value}");
+
+                // `expires_at` is NULL: lifetime policy/enforcement is EPIC-IDENTITY / retention, not
+                // this stage. The session simply exists durably until explicitly invalidated.
+                sqlx::query(
+                    "INSERT INTO sessions (token, user_id, created_at, expires_at) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(&token)
+                .bind(mapping::user_id_to_column(user.id)?)
+                .bind(created_at)
+                .bind(Option::<i64>::None)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably record a session for user {}: {error}",
+                        user.id
+                    ))
+                })?;
+
+                Ok(AuthResponse {
+                    user,
+                    token: SessionToken(token),
+                })
+            })
+        })
+        .await
     }
 
-    async fn resolve_token(&self, _token: &SessionToken) -> Result<UserId, ServerError> {
-        Err(ServerError::Internal(format!(
-            "resolve_token: {NOT_IMPLEMENTED}"
-        )))
+    /// Resolves a presented bearer token to its authenticated [`UserId`] from the durable `sessions`
+    /// store.
+    ///
+    /// A single pooled read (no transaction is needed for a one-statement lookup); the token is bound
+    /// as a parameter (never concatenated), so the lookup carries no injection surface. A token not
+    /// present in the store — never issued, or already invalidated — is reported
+    /// [`Unauthorized`](ServerError::Unauthorized). Session *expiry* is not enforced here: the
+    /// lifetime policy and its enforcement belong to EPIC-IDENTITY / the retention stage; this stage
+    /// resolves a persisted, non-invalidated session. The stored id is lifted back through the
+    /// committed mapping, so a corrupt id column surfaces as an error rather than a bogus id.
+    ///
+    /// # Errors
+    ///
+    /// [`Unauthorized`](ServerError::Unauthorized) if the token is unknown or no longer valid;
+    /// [`Internal`](ServerError::Internal) if the read fails or a stored id column is corrupt.
+    async fn resolve_token(&self, token: &SessionToken) -> Result<UserId, ServerError> {
+        let row: Option<(i64,)> = sqlx::query_as("SELECT user_id FROM sessions WHERE token = $1")
+            .bind(token.0.as_str())
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|error| {
+                ServerError::Internal(format!("failed to resolve a session token: {error}"))
+            })?;
+
+        match row {
+            Some((user_id,)) => mapping::column_to_user_id(user_id),
+            None => Err(ServerError::Unauthorized(
+                "invalid or expired session token".to_owned(),
+            )),
+        }
     }
 
     async fn create_chirp(
@@ -410,10 +516,34 @@ impl ChirpRepository for PostgresRepository {
         }
     }
 
-    async fn invalidate_session(&self, _token: &SessionToken) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "invalidate_session: {NOT_IMPLEMENTED}"
-        )))
+    /// Durably invalidates a session (deliberate sign-out) by deleting its row inside a confirmed-write
+    /// transaction, so the token no longer [`resolve_token`](ChirpRepository::resolve_token)s.
+    ///
+    /// Idempotent: invalidating a token that is absent (never issued, or already invalidated) succeeds
+    /// — a `DELETE` of zero rows is a no-op that still commits, so repeated sign-out is safe. The
+    /// delete is confirmed durable before success is returned (`confirmed_write_durable`); an undurable
+    /// write is reported as failed, never falsely confirmed.
+    ///
+    /// # Errors
+    ///
+    /// [`Internal`](ServerError::Internal) if the durable store cannot record the invalidation.
+    async fn invalidate_session(&self, token: &SessionToken) -> Result<(), ServerError> {
+        let token = token.0.clone();
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                sqlx::query("DELETE FROM sessions WHERE token = $1")
+                    .bind(&token)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|error| {
+                        ServerError::Internal(format!(
+                            "failed to durably invalidate a session: {error}"
+                        ))
+                    })?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     async fn begin_account_recovery(&self, _username: &Username) -> Result<(), ServerError> {
@@ -1888,5 +2018,171 @@ mod credential_durability_tests {
                 .code(),
             ErrorCode::Unauthorized
         );
+    }
+}
+
+#[cfg(test)]
+mod session_lifecycle_tests {
+    //! End-to-end tests for the durable session lifecycle — `login` / `resolve_token` /
+    //! `invalidate_session` — against a REAL PostgreSQL backing, composing on the committed
+    //! store-access substrate (`with_transaction`, `allocate_token_value`), the `mapping` pattern, and
+    //! the `sessions` table from `SUBTASK_store_substrate`.
+    //!
+    //! Like the proving-slice and credential tests they are **skipped** unless
+    //! `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the default `cargo test` (which
+    //! does not compile this `postgres`-gated module) and `cargo test --features postgres` without a
+    //! database both stay green and store-free. When a store IS provided they demonstrate, against the
+    //! durable backing:
+    //!
+    //!   * `confirmed_write_durable` + bearer-token resolution — `login` issues an opaque token that
+    //!     `resolve_token` maps back to the issuing `UserId`, and still resolves across a fresh
+    //!     reconnect (durable, pod-independent).
+    //!   * the error contract — `login` is [`NotFound`] for an unknown handle, `resolve_token` is
+    //!     [`Unauthorized`] for an unknown token — never a panic.
+    //!   * `invalidate_session` is idempotent and, once applied, the token stops resolving.
+    //!
+    //! Handles are derived from the durable token counter so repeated runs never collide on the
+    //! unique-handle index.
+    //!
+    //! [`NotFound`]: crate::error::ServerError::NotFound
+    //! [`Unauthorized`]: crate::error::ServerError::Unauthorized
+
+    use super::PostgresRepository;
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateUserRequest, ErrorCode, LoginRequest, SessionToken};
+    use chirp_types::domain::{User, Username};
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter, so repeated
+    /// runs against the same store never collide on `users_username_key`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Creates a durable user with a unique handle and returns the created profile.
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    #[tokio::test]
+    async fn login_issues_a_durable_token_that_resolves_back_and_survives_reconnect() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let user = seed_user(&repo).await;
+        let auth = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("a known handle logs in");
+        // The returned profile is the account that logged in.
+        assert_eq!(auth.user.id, user.id);
+
+        // confirmed_write_durable + resolution: the issued token maps back to the issuing UserId.
+        let resolved = repo
+            .resolve_token(&auth.token)
+            .await
+            .expect("the issued token resolves");
+        assert_eq!(resolved, user.id);
+
+        // Durable across restart: a FRESH connection to the same store still resolves the token.
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        let after_restart = reconnected
+            .resolve_token(&auth.token)
+            .await
+            .expect("the session resolves after reconnect");
+        assert_eq!(after_restart, user.id);
+    }
+
+    #[tokio::test]
+    async fn login_is_not_found_for_an_unknown_handle() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // A valid, schema-conformant handle that was never used to create a user.
+        let unknown = unique_handle(&repo).await;
+        let error = repo
+            .login(LoginRequest { username: unknown })
+            .await
+            .expect_err("no such user");
+        assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn resolve_token_is_unauthorized_for_an_unknown_token() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        let error = repo
+            .resolve_token(&SessionToken("tok-never-issued".to_owned()))
+            .await
+            .expect_err("an unknown token does not resolve");
+        assert_eq!(error.code(), ErrorCode::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn invalidate_session_is_idempotent_and_the_token_stops_resolving() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        let user = seed_user(&repo).await;
+        let auth = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("login issues a session");
+        assert_eq!(repo.resolve_token(&auth.token).await.unwrap(), user.id);
+
+        // Once invalidated, the token no longer resolves.
+        repo.invalidate_session(&auth.token)
+            .await
+            .expect("invalidate the live session durably");
+        assert_eq!(
+            repo.resolve_token(&auth.token)
+                .await
+                .expect_err("an invalidated token stops resolving")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+
+        // Invalidating again is an idempotent no-op (a zero-row delete still commits), never an error.
+        repo.invalidate_session(&auth.token)
+            .await
+            .expect("invalidating an already-invalid token succeeds");
     }
 }
