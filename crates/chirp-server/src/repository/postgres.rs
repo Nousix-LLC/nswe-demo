@@ -2895,6 +2895,12 @@ mod substrate_live_tests {
             ),
         }
 
+        // Release the one held connection now that the fail-safe assertion is done: the
+        // durability readback below must acquire the single pooled connection, which it cannot
+        // while `_held` is still open (the acquire would time out as PoolTimedOut). Dropping here
+        // keeps the post-condition readback meaningful rather than deadlocking the pool.
+        drop(_held);
+
         // And nothing was committed: the failed, uncommitted write left no durable row.
         let stored: Option<String> =
             sqlx::query_scalar("SELECT value FROM chirp_store_meta WHERE key = $1")
@@ -3285,18 +3291,30 @@ mod proving_slice_tests {
 
         // domain_boundary_validated: the well-typed create path cannot introduce an invalid handle
         // (`Username` is unrepresentable-if-invalid). To prove the READ boundary guards the store,
-        // inject a corrupt handle directly via SQL (bypassing the domain type) — "has a space" is
-        // 11 chars, so it clears the in-store length CHECK but violates the Username charset — then
-        // assert get_user surfaces a validation error rather than a malformed value or a panic.
+        // inject a corrupt handle directly via SQL (bypassing the domain type), then assert
+        // get_user surfaces a validation error rather than a malformed value or a panic.
+        //
+        // The injected handle is run-unique (mirroring the `unique_handle` convention) so repeated
+        // runs against a persistent store do not collide on `users_username_key`: a token-derived
+        // suffix after `"bad "` keeps it distinct per run. The leading space still violates the
+        // `Username` charset (so the read boundary must reject it), and `"bad "` + up to 11 digits
+        // stays within the in-store 1..=15-char length CHECK.
         let id = PostgresRepository::allocate_user_id(repo.pool())
             .await
             .unwrap();
+        let corrupt_handle = format!(
+            "bad {}",
+            PostgresRepository::allocate_token_value(repo.pool())
+                .await
+                .unwrap()
+                % 100_000_000_000
+        );
         sqlx::query(
             "INSERT INTO users (id, username, display_name, bio, created_at) \
              VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(mapping::user_id_to_column(id).unwrap())
-        .bind("has a space")
+        .bind(&corrupt_handle)
         .bind("Corrupt")
         .bind(Option::<String>::None)
         .bind(0_i64)
