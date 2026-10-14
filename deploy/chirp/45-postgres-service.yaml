@@ -1,0 +1,35 @@
+# chirp durable store — headless Service for the PostgreSQL StatefulSet.
+# Owned by SUBTASK_store_provisioning. clusterIP: None (headless) gives the StatefulSet stable
+# per-pod DNS and a service name chirp-server resolves to reach the primary.
+#
+# Composed against ../../contracts/deploy_durability_contract.yaml: store.headless_service=true,
+# store.port=5432. Carries contract identity `store-is-pod-independent` (the headless half):
+#   45-postgres-service is headless (clusterIP None).
+#
+# Reachable names (recorded in outputs/provisioning_notes.md; consumed by CHIRP_DATABASE_URL):
+#   * service DNS .......... chirp-postgres.chirp.svc.cluster.local:5432   (what chirp-server connects to)
+#   * stable pod DNS ....... chirp-postgres-0.chirp-postgres.chirp.svc.cluster.local:5432
+apiVersion: v1
+kind: Service
+metadata:
+  name: chirp-postgres
+  namespace: chirp
+  labels:
+    app.kubernetes.io/name: chirp-postgres
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: argocd
+spec:
+  # Headless: no cluster VIP. DNS resolves directly to the StatefulSet pod's address(es), which is
+  # what gives a StatefulSet its stable network identity.
+  clusterIP: None
+  # Match ONLY the postgres StatefulSet pods (name differs from chirp-server, so this never selects
+  # the app pods).
+  selector:
+    app.kubernetes.io/name: chirp-postgres
+    app.kubernetes.io/part-of: chirp
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

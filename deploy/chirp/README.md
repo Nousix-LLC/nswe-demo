@@ -11,6 +11,8 @@ These manifests are tracked by the ArgoCD `Application` authored by the sibling 
 | `10-deployment.yaml` | `Deployment chirp-server` | The workload: digest-pinned image, probes, resources, graceful shutdown, hardened securityContext. |
 | `20-service.yaml` | `Service chirp-server` | `ClusterIP`, port `80` → targetPort `8080`. |
 | `30-ingress.yaml` | `Ingress chirp-server` | Traefik ingress, host `chirp.localhost`, path `/`. |
+| `40-postgres-statefulset.yaml` | `StatefulSet chirp-postgres` | Durable store: single-primary PostgreSQL + per-replica PVC (`volumeClaimTemplates`), restricted-PSA-compliant. |
+| `45-postgres-service.yaml` | `Service chirp-postgres` | Headless (`clusterIP: None`) Service giving the primary stable DNS on `:5432`. |
 
 All resources live in namespace `chirp` and carry the contract label set
 (`app.kubernetes.io/{name,part-of,managed-by}`). Filenames are numerically prefixed so a manual
@@ -87,6 +89,70 @@ kubectl -n argocd patch application chirp --type merge -p '{"operation":{"sync":
 ```
 
 The decision taken (and the credential source) should be recorded in the root `SYNTHESIS.md`.
+
+## Durable store (EPIC-PERSIST #64/#67)
+
+`chirp` now carries a **pod-independent durable store**: a single-primary PostgreSQL `StatefulSet`
+(`40-postgres-statefulset.yaml`) bound to its own `PersistentVolumeClaim` (`volumeClaimTemplates`),
+fronted by a headless `Service` (`45-postgres-service.yaml`). `chirp-server` reaches it over the
+network via `sqlx` on `CHIRP_DATABASE_URL`, so the data **outlives any pod** across restart,
+redeploy, and reschedule (ADR-0001). Wiring `chirp-server` itself — injecting `CHIRP_DATABASE_URL`,
+repointing readiness to `/readyz`, and pinning the `--features postgres` image digest in
+`10-deployment.yaml` — is handled by the server-wiring change, not this store manifest.
+
+**Frozen store facts** (the reference other changes compose against):
+
+| Fact | Value |
+|------|-------|
+| StatefulSet | `chirp-postgres` (namespace `chirp`), `replicas: 1` |
+| Headless Service DNS | `chirp-postgres.chirp.svc.cluster.local:5432` |
+| Stable pod DNS | `chirp-postgres-0.chirp-postgres.chirp.svc.cluster.local:5432` |
+| Database name | `chirp` |
+| Application user | `chirp` |
+| PVC (per ordinal) | `data-chirp-postgres-0`, request `2Gi`, default StorageClass (`local-path` on k3d) |
+| Image | `postgres:17-alpine` pinned by digest `sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24` |
+
+**Single-primary, no HA (deliberate, documented).** Exactly one writable PostgreSQL primary holds
+one consistent dataset; there is no failover or read-replica this release (ADR-0001 §2). This bounds
+database *availability* (a primary outage is downtime), not *consistency* (data can never silently
+fork). The per-ordinal PVC retention policy is `Retain`/`Retain` so neither scale-down nor
+StatefulSet deletion destroys the data.
+
+**Restricted-PSA posture.** The namespace enforces `pod-security.kubernetes.io/enforce: restricted`;
+the Postgres pod complies: `runAsNonRoot` as uid/gid `70` (the stock `postgres:17-alpine` postgres
+user), `fsGroup: 70` for PVC ownership, `allowPrivilegeEscalation: false`, `capabilities.drop:
+[ALL]`, `seccompProfile: RuntimeDefault`. `readOnlyRootFilesystem` is deliberately **not** set on the
+DB container — it is not part of the Restricted standard, and the official image writes to runtime
+paths (socket dir, lock files, home) outside the data volume during `initdb`/operation; forcing a
+read-only root fs would make first boot brittle for no PSA-mandated gain. Durable state is confined
+to the PVC.
+
+### The database credential — out-of-band, never committed
+
+The AppProject `chirp` whitelist **excludes `Secret`** (unchanged), so the DB credential is handled
+exactly like the `ghcr-pull` pull-secret: a `Secret` created directly in namespace `chirp`,
+**outside ArgoCD's managed set** (`prune`/`selfHeal` never touch it), referenced by name from the
+manifests. No credential is committed to git. Create it out-of-band before/at deploy (gate identity
+`server-wired-to-store`):
+
+```sh
+# Choose one strong password and reuse it in BOTH the POSTGRES_PASSWORD and the URL below.
+PGPASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
+kubectl -n chirp create secret generic chirp-db-credentials \
+  --from-literal=POSTGRES_DB=chirp \
+  --from-literal=POSTGRES_USER=chirp \
+  --from-literal=POSTGRES_PASSWORD="$PGPASS" \
+  --from-literal=CHIRP_DATABASE_URL="postgres://chirp:${PGPASS}@chirp-postgres.chirp.svc.cluster.local:5432/chirp?sslmode=disable"
+```
+
+The `StatefulSet` reads `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` to initialize the
+database; `chirp-server` (via the server-wiring change) reads `CHIRP_DATABASE_URL`. The embedded
+password in the URL MUST equal `POSTGRES_PASSWORD` — the single command above keeps them consistent.
+`sslmode=disable` is the in-cluster plaintext path (TLS-in-transit to the DB and a GitOps-managed
+secret mechanism — SOPS / External Secrets Operator / sealed-secrets — are deliberate hardening
+follow-ups, out of scope this release). A sweep run as a Kubernetes `CronJob` is pre-authorized in
+the AppProject (`batch/CronJob`), but the transient-state sweep may instead run as `chirp-server`'s
+in-process timer; that choice belongs to the retention/capacity change.
 
 ## Design notes
 
