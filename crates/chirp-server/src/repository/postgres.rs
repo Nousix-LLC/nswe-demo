@@ -547,6 +547,413 @@ impl PostgresRepository {
     }
 }
 
+// =================================================================================================
+// chirp-types <-> storage mapping + domain-boundary validation
+// (EPIC-PERSIST, SUBTASK_mapping_validation, #64/#66).
+//
+// The reusable pattern every later durable capability-method author composes against to move values
+// across the durable boundary WITHOUT re-authoring the conversion or re-implementing the validation.
+// It has three faces, and together they establish the `domain_boundary_validated` identity for the
+// durable store:
+//
+//   * to-column (`*_to_column`, `UserRow::from_user`, ...): a validated `chirp-types` value is
+//     lowered to the scalar column types the schema (`migrations/0002_domain_schema.sql`) declares
+//     (`BIGINT` / `TEXT` / `BOOLEAN`). Because the value objects are unrepresentable-if-invalid, an
+//     invalid `Username` / `ChirpText` cannot even be constructed to reach this path — so an invalid
+//     value cannot enter the store through the pattern.
+//   * from-column (`column_to_*`, `UserRow::into_user`, ...): a stored row is lifted back into a
+//     `chirp-types` value THROUGH the validating constructors (`Username::parse` / `ChirpText::parse`),
+//     so a row that somehow violates a domain invariant surfaces as a `ServerError` — never a panic
+//     and never a silently-wrong value. This is the boundary guard, matching the schema's in-store
+//     CHECKs as defence in depth.
+//   * invariant guards (`ensure_distinct_users`, `is_unique_violation`, and the structural notes
+//     below): entity invariants are expressible at the durable boundary exactly as they are in-memory.
+//
+// `chirp-types` is canonical and unchanged; this module validates AGAINST it. The pattern is additive
+// and authored once — the row types are the single place that names PostgreSQL's scalar
+// representation, and every method author reuses them rather than re-deriving the mapping
+// (`substrate_authored_once` / `substrate_surface_stable`). It consumes the committed schema and the
+// store-access substrate as real code; it re-authors neither.
+//
+// Expressing the remaining entity invariants at the durable boundary, exactly as in-memory:
+//   * no self-follow — `ensure_distinct_users` rejects `follower == followee` with `Forbidden`, as
+//     the in-memory implementor does; the schema's `follows_no_self` CHECK is the in-store backstop.
+//   * <=1 like per (user, chirp) and <=1 follow per pair — the composite PRIMARY KEYs on `likes` /
+//     `follows` (and the `users_username_key` unique handle index) make a duplicate a unique
+//     violation; a method author detects it with `is_unique_violation` and maps it to an idempotent
+//     no-op (repeated follow/like) or a `Conflict` (duplicate handle).
+//   * reverse-chronological timelines — the schema scans by `id DESC` (a larger id is always a later
+//     row), the same stable proxy the in-memory implementor uses; the mapping preserves id order
+//     because `column_to_*_id` is monotonic in the raw value.
+// =================================================================================================
+
+/// The `chirp-types` <-> durable-row mapping and the domain-boundary validation entry points.
+///
+/// Authored once by `SUBTASK_mapping_validation`; every later `SUBTASK_durable_impl` capability
+/// method reuses these entry points rather than re-deriving the conversion or re-implementing the
+/// boundary validation. See the module-level comment above for the three faces of the pattern and
+/// how it expresses each entity invariant at the durable boundary.
+pub mod mapping {
+    use chirp_types::domain::{Chirp, ChirpText, Follow, Like, User, Username};
+    use chirp_types::ids::{ChirpId, Timestamp, UserId};
+
+    use crate::error::ServerError;
+
+    // ---- Scalar column conversions --------------------------------------------------------------
+
+    /// Lowers an unsigned `chirp-types` scalar (an id or a denormalized count) to the signed
+    /// `BIGINT` the schema stores.
+    ///
+    /// The durable counters and counts are `BIGINT ... MINVALUE 1` / `CHECK (... >= 0)`, so every
+    /// legitimate value fits an `i64`. A value that does not fit is impossible for a store-sourced
+    /// id/count; rather than wrap it silently the mapping surfaces it as a failure.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Internal`] if `value` exceeds [`i64::MAX`].
+    pub fn u64_to_column(value: u64, field: &str) -> Result<i64, ServerError> {
+        i64::try_from(value).map_err(|_| {
+            ServerError::Internal(format!(
+                "{field} value {value} does not fit the durable BIGINT column"
+            ))
+        })
+    }
+
+    /// Lifts a signed `BIGINT` column back to the unsigned `chirp-types` scalar it represents.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Internal`] if `value` is negative — the durable id/count columns are
+    /// non-negative by construction (`MINVALUE 1` / `CHECK (... >= 0)`), so a negative value means
+    /// the stored representation is corrupt; it is reported as a failure, never wrapped into a bogus
+    /// id/count.
+    pub fn column_to_u64(value: i64, field: &str) -> Result<u64, ServerError> {
+        u64::try_from(value).map_err(|_| {
+            ServerError::Internal(format!(
+                "durable {field} column holds a negative value ({value}); the stored \
+                 representation is corrupt"
+            ))
+        })
+    }
+
+    /// Lowers a [`UserId`] to its `BIGINT` column value.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Internal`] on the impossible overflow described in [`u64_to_column`].
+    pub fn user_id_to_column(id: UserId) -> Result<i64, ServerError> {
+        u64_to_column(id.get(), "user id")
+    }
+
+    /// Lowers a [`ChirpId`] to its `BIGINT` column value.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Internal`] on the impossible overflow described in [`u64_to_column`].
+    pub fn chirp_id_to_column(id: ChirpId) -> Result<i64, ServerError> {
+        u64_to_column(id.get(), "chirp id")
+    }
+
+    /// Lifts a `BIGINT` column to a [`UserId`].
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Internal`] if the column is negative (corrupt store).
+    pub fn column_to_user_id(value: i64) -> Result<UserId, ServerError> {
+        Ok(UserId::new(column_to_u64(value, "user id")?))
+    }
+
+    /// Lifts a `BIGINT` column to a [`ChirpId`].
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Internal`] if the column is negative (corrupt store).
+    pub fn column_to_chirp_id(value: i64) -> Result<ChirpId, ServerError> {
+        Ok(ChirpId::new(column_to_u64(value, "chirp id")?))
+    }
+
+    /// Lowers a [`Timestamp`] to its `BIGINT` epoch-milliseconds column value.
+    ///
+    /// Infallible: the stored representation is itself an `i64` ([`Timestamp`] is epoch millis).
+    #[must_use]
+    pub fn timestamp_to_column(ts: Timestamp) -> i64 {
+        ts.as_millis()
+    }
+
+    /// Lifts a `BIGINT` epoch-milliseconds column to a [`Timestamp`] (infallible).
+    #[must_use]
+    pub fn column_to_timestamp(millis: i64) -> Timestamp {
+        Timestamp::from_millis(millis)
+    }
+
+    // ---- Boundary validation entry points -------------------------------------------------------
+
+    /// Validates a raw handle string at the durable boundary, yielding a well-formed [`Username`].
+    ///
+    /// The reusable guard for any raw string crossing the boundary as a handle: it routes through
+    /// the canonical [`Username::parse`], so an invalid handle cannot pass.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Validation`] (never a panic) if `raw` is not a valid [`Username`].
+    pub fn validate_username(raw: &str) -> Result<Username, ServerError> {
+        Ok(Username::parse(raw)?)
+    }
+
+    /// Validates a raw chirp body at the durable boundary, yielding a well-formed [`ChirpText`].
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Validation`] (never a panic) if `raw` is not a valid [`ChirpText`].
+    pub fn validate_chirp_text(raw: &str) -> Result<ChirpText, ServerError> {
+        Ok(ChirpText::parse(raw)?)
+    }
+
+    /// Upholds the no-self-follow invariant at the durable boundary, exactly as the in-memory
+    /// implementor does: a user may not follow themselves.
+    ///
+    /// Later `follow`/edge authors call this before writing a follow edge; the schema's
+    /// `follows_no_self` CHECK is the in-store backstop.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Forbidden`] if `follower == followee`.
+    pub fn ensure_distinct_users(follower: UserId, followee: UserId) -> Result<(), ServerError> {
+        if follower == followee {
+            return Err(ServerError::Forbidden(
+                "a user cannot follow themselves".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns `true` when `error` is a durable unique-constraint violation.
+    ///
+    /// The reusable discriminator for the uniqueness invariants the schema enforces with keys and
+    /// indexes (the `users_username_key` unique handle index; the composite primary keys on
+    /// `follows` and `likes`). A write author uses it to map a duplicate to the right domain
+    /// outcome — a [`Conflict`](ServerError::Conflict) for a duplicate handle, or an idempotent
+    /// no-op for a repeated follow/like — rather than surfacing a raw database error.
+    #[must_use]
+    pub fn is_unique_violation(error: &sqlx::Error) -> bool {
+        matches!(error, sqlx::Error::Database(db) if db.is_unique_violation())
+    }
+
+    // ---- Row types (entity <-> row, both directions) --------------------------------------------
+
+    /// The durable row shape of the `users` table, mirroring every column 1:1.
+    ///
+    /// Read a selected row with [`sqlx::query_as`] into this type, then lift it with
+    /// [`into_user`](UserRow::into_user); build one for an insert with
+    /// [`from_user`](UserRow::from_user) and bind its fields. The moderation columns (`suspended`,
+    /// `suspended_at`) have no counterpart on the on-the-wire [`User`]; they are carried here so a
+    /// moderation-aware method can read them without a second query.
+    #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+    pub struct UserRow {
+        /// `users.id` — the opaque [`UserId`] as a signed `BIGINT`.
+        pub id: i64,
+        /// `users.username` — the unique handle, stored as `TEXT`.
+        pub username: String,
+        /// `users.display_name` — free-form display name.
+        pub display_name: String,
+        /// `users.bio` — optional profile biography (`NULL` when unset).
+        pub bio: Option<String>,
+        /// `users.created_at` — account creation time, epoch milliseconds.
+        pub created_at: i64,
+        /// `users.follower_count` — denormalized follower count.
+        pub follower_count: i64,
+        /// `users.following_count` — denormalized following count.
+        pub following_count: i64,
+        /// `users.suspended` — moderation suspension flag (not part of the wire [`User`]).
+        pub suspended: bool,
+        /// `users.suspended_at` — when suspension was applied, epoch millis (`NULL` if not suspended).
+        pub suspended_at: Option<i64>,
+    }
+
+    impl UserRow {
+        /// Lowers a domain [`User`] to its durable row for an insert, as a freshly-created,
+        /// non-suspended account.
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Internal`] on the impossible id/count overflow (see [`u64_to_column`]).
+        pub fn from_user(user: &User) -> Result<Self, ServerError> {
+            Ok(Self {
+                id: user_id_to_column(user.id)?,
+                username: user.username.as_str().to_owned(),
+                display_name: user.display_name.clone(),
+                bio: user.bio.clone(),
+                created_at: timestamp_to_column(user.created_at),
+                follower_count: u64_to_column(user.follower_count, "follower_count")?,
+                following_count: u64_to_column(user.following_count, "following_count")?,
+                suspended: false,
+                suspended_at: None,
+            })
+        }
+
+        /// Lifts the row to a validated [`User`], enforcing `chirp-types` validation at the durable
+        /// boundary: the stored handle is re-parsed through [`Username::parse`], so a corrupt row
+        /// surfaces as an error rather than a malformed value (`domain_boundary_validated`).
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Validation`] if the stored handle is not a valid [`Username`];
+        /// [`ServerError::Internal`] if an id/count column is corrupt (negative).
+        pub fn into_user(self) -> Result<User, ServerError> {
+            Ok(User {
+                id: column_to_user_id(self.id)?,
+                username: validate_username(&self.username)?,
+                display_name: self.display_name,
+                bio: self.bio,
+                created_at: column_to_timestamp(self.created_at),
+                follower_count: column_to_u64(self.follower_count, "follower_count")?,
+                following_count: column_to_u64(self.following_count, "following_count")?,
+            })
+        }
+    }
+
+    /// The durable row shape of the `chirps` table, mirroring every column 1:1.
+    ///
+    /// The moderation columns (`removed`, `removed_at`) have no counterpart on the wire [`Chirp`];
+    /// they are carried for a removal-aware method to read.
+    #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+    pub struct ChirpRow {
+        /// `chirps.id` — the opaque [`ChirpId`] as a signed `BIGINT`.
+        pub id: i64,
+        /// `chirps.author_id` — the authoring [`UserId`].
+        pub author_id: i64,
+        /// `chirps.text` — the chirp body, stored as `TEXT`.
+        pub text: String,
+        /// `chirps.created_at` — post time, epoch milliseconds.
+        pub created_at: i64,
+        /// `chirps.like_count` — denormalized like count.
+        pub like_count: i64,
+        /// `chirps.reply_to` — the replied-to [`ChirpId`], if any (`NULL` for a top-level chirp).
+        pub reply_to: Option<i64>,
+        /// `chirps.removed` — moderation soft-removal flag (not part of the wire [`Chirp`]).
+        pub removed: bool,
+        /// `chirps.removed_at` — when the chirp was removed, epoch millis (`NULL` if not removed).
+        pub removed_at: Option<i64>,
+    }
+
+    impl ChirpRow {
+        /// Lowers a domain [`Chirp`] to its durable row for an insert, as a freshly-posted,
+        /// not-removed chirp.
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Internal`] on the impossible id/count overflow (see [`u64_to_column`]).
+        pub fn from_chirp(chirp: &Chirp) -> Result<Self, ServerError> {
+            Ok(Self {
+                id: chirp_id_to_column(chirp.id)?,
+                author_id: user_id_to_column(chirp.author_id)?,
+                text: chirp.text.as_str().to_owned(),
+                created_at: timestamp_to_column(chirp.created_at),
+                like_count: u64_to_column(chirp.like_count, "like_count")?,
+                reply_to: chirp.reply_to.map(chirp_id_to_column).transpose()?,
+                removed: false,
+                removed_at: None,
+            })
+        }
+
+        /// Lifts the row to a validated [`Chirp`], re-parsing the stored body through
+        /// [`ChirpText::parse`] at the durable boundary (`domain_boundary_validated`).
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Validation`] if the stored body is not a valid [`ChirpText`];
+        /// [`ServerError::Internal`] if an id/count column is corrupt (negative).
+        pub fn into_chirp(self) -> Result<Chirp, ServerError> {
+            Ok(Chirp {
+                id: column_to_chirp_id(self.id)?,
+                author_id: column_to_user_id(self.author_id)?,
+                text: validate_chirp_text(&self.text)?,
+                created_at: column_to_timestamp(self.created_at),
+                like_count: column_to_u64(self.like_count, "like_count")?,
+                reply_to: self.reply_to.map(column_to_chirp_id).transpose()?,
+            })
+        }
+    }
+
+    /// The durable row shape of a `follows` edge, mirroring every column 1:1.
+    #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+    pub struct FollowRow {
+        /// `follows.follower_id` — the following [`UserId`].
+        pub follower_id: i64,
+        /// `follows.followee_id` — the followed [`UserId`].
+        pub followee_id: i64,
+        /// `follows.created_at` — when the edge was created, epoch milliseconds.
+        pub created_at: i64,
+    }
+
+    impl FollowRow {
+        /// Lowers a domain [`Follow`] edge to its durable row.
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Internal`] on the impossible id overflow (see [`u64_to_column`]).
+        pub fn from_follow(follow: &Follow) -> Result<Self, ServerError> {
+            Ok(Self {
+                follower_id: user_id_to_column(follow.follower_id)?,
+                followee_id: user_id_to_column(follow.followee_id)?,
+                created_at: timestamp_to_column(follow.created_at),
+            })
+        }
+
+        /// Lifts the row to a domain [`Follow`] edge.
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Internal`] if an id column is corrupt (negative).
+        pub fn into_follow(self) -> Result<Follow, ServerError> {
+            Ok(Follow {
+                follower_id: column_to_user_id(self.follower_id)?,
+                followee_id: column_to_user_id(self.followee_id)?,
+                created_at: column_to_timestamp(self.created_at),
+            })
+        }
+    }
+
+    /// The durable row shape of a `likes` edge, mirroring every column 1:1.
+    #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+    pub struct LikeRow {
+        /// `likes.user_id` — the liking [`UserId`].
+        pub user_id: i64,
+        /// `likes.chirp_id` — the liked [`ChirpId`].
+        pub chirp_id: i64,
+        /// `likes.created_at` — when the like was recorded, epoch milliseconds.
+        pub created_at: i64,
+    }
+
+    impl LikeRow {
+        /// Lowers a domain [`Like`] edge to its durable row.
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Internal`] on the impossible id overflow (see [`u64_to_column`]).
+        pub fn from_like(like: &Like) -> Result<Self, ServerError> {
+            Ok(Self {
+                user_id: user_id_to_column(like.user_id)?,
+                chirp_id: chirp_id_to_column(like.chirp_id)?,
+                created_at: timestamp_to_column(like.created_at),
+            })
+        }
+
+        /// Lifts the row to a domain [`Like`] edge.
+        ///
+        /// # Errors
+        ///
+        /// [`ServerError::Internal`] if an id column is corrupt (negative).
+        pub fn into_like(self) -> Result<Like, ServerError> {
+            Ok(Like {
+                user_id: column_to_user_id(self.user_id)?,
+                chirp_id: column_to_chirp_id(self.chirp_id)?,
+                created_at: column_to_timestamp(self.created_at),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod substrate_tests {
     //! Store-free unit tests for the substrate's pure logic — the sequence-value mapping and the
@@ -718,6 +1125,202 @@ mod substrate_live_tests {
         assert_eq!(
             stored, None,
             "a write inside a failed transaction must never be durable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    //! Store-free unit tests for the mapping/validation pattern: they need no database and cover
+    //! the boundary validation, the entity-invariant guards, and that every entity round-trips
+    //! through its row mapping unchanged. End-to-end exercise against the durable backing is the
+    //! proving slice's job.
+
+    use super::mapping;
+    use chirp_types::api::ErrorCode;
+    use chirp_types::domain::{Chirp, ChirpText, Follow, Like, User, Username};
+    use chirp_types::ids::{ChirpId, Timestamp, UserId};
+
+    fn sample_user() -> User {
+        User {
+            id: UserId::new(7),
+            username: Username::parse("alice_01").unwrap(),
+            display_name: "Alice".to_owned(),
+            bio: Some("hi there".to_owned()),
+            created_at: Timestamp::from_millis(1_700_000_000_000),
+            follower_count: 3,
+            following_count: 5,
+        }
+    }
+
+    fn sample_chirp(reply_to: Option<ChirpId>) -> Chirp {
+        Chirp {
+            id: ChirpId::new(42),
+            author_id: UserId::new(7),
+            text: ChirpText::parse("hello durable world").unwrap(),
+            created_at: Timestamp::from_millis(1_700_000_001_000),
+            like_count: 2,
+            reply_to,
+        }
+    }
+
+    #[test]
+    fn validate_username_accepts_valid_and_rejects_invalid() {
+        assert_eq!(mapping::validate_username("bob").unwrap().as_str(), "bob");
+        assert_eq!(
+            mapping::validate_username("has space").unwrap_err().code(),
+            ErrorCode::ValidationError
+        );
+        assert_eq!(
+            mapping::validate_username("").unwrap_err().code(),
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn validate_chirp_text_accepts_valid_and_rejects_invalid() {
+        assert_eq!(mapping::validate_chirp_text("hi").unwrap().as_str(), "hi");
+        assert_eq!(
+            mapping::validate_chirp_text("").unwrap_err().code(),
+            ErrorCode::ValidationError
+        );
+        let too_long = "x".repeat(281);
+        assert_eq!(
+            mapping::validate_chirp_text(&too_long).unwrap_err().code(),
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn user_round_trips_through_the_row_mapping() {
+        let user = sample_user();
+        let row = mapping::UserRow::from_user(&user).unwrap();
+        // The wire-irrelevant moderation columns default to "not suspended" for a fresh account.
+        assert!(!row.suspended);
+        assert_eq!(row.suspended_at, None);
+        // An entity written through the mapping reads back equal to its chirp-types value.
+        let back = row.into_user().unwrap();
+        assert_eq!(back, user);
+    }
+
+    #[test]
+    fn chirp_round_trips_including_optional_reply() {
+        for reply in [None, Some(ChirpId::new(40))] {
+            let chirp = sample_chirp(reply);
+            let back = mapping::ChirpRow::from_chirp(&chirp)
+                .unwrap()
+                .into_chirp()
+                .unwrap();
+            assert_eq!(back, chirp);
+            assert_eq!(back.reply_to, reply);
+        }
+    }
+
+    #[test]
+    fn follow_and_like_rows_round_trip() {
+        let follow = Follow {
+            follower_id: UserId::new(1),
+            followee_id: UserId::new(2),
+            created_at: Timestamp::from_millis(10),
+        };
+        assert_eq!(
+            mapping::FollowRow::from_follow(&follow)
+                .unwrap()
+                .into_follow()
+                .unwrap(),
+            follow
+        );
+
+        let like = Like {
+            user_id: UserId::new(1),
+            chirp_id: ChirpId::new(9),
+            created_at: Timestamp::from_millis(20),
+        };
+        assert_eq!(
+            mapping::LikeRow::from_like(&like)
+                .unwrap()
+                .into_like()
+                .unwrap(),
+            like
+        );
+    }
+
+    #[test]
+    fn into_user_rejects_a_corrupt_stored_handle_at_the_boundary() {
+        // A row whose stored handle violates the chirp-types invariant cannot become a domain
+        // User: the boundary re-validates and surfaces a ServerError rather than a bad value or a
+        // panic (domain_boundary_validated).
+        let row = mapping::UserRow {
+            id: 7,
+            username: "has a space".to_owned(),
+            display_name: "Corrupt".to_owned(),
+            bio: None,
+            created_at: 1,
+            follower_count: 0,
+            following_count: 0,
+            suspended: false,
+            suspended_at: None,
+        };
+        assert_eq!(
+            row.into_user().unwrap_err().code(),
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn into_chirp_rejects_corrupt_stored_text_at_the_boundary() {
+        let row = mapping::ChirpRow {
+            id: 1,
+            author_id: 1,
+            text: String::new(), // an empty body violates ChirpText
+            created_at: 1,
+            like_count: 0,
+            reply_to: None,
+            removed: false,
+            removed_at: None,
+        };
+        assert_eq!(
+            row.into_chirp().unwrap_err().code(),
+            ErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn column_conversions_round_trip_and_reject_corrupt_values() {
+        assert_eq!(mapping::u64_to_column(0, "x").unwrap(), 0);
+        assert_eq!(mapping::u64_to_column(1234, "x").unwrap(), 1234);
+        assert_eq!(mapping::column_to_u64(1234, "x").unwrap(), 1234);
+        // A negative stored id/count is corrupt -> Internal, never a wrapped value.
+        assert_eq!(
+            mapping::column_to_u64(-1, "user id").unwrap_err().code(),
+            ErrorCode::Internal
+        );
+        // Id and timestamp column mappings round-trip.
+        let id = UserId::new(99);
+        assert_eq!(
+            mapping::column_to_user_id(mapping::user_id_to_column(id).unwrap()).unwrap(),
+            id
+        );
+        let chirp_id = ChirpId::new(123);
+        assert_eq!(
+            mapping::column_to_chirp_id(mapping::chirp_id_to_column(chirp_id).unwrap()).unwrap(),
+            chirp_id
+        );
+        let ts = Timestamp::from_millis(1_700_000_000_123);
+        assert_eq!(
+            mapping::column_to_timestamp(mapping::timestamp_to_column(ts)),
+            ts
+        );
+    }
+
+    #[test]
+    fn ensure_distinct_users_upholds_no_self_follow() {
+        assert!(mapping::ensure_distinct_users(UserId::new(1), UserId::new(2)).is_ok());
+        assert_eq!(
+            mapping::ensure_distinct_users(UserId::new(1), UserId::new(1))
+                .unwrap_err()
+                .code(),
+            ErrorCode::Forbidden
         );
     }
 }
