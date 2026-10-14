@@ -146,6 +146,28 @@ fn now_millis() -> Timestamp {
     Timestamp::from_millis(millis)
 }
 
+/// The default validity window, in milliseconds, stamped onto a freshly-issued recovery challenge.
+///
+/// The committed schema makes `recovery_tokens.expires_at` `NOT NULL` (REQ-OPS-010: a recovery token
+/// must not be usable past a documented validity), so this stage MUST stamp every issued challenge
+/// with an expiry and MUST reject an expired one at
+/// [`complete_account_recovery`](ChirpRepository::complete_account_recovery). This constant is the
+/// durable default applied at issuance; the **authoritative** validity *value* — like the credential
+/// crypto scheme and the session lifetime — is owned by EPIC-IDENTITY (`REQ-ID-*`), and sweeping
+/// expired rows is owned by the retention stage. This stage persists and enforces an expiry; it does
+/// not own the policy value. The in-memory backing mirrors this window so the two implementors agree.
+const RECOVERY_TOKEN_VALIDITY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
+/// The single, indistinguishable [`Unauthorized`](ServerError::Unauthorized) returned by
+/// [`complete_account_recovery`](ChirpRepository::complete_account_recovery) for every validation
+/// failure — unknown handle, unknown or mismatched token, or expired token.
+///
+/// The durable store never discloses which of those held, so an attacker can neither enumerate
+/// accounts nor probe recovery-token state (fail-secure, mirroring `verify_credential`).
+fn unauthorized_recovery() -> ServerError {
+    ServerError::Unauthorized("invalid or expired recovery token".to_owned())
+}
+
 #[async_trait]
 impl ChirpRepository for PostgresRepository {
     // ---- Existing capability_set (scaffold stubs) -----------------------------------------------
@@ -546,21 +568,176 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
-    async fn begin_account_recovery(&self, _username: &Username) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "begin_account_recovery: {NOT_IMPLEMENTED}"
-        )))
+    /// Durably issues an account-recovery challenge for the account named by `username`: resolves the
+    /// handle to its user and inserts an opaque recovery token into `recovery_tokens` inside a
+    /// confirmed-write transaction, returning only after the write has durably committed
+    /// (`confirmed_write_durable`).
+    ///
+    /// The handle lookup and the token insert run in the **same** transaction, so the
+    /// [`NotFound`](ServerError::NotFound) decision and the write are one atomic unit, and the stored
+    /// id is lifted back through the committed mapping so a corrupt id column surfaces as an error
+    /// rather than a bogus id (`domain_boundary_validated`). The token value is drawn from the durable
+    /// `token_seq` via [`allocate_token_value`](Self::allocate_token_value) on the transaction's own
+    /// connection — opaque, monotonic, stable across restart, never reused
+    /// (`ids_opaque_monotonic_stable`) — and the challenge is stamped with a `created_at`/`expires_at`
+    /// window (the committed schema requires a non-null expiry; the authoritative validity value is
+    /// owned downstream — see [`RECOVERY_TOKEN_VALIDITY_MILLIS`]). The issued token is delivered to the
+    /// account holder out of band (owned downstream, `REQ-ID-*`); this method only persists the
+    /// challenge durably, so it returns `()` rather than the token.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no account has that handle;
+    /// [`Internal`](ServerError::Internal) if the token cannot be allocated or the challenge cannot be
+    /// durably committed — an undurable write is reported as failed, never falsely confirmed.
+    async fn begin_account_recovery(&self, username: &Username) -> Result<(), ServerError> {
+        let username = username.clone();
+        let created_at = mapping::timestamp_to_column(now_millis());
+        let expires_at = created_at.saturating_add(RECOVERY_TOKEN_VALIDITY_MILLIS);
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                // Resolve the handle to its user id INSIDE the transaction, so NotFound and the token
+                // insert are one atomic decision. The stored id is lifted through the committed
+                // mapping (a corrupt id column surfaces as Internal, never a bogus id).
+                let row: Option<(i64,)> =
+                    sqlx::query_as("SELECT id FROM users WHERE username = $1")
+                        .bind(username.as_str())
+                        .fetch_optional(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                                "failed to read user '{username}' for recovery: {error}"
+                            ))
+                        })?;
+                let user_id = match row {
+                    Some((user_id,)) => mapping::column_to_user_id(user_id)?,
+                    None => return Err(ServerError::NotFound(format!("user '{username}'"))),
+                };
+
+                // Mint an opaque challenge token from the durable `token_seq` on the SAME connection,
+                // so the allocation and the insert are one atomic unit and the value is never reused.
+                let token_value = PostgresRepository::allocate_token_value(&mut *conn).await?;
+                let token = format!("rec-{token_value}");
+
+                sqlx::query(
+                    "INSERT INTO recovery_tokens (token, user_id, created_at, expires_at) \
+                     VALUES ($1, $2, $3, $4)",
+                )
+                .bind(&token)
+                .bind(mapping::user_id_to_column(user_id)?)
+                .bind(created_at)
+                .bind(expires_at)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably record a recovery challenge for user {user_id}: {error}"
+                    ))
+                })?;
+
+                Ok(())
+            })
+        })
+        .await
     }
 
+    /// Durably completes account recovery: validates `recovery_token` for `username` against the
+    /// committed `recovery_tokens` table and, on success, sets `new_secret` as the account's
+    /// credential — all inside one confirmed-write transaction, returning only after the credential
+    /// write has durably committed (`confirmed_write_durable`).
+    ///
+    /// Validation is fail-secure and reports [`Unauthorized`](ServerError::Unauthorized)
+    /// **indistinguishably** whether the handle is unknown, the token is unknown, the token belongs to
+    /// a different account, or the token has expired (see [`unauthorized_recovery`]) — the store never
+    /// discloses which held, so an attacker can neither enumerate accounts nor probe token state. A
+    /// validated challenge is **consumed** (deleted) in the same transaction, so a recovery token is
+    /// single-use and cannot be replayed. The new credential is written through the **same durable
+    /// upsert** as [`set_credential`](ChirpRepository::set_credential) (`INSERT … ON CONFLICT
+    /// (user_id) DO UPDATE`), so a credential set via recovery is indistinguishable from one set
+    /// directly and [`verify_credential`](ChirpRepository::verify_credential) authenticates it. The
+    /// secret is persisted verbatim as the at-rest representation; its format and the credential
+    /// protocol are owned downstream (`REQ-ID-*`) and the secret is never logged.
+    ///
+    /// # Errors
+    ///
+    /// [`Unauthorized`](ServerError::Unauthorized) if the recovery token is unknown, expired, or does
+    /// not match the account; [`Internal`](ServerError::Internal) if the credential reset cannot be
+    /// durably committed — an undurable write is reported as failed, never falsely confirmed.
     async fn complete_account_recovery(
         &self,
-        _username: &Username,
-        _recovery_token: &str,
-        _new_secret: &str,
+        username: &Username,
+        recovery_token: &str,
+        new_secret: &str,
     ) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "complete_account_recovery: {NOT_IMPLEMENTED}"
-        )))
+        let username = username.clone();
+        let recovery_token = recovery_token.to_owned();
+        let new_secret = new_secret.to_owned();
+        let now = mapping::timestamp_to_column(now_millis());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                // Resolve the handle inside the transaction. An unknown handle is reported as the same
+                // Unauthorized as an unknown/mismatched token (fail-secure, no account enumeration).
+                let user_row: Option<(i64,)> =
+                    sqlx::query_as("SELECT id FROM users WHERE username = $1")
+                        .bind(username.as_str())
+                        .fetch_optional(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                                "failed to read user '{username}' for recovery: {error}"
+                            ))
+                        })?;
+                let Some((user_id_col,)) = user_row else {
+                    return Err(unauthorized_recovery());
+                };
+                // Lift the stored id through the committed mapping (a corrupt id surfaces as Internal).
+                let user_id = mapping::column_to_user_id(user_id_col)?;
+
+                // Validate AND consume the challenge atomically: delete the row only if it matches the
+                // presented token, belongs to this account, and has not expired. A zero-row delete
+                // (unknown / cross-account / expired) is Unauthorized; a single deleted row proves a
+                // valid, unexpired, single-use challenge that is now spent.
+                let consumed = sqlx::query(
+                    "DELETE FROM recovery_tokens \
+                     WHERE token = $1 AND user_id = $2 AND expires_at > $3",
+                )
+                .bind(&recovery_token)
+                .bind(user_id_col)
+                .bind(now)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to validate a recovery challenge: {error}"
+                    ))
+                })?;
+                if consumed.rows_affected() == 0 {
+                    return Err(unauthorized_recovery());
+                }
+
+                // Reset the credential through the SAME durable upsert as `set_credential`, so a
+                // credential set via recovery is identical to one set directly (one row per user).
+                sqlx::query(
+                    "INSERT INTO credentials (user_id, secret, updated_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT (user_id) DO UPDATE \
+                     SET secret = EXCLUDED.secret, updated_at = EXCLUDED.updated_at",
+                )
+                .bind(user_id_col)
+                .bind(&new_secret)
+                .bind(now)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably reset the credential for user {user_id} via recovery: \
+                         {error}"
+                    ))
+                })?;
+
+                Ok(())
+            })
+        })
+        .await
     }
 
     async fn update_profile(
@@ -2184,5 +2361,221 @@ mod session_lifecycle_tests {
         repo.invalidate_session(&auth.token)
             .await
             .expect("invalidating an already-invalid token succeeds");
+    }
+}
+
+#[cfg(test)]
+mod account_recovery_tests {
+    //! End-to-end tests for durable account recovery — `begin_account_recovery` /
+    //! `complete_account_recovery` — against a REAL PostgreSQL backing, composing on the committed
+    //! store-access substrate (`with_transaction`, `allocate_token_value`), the `mapping` pattern, the
+    //! committed `recovery_tokens` table, and the credential store the prior stage established.
+    //!
+    //! Like the proving-slice, credential, and session tests they are **skipped** unless
+    //! `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the default `cargo test` (which
+    //! does not compile this `postgres`-gated module) and `cargo test --features postgres` without a
+    //! database both stay green and store-free. When a store IS provided they demonstrate, against the
+    //! durable backing:
+    //!
+    //!   * `confirmed_write_durable` + credential reset — a challenge issued by `begin` is validated by
+    //!     `complete`, which durably resets the credential; the new secret then `verify_credential`s
+    //!     (including across a fresh reconnect), proving the reset is durable and pod-independent.
+    //!   * single-use — a validated challenge is consumed, so replaying it is [`Unauthorized`].
+    //!   * the fail-secure error contract — `begin` is [`NotFound`] for an unknown handle, and
+    //!     `complete` is [`Unauthorized`] — indistinguishably — for an unknown handle, an unknown token,
+    //!     a token issued for another account, or an expired token — never a panic.
+    //!
+    //! Handles are derived from the durable token counter so repeated runs never collide on the
+    //! unique-handle index. The "expired" case injects a past-dated `recovery_tokens` row directly via
+    //! SQL (the durable analogue of forcing a stored challenge into the past), exactly as the
+    //! proving-slice test injects a corrupt row to exercise the read boundary.
+    //!
+    //! [`NotFound`]: crate::error::ServerError::NotFound
+    //! [`Unauthorized`]: crate::error::ServerError::Unauthorized
+
+    use super::{mapping, now_millis, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateUserRequest, ErrorCode};
+    use chirp_types::domain::{User, Username};
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter, so repeated
+    /// runs against the same store never collide on `users_username_key`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Creates a durable user with a unique handle and returns the created profile.
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    /// Reads the recovery token `begin_account_recovery` durably issued for `user` straight from the
+    /// `recovery_tokens` table — the durable analogue of a holder receiving the out-of-band challenge.
+    async fn issued_recovery_token(repo: &PostgresRepository, user: &User) -> String {
+        sqlx::query_scalar("SELECT token FROM recovery_tokens WHERE user_id = $1")
+            .bind(mapping::user_id_to_column(user.id).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .expect("a recovery challenge was durably issued for the user")
+    }
+
+    #[tokio::test]
+    async fn begin_then_complete_durably_resets_the_credential_across_reconnect_and_is_single_use()
+    {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let user = seed_user(&repo).await;
+        repo.set_credential(user.id, "old-secret")
+            .await
+            .expect("seed an initial credential");
+
+        // begin durably issues a challenge; complete validates it and resets the credential.
+        repo.begin_account_recovery(&user.username)
+            .await
+            .expect("begin issues a durable challenge for a known handle");
+        let token = issued_recovery_token(&repo, &user).await;
+        repo.complete_account_recovery(&user.username, &token, "new-secret")
+            .await
+            .expect("a valid, unexpired challenge completes");
+
+        // confirmed_write_durable: the recovery-set credential verifies, and the old one no longer
+        // does. The reset survives a FRESH reconnect to the same store (durable, pod-independent).
+        assert_eq!(
+            repo.verify_credential(&user.username, "new-secret")
+                .await
+                .expect("the recovery-set secret verifies"),
+            user.id
+        );
+        assert_eq!(
+            repo.verify_credential(&user.username, "old-secret")
+                .await
+                .expect_err("the replaced secret is rejected")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        assert_eq!(
+            reconnected
+                .verify_credential(&user.username, "new-secret")
+                .await
+                .expect("the recovery-set secret verifies after reconnect"),
+            user.id
+        );
+
+        // Single-use: the validated challenge was consumed, so replaying it is Unauthorized.
+        assert_eq!(
+            repo.complete_account_recovery(&user.username, &token, "another")
+                .await
+                .expect_err("a consumed challenge cannot be replayed")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_account_recovery_is_not_found_for_an_unknown_handle() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // A valid, schema-conformant handle that was never used to create a user.
+        let unknown = unique_handle(&repo).await;
+        let error = repo
+            .begin_account_recovery(&unknown)
+            .await
+            .expect_err("no such account");
+        assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn complete_account_recovery_is_unauthorized_for_unknown_mismatched_or_expired_token() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        let alice = seed_user(&repo).await;
+        let bob = seed_user(&repo).await;
+
+        // Unknown handle → Unauthorized (indistinguishable from an unknown token; no enumeration).
+        let unknown = unique_handle(&repo).await;
+        assert_eq!(
+            repo.complete_account_recovery(&unknown, "rec-whatever", "s")
+                .await
+                .expect_err("unknown handle")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+
+        // Known handle, unknown token.
+        assert_eq!(
+            repo.complete_account_recovery(&alice.username, "rec-never-issued", "s")
+                .await
+                .expect_err("unknown token")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+
+        // A challenge issued for bob must not recover alice.
+        repo.begin_account_recovery(&bob.username).await.unwrap();
+        let bob_token = issued_recovery_token(&repo, &bob).await;
+        assert_eq!(
+            repo.complete_account_recovery(&alice.username, &bob_token, "s")
+                .await
+                .expect_err("a cross-account token is rejected")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+
+        // Expired token: inject a past-dated row for alice directly, then complete → Unauthorized.
+        let expired_token = format!("rec-expired-{}", alice.id.get());
+        let past = mapping::timestamp_to_column(now_millis()) - 1;
+        sqlx::query(
+            "INSERT INTO recovery_tokens (token, user_id, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&expired_token)
+        .bind(mapping::user_id_to_column(alice.id).unwrap())
+        .bind(past)
+        .bind(past)
+        .execute(repo.pool())
+        .await
+        .expect("inject an expired challenge directly");
+        assert_eq!(
+            repo.complete_account_recovery(&alice.username, &expired_token, "s")
+                .await
+                .expect_err("an expired token is rejected")
+                .code(),
+            ErrorCode::Unauthorized
+        );
     }
 }

@@ -62,6 +62,10 @@ struct Store {
     /// verification protocol are owned by identity & trust (`REQ-ID-*`); this backing only holds the
     /// slot and compares what it was given, so the in-memory and durable backings agree.
     credentials: HashMap<UserId, String>,
+    /// Outstanding account-recovery challenges: the opaque recovery token → the account it recovers
+    /// and when the challenge expires. Mirrors the durable `recovery_tokens` table (token primary
+    /// key, `user_id`, `expires_at`); a validated challenge is consumed (removed) so it is single-use.
+    recovery_tokens: HashMap<String, RecoveryChallenge>,
     /// Next user id to assign.
     next_user_id: u64,
     /// Next chirp id to assign.
@@ -95,6 +99,25 @@ impl InMemoryRepository {
     }
 }
 
+/// An outstanding in-memory account-recovery challenge: the account it recovers and its expiry,
+/// mirroring a `recovery_tokens` row's `user_id` / `expires_at`.
+#[derive(Debug, Clone, Copy)]
+struct RecoveryChallenge {
+    /// The account this challenge recovers.
+    user: UserId,
+    /// When the challenge stops being valid; `complete_account_recovery` rejects it from this instant.
+    expires_at: Timestamp,
+}
+
+/// The default validity window, in milliseconds, stamped onto a freshly-issued recovery challenge.
+///
+/// Mirrors the durable backing's `RECOVERY_TOKEN_VALIDITY_MILLIS` so the two implementors agree. The
+/// committed schema requires a non-null `recovery_tokens.expires_at`; the authoritative validity
+/// *value* is owned downstream (EPIC-IDENTITY `REQ-ID-*`, with the retention stage sweeping expired
+/// rows). This backing persists and enforces an expiry at `complete_account_recovery`; it does not
+/// own the policy value.
+const RECOVERY_TOKEN_VALIDITY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
 /// Current wall-clock time as epoch-milliseconds. Pre-epoch system clocks (which do not occur in
 /// practice) degrade to `0` rather than panicking.
 fn now_millis() -> Timestamp {
@@ -103,6 +126,13 @@ fn now_millis() -> Timestamp {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
     Timestamp::from_millis(millis)
+}
+
+/// The single, indistinguishable [`Unauthorized`](ServerError::Unauthorized) returned by
+/// `complete_account_recovery` for every validation failure (unknown handle, unknown or mismatched
+/// token, or expired token), matching the durable backing's fail-secure response.
+fn unauthorized_recovery() -> ServerError {
+    ServerError::Unauthorized("invalid or expired recovery token".to_owned())
 }
 
 #[async_trait]
@@ -442,21 +472,68 @@ impl ChirpRepository for InMemoryRepository {
         Ok(())
     }
 
-    async fn begin_account_recovery(&self, _username: &Username) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "begin_account_recovery is not yet implemented in the in-memory backing".to_owned(),
-        ))
+    /// Issues an account-recovery challenge for the account named by `username`, mirroring the durable
+    /// backing: it records an opaque recovery token for the user, stamped with an expiry. The token is
+    /// delivered to the holder out of band (owned downstream); this backing only records the
+    /// challenge, so it returns `()`.
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no account has that handle, matching the durable
+    /// backing's in-transaction existence decision.
+    async fn begin_account_recovery(&self, username: &Username) -> Result<(), ServerError> {
+        let mut store = self.lock()?;
+        let user = *store
+            .username_to_id
+            .get(username.as_str())
+            .ok_or_else(|| ServerError::NotFound(format!("user '{username}'")))?;
+
+        let token = format!("rec-{}", store.next_token);
+        store.next_token += 1;
+        let expires_at = Timestamp::from_millis(
+            now_millis()
+                .as_millis()
+                .saturating_add(RECOVERY_TOKEN_VALIDITY_MILLIS),
+        );
+        store
+            .recovery_tokens
+            .insert(token, RecoveryChallenge { user, expires_at });
+        Ok(())
     }
 
+    /// Completes account recovery, mirroring the durable backing: validates `recovery_token` for
+    /// `username` and, on success, sets `new_secret` as the account's credential (the same effect as
+    /// [`set_credential`](ChirpRepository::set_credential)) and consumes the single-use challenge.
+    ///
+    /// Fail-secure: reports [`Unauthorized`](ServerError::Unauthorized) indistinguishably when the
+    /// handle is unknown, the token is unknown, it belongs to another account, or it has expired, so
+    /// the backing never discloses which held (no account or token enumeration).
     async fn complete_account_recovery(
         &self,
-        _username: &Username,
-        _recovery_token: &str,
-        _new_secret: &str,
+        username: &Username,
+        recovery_token: &str,
+        new_secret: &str,
     ) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "complete_account_recovery is not yet implemented in the in-memory backing".to_owned(),
-        ))
+        let mut store = self.lock()?;
+
+        // Resolve the handle; an unknown handle is the same Unauthorized as an unknown token.
+        let Some(&user) = store.username_to_id.get(username.as_str()) else {
+            return Err(unauthorized_recovery());
+        };
+
+        // Validate the presented challenge: it must exist, belong to this account, and be unexpired.
+        let valid = matches!(
+            store.recovery_tokens.get(recovery_token),
+            Some(challenge)
+                if challenge.user == user
+                    && challenge.expires_at.as_millis() > now_millis().as_millis()
+        );
+        if !valid {
+            return Err(unauthorized_recovery());
+        }
+
+        // Consume the single-use challenge and reset the credential (same effect as set_credential).
+        store.recovery_tokens.remove(recovery_token);
+        store.credentials.insert(user, new_secret.to_owned());
+        Ok(())
     }
 
     async fn update_profile(
@@ -974,5 +1051,126 @@ mod tests {
         // Idempotent: no underflow below zero.
         let resp2 = repo.unlike(alice.id, chirp.id).await.expect("idempotent");
         assert_eq!(resp2.like_count, 0);
+    }
+
+    // ---- Account recovery (store-free) ----------------------------------------------------------
+
+    /// Reads the recovery token currently issued for `user` straight from the in-memory store — the
+    /// store-free analogue of the durable test reading the `recovery_tokens` row (a holder receiving
+    /// the out-of-band challenge).
+    fn issued_recovery_token(repo: &InMemoryRepository, user: UserId) -> String {
+        let store = repo.lock().expect("lock the store");
+        store
+            .recovery_tokens
+            .iter()
+            .find(|(_, challenge)| challenge.user == user)
+            .map(|(token, _)| token.clone())
+            .expect("a recovery challenge was issued for the user")
+    }
+
+    /// Forces the stored challenge named by `token` to be already expired, so
+    /// `complete_account_recovery` rejects it — the store-free analogue of injecting a past-dated
+    /// `recovery_tokens` row.
+    fn expire_recovery_token(repo: &InMemoryRepository, token: &str) {
+        let mut store = repo.lock().expect("lock the store");
+        let challenge = store
+            .recovery_tokens
+            .get_mut(token)
+            .expect("the challenge exists");
+        challenge.expires_at = Timestamp::from_millis(0);
+    }
+
+    #[tokio::test]
+    async fn account_recovery_begin_complete_resets_credential_and_is_single_use() {
+        let repo = InMemoryRepository::new();
+        let user = seed_user(&repo, "recovery_user").await;
+        repo.set_credential(user.id, "old-secret")
+            .await
+            .expect("seed an initial credential");
+
+        // begin issues a challenge for the handle; complete validates it and resets the credential.
+        repo.begin_account_recovery(&user.username)
+            .await
+            .expect("begin issues a challenge for a known handle");
+        let token = issued_recovery_token(&repo, user.id);
+        repo.complete_account_recovery(&user.username, &token, "new-secret")
+            .await
+            .expect("a valid challenge completes");
+
+        // The credential set via recovery verifies; the old one no longer does.
+        assert_eq!(
+            repo.verify_credential(&user.username, "new-secret")
+                .await
+                .expect("the recovery-set secret verifies"),
+            user.id
+        );
+        assert!(matches!(
+            repo.verify_credential(&user.username, "old-secret")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+
+        // Single-use: the consumed challenge cannot be replayed.
+        assert!(matches!(
+            repo.complete_account_recovery(&user.username, &token, "another")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn begin_account_recovery_is_not_found_for_an_unknown_handle() {
+        let repo = InMemoryRepository::new();
+        let unknown = Username::parse("ghost").unwrap();
+        assert!(matches!(
+            repo.begin_account_recovery(&unknown).await.unwrap_err(),
+            ServerError::NotFound(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn complete_account_recovery_is_unauthorized_for_unknown_mismatched_or_expired_token() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let bob = seed_user(&repo, "bob").await;
+
+        // Unknown handle → Unauthorized (indistinguishable from an unknown token; no enumeration).
+        assert!(matches!(
+            repo.complete_account_recovery(&Username::parse("ghost").unwrap(), "rec-x", "s")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+
+        // Known handle, unknown token.
+        assert!(matches!(
+            repo.complete_account_recovery(&alice.username, "rec-never-issued", "s")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+
+        // A challenge issued for bob must not recover alice.
+        repo.begin_account_recovery(&bob.username).await.unwrap();
+        let bob_token = issued_recovery_token(&repo, bob.id);
+        assert!(matches!(
+            repo.complete_account_recovery(&alice.username, &bob_token, "s")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+
+        // Expired token: force alice's challenge into the past, then complete → Unauthorized.
+        repo.begin_account_recovery(&alice.username).await.unwrap();
+        let alice_token = issued_recovery_token(&repo, alice.id);
+        expire_recovery_token(&repo, &alice_token);
+        assert!(matches!(
+            repo.complete_account_recovery(&alice.username, &alice_token, "s")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
     }
 }
