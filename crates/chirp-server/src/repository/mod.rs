@@ -64,6 +64,21 @@
 //! (the EPIC-PERSIST durable implementation). The retained [`InMemoryRepository`] satisfies them
 //! with error-contract-consistent placeholders (it never falsely confirms an unimplemented durable
 //! operation), so the store-free test suite keeps compiling and passing.
+//!
+//! # Transient-state lifetime and cleanup (REQ-OPS-010, #67 / BAR-022)
+//!
+//! Three durable-state classes are **intentionally transient**: sessions, account-recovery tokens,
+//! and materialised data-export artefacts. Each carries a bounded, documented lifetime stamped in
+//! an `expires_at` column, and expired rows are removed by one uniform sweep,
+//! [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state). This is the
+//! store-side half of the `retention_and_capacity_honoured` guarantee: transient state does not
+//! live forever, an expired row is never served (it is treated as absent on read), and a sweep
+//! reclaims it — while **user content** (users, chirps, follows, likes) is retained for the life of
+//! the account and is **never** touched by the sweep. The authoritative lifetime *values* (e.g. how
+//! long a session is valid) are owned by EPIC-IDENTITY (`REQ-ID-*`); this seam only **enforces** a
+//! bounded lifetime with a documented durable default and sweeps what has expired — it does not
+//! choose the security policy. *When* the sweep runs (a scheduled job, an operational cron) is an
+//! operational concern owned by deployment, not by this store seam.
 
 pub mod in_memory;
 
@@ -101,6 +116,34 @@ pub const DEFAULT_TIMELINE_LIMIT: u32 = 20;
 /// The hard ceiling on a timeline page size. A requested limit above this is clamped down to it, so
 /// a client cannot force an unbounded page.
 pub const MAX_TIMELINE_LIMIT: u32 = 100;
+
+/// The per-class tally returned by
+/// [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state): how many
+/// expired rows of each transient durable-state class the sweep removed.
+///
+/// A field counts rows whose enforced lifetime had elapsed (`expires_at <= now`) and that the sweep
+/// therefore reclaimed. Zero is the normal steady state; a non-zero count is reclaimed transient
+/// state, never lost user content (the sweep touches only these three classes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransientSweep {
+    /// Expired `sessions` rows removed. An expired session already fails to resolve
+    /// (`resolve_token` treats it as absent); the sweep reclaims the row.
+    pub sessions: u64,
+    /// Expired `recovery_tokens` rows removed. An expired recovery challenge is already rejected by
+    /// `complete_account_recovery`; the sweep reclaims the row.
+    pub recovery_tokens: u64,
+    /// Expired `export_artifacts` rows removed — materialised data-export documents past their
+    /// documented retention window.
+    pub export_artifacts: u64,
+}
+
+impl TransientSweep {
+    /// The total number of expired transient rows removed across all three classes.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.sessions + self.recovery_tokens + self.export_artifacts
+    }
+}
 
 /// Abstracts all durable state for the chirp server behind one replaceable boundary.
 ///
@@ -402,4 +445,24 @@ pub trait ChirpRepository: Send + Sync {
     ///
     /// [`Internal`](ServerError::Internal) if the backing store is unreachable or unhealthy.
     async fn store_health(&self) -> Result<(), ServerError>;
+
+    /// Removes every expired row of transient durable state — sessions, account-recovery tokens,
+    /// and materialised export artefacts — returning the per-class count reclaimed.
+    ///
+    /// This is the cleanup half of the transient-lifetime contract (see the [module docs](self)).
+    /// "Expired" is `expires_at <= now`; a row carrying no expiry (a session whose `expires_at` is
+    /// unset) is **never** swept, and **user content** (users, chirps, follows, likes) is never
+    /// touched — the sweep reclaims only transient state whose documented lifetime has elapsed, so
+    /// the life-of-account retention guarantee is upheld. The sweep is a confirmed-write operation:
+    /// it composes with the store's transaction mechanism without weakening atomicity or durability
+    /// (`confirmed_write_durable`, `multiwrite_atomic`) and inherits the capacity-fail-safe write
+    /// path, so a store out of capacity is reported as a failed action rather than a partial or
+    /// falsely-confirmed cleanup. Idempotent in effect: running it twice in a row reclaims nothing
+    /// the second time (the first run already removed the expired rows).
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`](ServerError::Unavailable) if the store is out of capacity;
+    /// [`Internal`](ServerError::Internal) if the cleanup cannot be durably committed.
+    async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError>;
 }

@@ -39,7 +39,9 @@ use chirp_types::domain::{Chirp, User, Username};
 use chirp_types::ids::{ChirpId, Timestamp, UserId};
 
 use crate::error::ServerError;
-use crate::repository::{export, ChirpRepository, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT};
+use crate::repository::{
+    export, ChirpRepository, TransientSweep, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT,
+};
 
 /// The embedded, forward-only migration set for the durable store.
 ///
@@ -152,6 +154,22 @@ fn now_millis() -> Timestamp {
 /// expired rows is owned by the retention stage. This stage persists and enforces an expiry; it does
 /// not own the policy value. The in-memory backing mirrors this window so the two implementors agree.
 const RECOVERY_TOKEN_VALIDITY_MILLIS: i64 = 24 * 60 * 60 * 1000;
+
+/// The durable default session lifetime, in milliseconds, stamped onto a freshly-issued session at
+/// [`login`](ChirpRepository::login).
+///
+/// The committed schema makes `sessions.expires_at` nullable; the substrate deliberately left it
+/// unset and deferred "the lifetime VALUE and the sweep" to this retention stage (REQ-OPS-010). To
+/// give sessions a *defined, enforced, documented* lifetime, this stage stamps every new session
+/// with a bounded expiry: [`resolve_token`](ChirpRepository::resolve_token) then treats an expired
+/// session as absent, and [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state)
+/// reclaims it. Exactly as for [`RECOVERY_TOKEN_VALIDITY_MILLIS`], the **authoritative** validity
+/// *value* — and the session security policy — is owned by EPIC-IDENTITY (`REQ-ID-*`); this constant
+/// is only the durable default this stage applies so a bounded lifetime is enforced and swept, not a
+/// policy decision. The in-memory backing mirrors this window so the two implementors agree. A
+/// legacy session row with a NULL `expires_at` (none are issued once this stage is in effect) is
+/// treated as unbounded and is never swept.
+const SESSION_LIFETIME_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// The single, indistinguishable [`Unauthorized`](ServerError::Unauthorized) returned by
 /// [`complete_account_recovery`](ChirpRepository::complete_account_recovery) for every validation
@@ -270,9 +288,13 @@ impl ChirpRepository for PostgresRepository {
     /// corrupt stored row surfaces as an error, never a panic (`domain_boundary_validated`). The token
     /// is composed from the durable `token_seq` value allocated on the transaction's own connection —
     /// opaque, server-assigned, monotonic, stable across restart, never reused
-    /// (`ids_opaque_monotonic_stable`). The session's `expires_at` is deliberately left unset: this
-    /// stage **persists and resolves** sessions durably; the session *lifetime value* and its
-    /// enforcement are owned by EPIC-IDENTITY and the retention stage (`REQ-ID-*`), not decided here.
+    /// (`ids_opaque_monotonic_stable`). The session is stamped with a bounded `expires_at`
+    /// ([`SESSION_LIFETIME_MILLIS`] after `created_at`): the retention stage gives every session a
+    /// defined, enforced, documented lifetime so [`resolve_token`](ChirpRepository::resolve_token)
+    /// treats an expired session as absent and
+    /// [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state) reclaims it.
+    /// The authoritative lifetime *value* and the session security policy remain EPIC-IDENTITY's
+    /// (`REQ-ID-*`); this stage applies only a durable default so a bounded lifetime is enforced.
     ///
     /// # Errors
     ///
@@ -280,7 +302,14 @@ impl ChirpRepository for PostgresRepository {
     /// [`Internal`](ServerError::Internal) if the token cannot be allocated or the session cannot be
     /// durably committed — an undurable write is reported as failed, never falsely confirmed.
     async fn login(&self, request: LoginRequest) -> Result<AuthResponse, ServerError> {
-        let created_at = mapping::timestamp_to_column(now_millis());
+        let created_at_ts = now_millis();
+        let created_at = mapping::timestamp_to_column(created_at_ts);
+        // The enforced session lifetime: a bounded, documented expiry stamped at issuance so the
+        // session does not live forever. The authoritative value is EPIC-IDENTITY's; this is the
+        // durable default (see SESSION_LIFETIME_MILLIS).
+        let expires_at = created_at_ts
+            .as_millis()
+            .saturating_add(SESSION_LIFETIME_MILLIS);
         self.with_transaction(move |conn| {
             Box::pin(async move {
                 // Resolve the handle to its stored row INSIDE the transaction, so NotFound and the
@@ -315,8 +344,9 @@ impl ChirpRepository for PostgresRepository {
                 let token_value = PostgresRepository::allocate_token_value(&mut *conn).await?;
                 let token = format!("tok-{token_value}");
 
-                // `expires_at` is NULL: lifetime policy/enforcement is EPIC-IDENTITY / retention, not
-                // this stage. The session simply exists durably until explicitly invalidated.
+                // `expires_at` is a bounded, enforced lifetime (durable default; authoritative value
+                // owned by EPIC-IDENTITY). The session resolves until it expires or is explicitly
+                // invalidated; the sweep reclaims it once expired.
                 sqlx::query(
                     "INSERT INTO sessions (token, user_id, created_at, expires_at) \
                      VALUES ($1, $2, $3, $4)",
@@ -324,7 +354,7 @@ impl ChirpRepository for PostgresRepository {
                 .bind(&token)
                 .bind(mapping::user_id_to_column(user.id)?)
                 .bind(created_at)
-                .bind(Option::<i64>::None)
+                .bind(Some(expires_at))
                 .execute(&mut *conn)
                 .await
                 .map_err(|error| {
@@ -349,23 +379,35 @@ impl ChirpRepository for PostgresRepository {
     /// A single pooled read (no transaction is needed for a one-statement lookup); the token is bound
     /// as a parameter (never concatenated), so the lookup carries no injection surface. A token not
     /// present in the store — never issued, or already invalidated — is reported
-    /// [`Unauthorized`](ServerError::Unauthorized). Session *expiry* is not enforced here: the
-    /// lifetime policy and its enforcement belong to EPIC-IDENTITY / the retention stage; this stage
-    /// resolves a persisted, non-invalidated session. The stored id is lifted back through the
-    /// committed mapping, so a corrupt id column surfaces as an error rather than a bogus id.
+    /// [`Unauthorized`](ServerError::Unauthorized). Session **expiry is enforced here**: an expired
+    /// session (`expires_at <= now`) is treated as absent and also reported
+    /// [`Unauthorized`](ServerError::Unauthorized), so transient state past its enforced lifetime is
+    /// never served — even before the sweep physically removes the row. A row whose `expires_at` is
+    /// NULL (unbounded; not issued by this stage) still resolves. The query filter is the authority
+    /// for *serving*; [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state)
+    /// is the authority for *reclaiming*, and the two agree on the `expires_at <= now` boundary. The
+    /// stored id is lifted back through the committed mapping, so a corrupt id column surfaces as an
+    /// error rather than a bogus id.
     ///
     /// # Errors
     ///
-    /// [`Unauthorized`](ServerError::Unauthorized) if the token is unknown or no longer valid;
-    /// [`Internal`](ServerError::Internal) if the read fails or a stored id column is corrupt.
+    /// [`Unauthorized`](ServerError::Unauthorized) if the token is unknown, expired, or no longer
+    /// valid; [`Internal`](ServerError::Internal) if the read fails or a stored id column is corrupt.
     async fn resolve_token(&self, token: &SessionToken) -> Result<UserId, ServerError> {
-        let row: Option<(i64,)> = sqlx::query_as("SELECT user_id FROM sessions WHERE token = $1")
-            .bind(token.0.as_str())
-            .fetch_optional(self.pool())
-            .await
-            .map_err(|error| {
-                ServerError::Internal(format!("failed to resolve a session token: {error}"))
-            })?;
+        let now = now_millis().as_millis();
+        // An expired session is treated as absent: `expires_at > now` (or an unbounded NULL expiry)
+        // is the serve condition, the exact complement of the sweep's `expires_at <= now`.
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT user_id FROM sessions \
+             WHERE token = $1 AND (expires_at IS NULL OR expires_at > $2)",
+        )
+        .bind(token.0.as_str())
+        .bind(now)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!("failed to resolve a session token: {error}"))
+        })?;
 
         match row {
             Some((user_id,)) => mapping::column_to_user_id(user_id),
@@ -1543,6 +1585,70 @@ impl ChirpRepository for PostgresRepository {
             .map_err(|error| {
                 ServerError::Internal(format!("durable store health check failed: {error}"))
             })
+    }
+
+    /// Reclaims expired transient durable state in one confirmed-write transaction: expired
+    /// `sessions`, `recovery_tokens`, and `export_artifacts` rows, returning the per-class count.
+    ///
+    /// All three deletes run inside a single [`with_transaction`](Self::with_transaction) unit, so
+    /// the sweep is atomic (either every expired row across the three classes is reclaimed and the
+    /// cleanup durably commits, or nothing is — `multiwrite_atomic`) and inherits the
+    /// capacity-fail-safe mapping through [`classify_write_error`]: a store out of capacity surfaces
+    /// as [`ServerError::Unavailable`], never a partial or falsely-confirmed cleanup
+    /// (`confirmed_write_durable`). Each predicate is `expires_at <= now` — the exact complement of
+    /// the serve conditions in [`resolve_token`](ChirpRepository::resolve_token) and
+    /// [`complete_account_recovery`](ChirpRepository::complete_account_recovery), so a row is either
+    /// servable or sweepable, never both. Sessions with a NULL `expires_at` (unbounded; not issued
+    /// by this stage) are intentionally excluded by `expires_at <= now`. The expiry-indexed columns
+    /// (`sessions_expires_at_idx`, `recovery_tokens_expires_at_idx`,
+    /// `export_artifacts_expires_at_idx`) back each delete. User content (users, chirps, follows,
+    /// likes) is never referenced here, so the life-of-account retention guarantee is upheld.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Unavailable`] if the store is out of capacity;
+    /// [`ServerError::Internal`] if the cleanup cannot be durably committed.
+    async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError> {
+        let now = now_millis().as_millis();
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let sessions = sqlx::query(
+                    "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= $1",
+                )
+                .bind(now)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| classify_write_error(&error, "failed to sweep expired sessions"))?
+                .rows_affected();
+
+                let recovery_tokens =
+                    sqlx::query("DELETE FROM recovery_tokens WHERE expires_at <= $1")
+                        .bind(now)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            classify_write_error(&error, "failed to sweep expired recovery tokens")
+                        })?
+                        .rows_affected();
+
+                let export_artifacts =
+                    sqlx::query("DELETE FROM export_artifacts WHERE expires_at <= $1")
+                        .bind(now)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            classify_write_error(&error, "failed to sweep expired export artifacts")
+                        })?
+                        .rows_affected();
+
+                Ok(TransientSweep {
+                    sessions,
+                    recovery_tokens,
+                    export_artifacts,
+                })
+            })
+        })
+        .await
     }
 }
 
@@ -3753,6 +3859,239 @@ mod account_recovery_tests {
                 .code(),
             ErrorCode::Unauthorized
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "postgres")]
+mod transient_lifetime_sweep_tests {
+    //! End-to-end tests for the transient-state lifetime + sweep (REQ-OPS-010, #67 / BAR-022)
+    //! against a REAL PostgreSQL backing: `login` stamps a bounded session lifetime,
+    //! `resolve_token` treats an expired session as absent, and
+    //! `sweep_expired_transient_state` reclaims expired `sessions` / `recovery_tokens` /
+    //! `export_artifacts` rows while never touching live user content.
+    //!
+    //! Expired rows are injected past-dated directly via SQL (the durable analogue of forcing a
+    //! stored row into the past), exactly as the recovery-token test does. Assertions are robust to
+    //! a shared store that may hold other tests' rows: they verify the SPECIFIC injected rows are
+    //! gone, the SPECIFIC live rows survive, and each swept per-class count is `>= 1` — never a
+    //! brittle exact total. Skipped unless `CHIRP_TEST_DATABASE_URL` names a reachable test database,
+    //! so the default `cargo test` (which does not compile this `postgres`-gated module) and
+    //! `cargo test --features postgres` without a database both stay green and store-free.
+
+    use super::{mapping, now_millis, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateChirpRequest, CreateUserRequest, LoginRequest, SessionToken};
+    use chirp_types::domain::{ChirpText, User, Username};
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    /// Count rows in `table` carrying the given opaque `token` primary key (0 or 1).
+    async fn session_row_count(repo: &PostgresRepository, token: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = $1")
+            .bind(token)
+            .fetch_one(repo.pool())
+            .await
+            .expect("count sessions")
+    }
+
+    #[tokio::test]
+    async fn login_stamps_a_bounded_lifetime_and_resolve_token_rejects_an_expired_session() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let user = seed_user(&repo).await;
+
+        // A freshly-issued session carries a bounded, future expiry and resolves.
+        let auth = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("login");
+        assert_eq!(repo.resolve_token(&auth.token).await.unwrap(), user.id);
+        let stored_expiry: Option<i64> =
+            sqlx::query_scalar("SELECT expires_at FROM sessions WHERE token = $1")
+                .bind(&auth.token.0)
+                .fetch_one(repo.pool())
+                .await
+                .expect("read the session expiry");
+        let expiry = stored_expiry.expect("login stamps a bounded (non-NULL) expiry");
+        assert!(
+            expiry > mapping::timestamp_to_column(now_millis()),
+            "the enforced session lifetime is in the future"
+        );
+
+        // An expired session (injected past-dated) is treated as absent on read.
+        let expired_token = format!("tok-expired-{}", user.id.get());
+        let past = mapping::timestamp_to_column(now_millis()) - 1;
+        sqlx::query(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&expired_token)
+        .bind(mapping::user_id_to_column(user.id).unwrap())
+        .bind(past)
+        .bind(Some(past))
+        .execute(repo.pool())
+        .await
+        .expect("inject an expired session directly");
+        assert_eq!(
+            repo.resolve_token(&SessionToken(expired_token))
+                .await
+                .expect_err("an expired session does not resolve")
+                .code(),
+            chirp_types::api::ErrorCode::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_expired_transient_rows_and_preserves_live_sessions_and_content() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let user = seed_user(&repo).await;
+        let user_col = mapping::user_id_to_column(user.id).unwrap();
+        let past = mapping::timestamp_to_column(now_millis()) - 1;
+
+        // Live user content that the sweep MUST NOT touch.
+        let chirp = repo
+            .create_chirp(
+                user.id,
+                CreateChirpRequest {
+                    text: ChirpText::parse("retained content").unwrap(),
+                    reply_to: None,
+                },
+            )
+            .await
+            .expect("post a chirp");
+        // A live session that the sweep MUST NOT touch.
+        let live = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("login");
+
+        // Expired rows in each of the three transient classes.
+        let expired_session = format!("tok-expired-{}", user.id.get());
+        sqlx::query(
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&expired_session)
+        .bind(user_col)
+        .bind(past)
+        .bind(Some(past))
+        .execute(repo.pool())
+        .await
+        .expect("inject an expired session");
+        let expired_recovery = format!("rec-expired-{}", user.id.get());
+        sqlx::query(
+            "INSERT INTO recovery_tokens (token, user_id, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&expired_recovery)
+        .bind(user_col)
+        .bind(past)
+        .bind(past)
+        .execute(repo.pool())
+        .await
+        .expect("inject an expired recovery token");
+        sqlx::query(
+            "INSERT INTO export_artifacts (id, user_id, content, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(user_col) // a unique id for this fresh user
+        .bind(user_col)
+        .bind("{\"export\":true}")
+        .bind(past)
+        .bind(past)
+        .execute(repo.pool())
+        .await
+        .expect("inject an expired export artifact");
+
+        // Sweep: each class reclaims at least the row injected above (>= 1 is robust to a shared store).
+        let swept = repo
+            .sweep_expired_transient_state()
+            .await
+            .expect("sweep succeeds");
+        assert!(swept.sessions >= 1, "an expired session is reclaimed");
+        assert!(
+            swept.recovery_tokens >= 1,
+            "an expired recovery token is reclaimed"
+        );
+        assert!(
+            swept.export_artifacts >= 1,
+            "an expired export artifact is reclaimed"
+        );
+
+        // The specific expired rows are gone.
+        assert_eq!(session_row_count(&repo, &expired_session).await, 0);
+        let recovery_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM recovery_tokens WHERE token = $1")
+                .bind(&expired_recovery)
+                .fetch_one(repo.pool())
+                .await
+                .unwrap();
+        assert_eq!(recovery_left, 0);
+        let export_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM export_artifacts WHERE id = $1")
+                .bind(user_col)
+                .fetch_one(repo.pool())
+                .await
+                .unwrap();
+        assert_eq!(export_left, 0);
+
+        // The live session still resolves, and user content is retained in full.
+        assert_eq!(repo.resolve_token(&live.token).await.unwrap(), user.id);
+        assert_eq!(session_row_count(&repo, &live.token.0).await, 1);
+        assert_eq!(
+            repo.get_user(user.id).await.expect("user retained").id,
+            user.id
+        );
+        let timeline = repo
+            .timeline(user.id, chirp_types::api::TimelineQuery::default())
+            .await
+            .expect("timeline");
+        assert!(
+            timeline.items.iter().any(|c| c.id == chirp.id),
+            "the user's chirp is retained through the sweep"
+        );
+
+        // A second sweep reclaims none of these rows again (they are already gone).
+        let again = repo
+            .sweep_expired_transient_state()
+            .await
+            .expect("second sweep succeeds");
+        assert_eq!(session_row_count(&repo, &expired_session).await, 0);
+        assert_eq!(repo.resolve_token(&live.token).await.unwrap(), user.id);
+        let _ = again; // totals may be non-zero from other tests' rows in a shared store.
     }
 }
 

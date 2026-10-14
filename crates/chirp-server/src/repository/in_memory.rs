@@ -35,7 +35,7 @@ use chirp_types::api::{
 use chirp_types::domain::{Chirp, User, Username};
 use chirp_types::ids::{ChirpId, Timestamp, UserId};
 
-use super::{ChirpRepository, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT};
+use super::{ChirpRepository, TransientSweep, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT};
 use crate::error::ServerError;
 
 /// All mutable server state, guarded as one unit by the repository's [`Mutex`].
@@ -62,8 +62,10 @@ struct Store {
     /// The durable backing also records a `removed_at` audit timestamp; the in-memory mirror tracks
     /// only the behavioural flag the two backings must agree on.
     removed: HashSet<ChirpId>,
-    /// Issued session tokens → the user they authenticate.
-    tokens: HashMap<String, UserId>,
+    /// Issued session tokens → the [`Session`] they authenticate (the user plus the enforced
+    /// expiry). Mirrors the durable `sessions` table (`token` primary key, `user_id`, `expires_at`):
+    /// an expired session is not resolved and is reclaimed by the sweep.
+    tokens: HashMap<String, Session>,
     /// Durable credential per user: user id → the at-rest secret representation. One per user,
     /// mirroring the `credentials` table's `user_id` primary key. The secret's exact format and the
     /// verification protocol are owned by identity & trust (`REQ-ID-*`); this backing only holds the
@@ -161,6 +163,18 @@ impl InMemoryRepository {
     }
 }
 
+/// An in-memory session: the account it authenticates and its enforced expiry, mirroring a durable
+/// `sessions` row's `user_id` / `expires_at`.
+#[derive(Debug, Clone, Copy)]
+struct Session {
+    /// The account this session authenticates.
+    user: UserId,
+    /// When the session stops resolving. `None` is an unbounded (no-expiry) session — not issued by
+    /// this stage, but tolerated so the in-memory and durable NULL-`expires_at` semantics agree; it
+    /// is never swept. A `Some(t)` session is expired once `t <= now`.
+    expires_at: Option<Timestamp>,
+}
+
 /// An outstanding in-memory account-recovery challenge: the account it recovers and its expiry,
 /// mirroring a `recovery_tokens` row's `user_id` / `expires_at`.
 #[derive(Debug, Clone, Copy)]
@@ -170,6 +184,18 @@ struct RecoveryChallenge {
     /// When the challenge stops being valid; `complete_account_recovery` rejects it from this instant.
     expires_at: Timestamp,
 }
+
+/// The durable default session lifetime, in milliseconds, stamped onto a freshly-issued session at
+/// [`login`](ChirpRepository::login).
+///
+/// Mirrors the durable backing's `SESSION_LIFETIME_MILLIS` so the two implementors agree. The
+/// substrate left `sessions.expires_at` unset and deferred the lifetime value + sweep to this
+/// retention stage (REQ-OPS-010); this backing stamps every new session with a bounded expiry,
+/// rejects an expired session at `resolve_token`, and reclaims it in the sweep. The authoritative
+/// validity *value* and the session security policy are owned downstream (EPIC-IDENTITY,
+/// `REQ-ID-*`); this constant is only the durable default this stage applies so a bounded lifetime
+/// is enforced, not a policy decision.
+const SESSION_LIFETIME_MILLIS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// The default validity window, in milliseconds, stamped onto a freshly-issued recovery challenge.
 ///
@@ -255,7 +281,20 @@ impl ChirpRepository for InMemoryRepository {
 
         let token_value = format!("tok-{}-{}", store.next_token, id.get());
         store.next_token += 1;
-        store.tokens.insert(token_value.clone(), id);
+        // Stamp the enforced session lifetime (durable default; authoritative value owned by
+        // EPIC-IDENTITY), mirroring the durable backing so the two agree.
+        let expires_at = Some(Timestamp::from_millis(
+            now_millis()
+                .as_millis()
+                .saturating_add(SESSION_LIFETIME_MILLIS),
+        ));
+        store.tokens.insert(
+            token_value.clone(),
+            Session {
+                user: id,
+                expires_at,
+            },
+        );
 
         Ok(AuthResponse {
             user,
@@ -265,11 +304,17 @@ impl ChirpRepository for InMemoryRepository {
 
     async fn resolve_token(&self, token: &SessionToken) -> Result<UserId, ServerError> {
         let store = self.lock()?;
-        store
-            .tokens
-            .get(&token.0)
-            .copied()
-            .ok_or_else(|| ServerError::Unauthorized("invalid or expired session token".to_owned()))
+        // An expired session is treated as absent (same Unauthorized as an unknown token), the
+        // complement of the sweep's `expires_at <= now`. A `None` expiry is unbounded and resolves.
+        let now = now_millis().as_millis();
+        match store.tokens.get(&token.0) {
+            Some(session) if session.expires_at.is_none_or(|t| t.as_millis() > now) => {
+                Ok(session.user)
+            }
+            _ => Err(ServerError::Unauthorized(
+                "invalid or expired session token".to_owned(),
+            )),
+        }
     }
 
     async fn create_chirp(
@@ -727,7 +772,7 @@ impl ChirpRepository for InMemoryRepository {
             .retain(|(follower, followee)| *follower != user && *followee != user);
 
         // Transient per-user state cascades away: sessions, credential, recovery tokens, suspension.
-        store.tokens.retain(|_, u| *u != user);
+        store.tokens.retain(|_, session| session.user != user);
         store.credentials.remove(&user);
         store
             .recovery_tokens
@@ -882,6 +927,42 @@ impl ChirpRepository for InMemoryRepository {
     /// a truthful trivially-correct result, not a placeholder that masks unimplemented behaviour.
     async fn store_health(&self) -> Result<(), ServerError> {
         Ok(())
+    }
+
+    /// Reclaims expired transient state held in memory, mirroring the durable sweep: expired
+    /// sessions and expired recovery-token challenges, under a single lock (the in-memory analogue
+    /// of the durable backing's single transaction, so the removals are atomic as one unit).
+    ///
+    /// "Expired" is `expires_at <= now` — the exact complement of the serve conditions in
+    /// [`resolve_token`](ChirpRepository::resolve_token) and
+    /// [`complete_account_recovery`](ChirpRepository::complete_account_recovery), so a row is either
+    /// servable or sweepable, never both. A session with a `None` expiry (unbounded) is never swept.
+    /// User content (users, chirps, follows, likes) is never touched, so the life-of-account
+    /// retention guarantee holds. This backing does not materialise export artefacts
+    /// (`export_user_data` computes and returns the document, persisting nothing), so it holds no
+    /// `export_artifacts` to expire and reports `export_artifacts: 0`; the durable backing owns and
+    /// sweeps that table.
+    async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError> {
+        let mut store = self.lock()?;
+        let now = now_millis().as_millis();
+
+        let sessions_before = store.tokens.len();
+        store
+            .tokens
+            .retain(|_, session| session.expires_at.is_none_or(|t| t.as_millis() > now));
+        let sessions = (sessions_before - store.tokens.len()) as u64;
+
+        let recovery_before = store.recovery_tokens.len();
+        store
+            .recovery_tokens
+            .retain(|_, challenge| challenge.expires_at.as_millis() > now);
+        let recovery_tokens = (recovery_before - store.recovery_tokens.len()) as u64;
+
+        Ok(TransientSweep {
+            sessions,
+            recovery_tokens,
+            export_artifacts: 0,
+        })
     }
 }
 
@@ -1449,7 +1530,7 @@ mod tests {
             // Transient per-account state is gone.
             assert!(!store.credentials.contains_key(&alice.id));
             assert!(!store.recovery_tokens.values().any(|c| c.user == alice.id));
-            assert!(!store.tokens.values().any(|u| *u == alice.id));
+            assert!(!store.tokens.values().any(|s| s.user == alice.id));
             // The handle index entry is freed, so the handle could be re-registered.
             assert!(!store.username_to_id.contains_key("alice"));
         }
@@ -1919,5 +2000,204 @@ mod tests {
                 .unwrap_err(),
             ServerError::NotFound(_)
         ));
+    }
+
+    // ---- Transient-state lifetime + sweep (REQ-OPS-010, #67 / BAR-022) --------------------------
+    //
+    // These exercise the store-side half of the transient-lifetime guarantee against the in-memory
+    // backing (store-free): a session carries a bounded, enforced lifetime; an expired session is
+    // not served and is swept; expired recovery tokens are swept; and the sweep never touches live
+    // user content. Expiry is injected directly (a past-dated row) rather than by waiting, mirroring
+    // the durable backing's expired-row injection tests.
+
+    /// Directly injects a session row with an explicit expiry, so expiry-honouring and the sweep can
+    /// be tested without waiting out `SESSION_LIFETIME_MILLIS`.
+    fn inject_session(
+        repo: &InMemoryRepository,
+        token: &str,
+        user: UserId,
+        expires_at_millis: i64,
+    ) {
+        repo.lock().expect("store lock").tokens.insert(
+            token.to_owned(),
+            Session {
+                user,
+                expires_at: Some(Timestamp::from_millis(expires_at_millis)),
+            },
+        );
+    }
+
+    /// Directly injects a recovery-token challenge with an explicit expiry.
+    fn inject_recovery_token(
+        repo: &InMemoryRepository,
+        token: &str,
+        user: UserId,
+        expires_at_millis: i64,
+    ) {
+        repo.lock().expect("store lock").recovery_tokens.insert(
+            token.to_owned(),
+            RecoveryChallenge {
+                user,
+                expires_at: Timestamp::from_millis(expires_at_millis),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn login_stamps_a_bounded_session_lifetime_that_resolves_while_valid() {
+        let repo = InMemoryRepository::new();
+        let user = seed_user(&repo, "alice").await;
+
+        let auth = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("login succeeds");
+
+        // The freshly-issued session carries a bounded, future expiry and resolves.
+        assert_eq!(
+            repo.resolve_token(&auth.token).await.expect("resolves"),
+            user.id
+        );
+        let expiry = repo
+            .lock()
+            .expect("store lock")
+            .tokens
+            .get(&auth.token.0)
+            .and_then(|s| s.expires_at)
+            .expect("a bounded expiry is stamped at login");
+        assert!(
+            expiry.as_millis() > now_millis().as_millis(),
+            "the enforced session lifetime is in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_session_is_not_resolved_and_is_swept_while_a_live_one_survives() {
+        let repo = InMemoryRepository::new();
+        let user = seed_user(&repo, "alice").await;
+
+        // A live session (issued by login) and a directly-injected already-expired one.
+        let live = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("login succeeds");
+        let past = now_millis().as_millis() - 1;
+        inject_session(&repo, "tok-expired", user.id, past);
+
+        // Expiry is honoured on read before any sweep: the expired session is treated as absent.
+        assert!(matches!(
+            repo.resolve_token(&SessionToken("tok-expired".to_owned()))
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+        // The live session still resolves.
+        assert_eq!(
+            repo.resolve_token(&live.token).await.expect("resolves"),
+            user.id
+        );
+
+        // The sweep reclaims exactly the expired session and leaves the live one.
+        let swept = repo
+            .sweep_expired_transient_state()
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(swept.sessions, 1, "the expired session row is reclaimed");
+        assert_eq!(swept.recovery_tokens, 0);
+        assert_eq!(swept.export_artifacts, 0);
+        assert_eq!(
+            repo.resolve_token(&live.token)
+                .await
+                .expect("still resolves"),
+            user.id,
+            "the live session is untouched by the sweep"
+        );
+
+        // A second sweep reclaims nothing — the first already removed the expired row.
+        assert_eq!(
+            repo.sweep_expired_transient_state()
+                .await
+                .expect("sweep succeeds")
+                .total(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_expired_recovery_tokens_and_keeps_valid_ones() {
+        let repo = InMemoryRepository::new();
+        let user = seed_user(&repo, "alice").await;
+        let now = now_millis().as_millis();
+
+        inject_recovery_token(&repo, "rec-expired", user.id, now - 1);
+        inject_recovery_token(&repo, "rec-valid", user.id, now + SESSION_LIFETIME_MILLIS);
+
+        let swept = repo
+            .sweep_expired_transient_state()
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(
+            swept.recovery_tokens, 1,
+            "only the expired challenge is reclaimed"
+        );
+        assert_eq!(swept.sessions, 0);
+
+        let remaining = repo.lock().expect("store lock");
+        assert!(!remaining.recovery_tokens.contains_key("rec-expired"));
+        assert!(
+            remaining.recovery_tokens.contains_key("rec-valid"),
+            "the unexpired challenge survives the sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_never_removes_live_user_content() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let bob = seed_user(&repo, "bob").await;
+        let chirp = seed_chirp(&repo, alice.id, "hello world").await;
+        repo.follow(alice.id, bob.id).await.expect("follow");
+        repo.like(bob.id, chirp.id).await.expect("like");
+
+        // Live transient state alongside the content, plus one expired session to force a non-empty
+        // sweep so we prove the sweep reclaims transient rows WITHOUT disturbing content.
+        let live = repo
+            .login(LoginRequest {
+                username: alice.username.clone(),
+            })
+            .await
+            .expect("login");
+        inject_session(&repo, "tok-expired", alice.id, now_millis().as_millis() - 1);
+
+        let swept = repo
+            .sweep_expired_transient_state()
+            .await
+            .expect("sweep succeeds");
+        assert_eq!(swept.sessions, 1, "the one expired session is reclaimed");
+
+        // All user content survives untouched.
+        assert_eq!(repo.get_user(alice.id).await.expect("alice").id, alice.id);
+        assert_eq!(repo.get_user(bob.id).await.expect("bob").id, bob.id);
+        let timeline = repo
+            .timeline(alice.id, TimelineQuery::default())
+            .await
+            .expect("timeline");
+        assert_eq!(timeline.items.len(), 1, "alice's chirp is retained");
+        assert_eq!(timeline.items[0].id, chirp.id);
+        assert_eq!(timeline.items[0].like_count, 1, "the like edge is retained");
+        assert_eq!(
+            repo.get_user(bob.id).await.expect("bob").follower_count,
+            1,
+            "the follow edge is retained"
+        );
+        // The live session is still valid; only transient expired state was reclaimed.
+        assert_eq!(
+            repo.resolve_token(&live.token).await.expect("resolves"),
+            alice.id
+        );
     }
 }
