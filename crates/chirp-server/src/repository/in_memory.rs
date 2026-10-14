@@ -32,7 +32,7 @@ use chirp_types::api::{
     AuthResponse, CreateChirpRequest, CreateUserRequest, Cursor, FollowResponse, LikeResponse,
     LoginRequest, Page, SessionToken, TimelineQuery,
 };
-use chirp_types::domain::{Chirp, User};
+use chirp_types::domain::{Chirp, User, Username};
 use chirp_types::ids::{ChirpId, Timestamp, UserId};
 
 use super::{ChirpRepository, DEFAULT_TIMELINE_LIMIT, MAX_TIMELINE_LIMIT};
@@ -373,12 +373,124 @@ impl ChirpRepository for InMemoryRepository {
             like_count,
         })
     }
+
+    // ---- Release-bar additions (issue #66) ------------------------------------------------------
+    // The in-memory backing is retained only to keep the store-free test suite compiling and green;
+    // the durable behaviour of these capabilities is implemented downstream (EPIC-PERSIST durable
+    // implementation). Each placeholder is error-contract-consistent: an operation whose durable
+    // behaviour is not yet built reports a `ServerError` and NEVER falsely confirms success. The one
+    // exception is `store_health`, which is genuinely, truthfully healthy for an in-process store.
+
+    async fn set_credential(&self, _user: UserId, _secret: &str) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "set_credential is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn verify_credential(
+        &self,
+        _username: &Username,
+        _secret: &str,
+    ) -> Result<UserId, ServerError> {
+        Err(ServerError::Internal(
+            "verify_credential is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn invalidate_session(&self, _token: &SessionToken) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "invalidate_session is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn begin_account_recovery(&self, _username: &Username) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "begin_account_recovery is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn complete_account_recovery(
+        &self,
+        _username: &Username,
+        _recovery_token: &str,
+        _new_secret: &str,
+    ) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "complete_account_recovery is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn update_profile(
+        &self,
+        _user: UserId,
+        _display_name: String,
+        _bio: Option<String>,
+    ) -> Result<User, ServerError> {
+        Err(ServerError::Internal(
+            "update_profile is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn delete_account(&self, _user: UserId) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "delete_account is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn export_user_data(&self, _user: UserId) -> Result<String, ServerError> {
+        Err(ServerError::Internal(
+            "export_user_data is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn list_followers(
+        &self,
+        _user: UserId,
+        _query: TimelineQuery,
+    ) -> Result<Page<User>, ServerError> {
+        Err(ServerError::Internal(
+            "list_followers is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn list_following(
+        &self,
+        _user: UserId,
+        _query: TimelineQuery,
+    ) -> Result<Page<User>, ServerError> {
+        Err(ServerError::Internal(
+            "list_following is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn remove_chirp(&self, _actor: UserId, _chirp: ChirpId) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "remove_chirp is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    async fn set_account_suspension(
+        &self,
+        _actor: UserId,
+        _target: UserId,
+        _suspended: bool,
+    ) -> Result<(), ServerError> {
+        Err(ServerError::Internal(
+            "set_account_suspension is not yet implemented in the in-memory backing".to_owned(),
+        ))
+    }
+
+    /// The in-memory store is in-process and always reachable, so it is genuinely healthy — this is
+    /// a truthful trivially-correct result, not a placeholder that masks unimplemented behaviour.
+    async fn store_health(&self) -> Result<(), ServerError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chirp_types::domain::{ChirpText, Username};
+    use chirp_types::domain::ChirpText;
 
     /// Registers a user with the given handle and returns the created profile.
     async fn seed_user(repo: &InMemoryRepository, handle: &str) -> User {
