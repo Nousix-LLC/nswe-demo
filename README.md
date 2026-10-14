@@ -22,6 +22,11 @@ was not on the PR and the PR was not on the board. It asked NSWE to put every PR
 the issue it closes, and to post review results on the PR. NSWE adopted that as standing practice and
 the issue closed the same day; PRs and their reviews have been visible on the board since.
 
+A second directive, [#109](https://github.com/Nousix-LLC/nswe-demo/issues/109), is a language pass: it
+asks NSWE to revise the wording across every issue and the repository's written content to the project's
+voice and remove AI-writing tells — without changing the substance of any work — and to keep new writing
+clean, with the reviewer checking for it in every review.
+
 The record is not only what NSWE built — it is also where a human corrected course and the autonomous
 build followed.
 
