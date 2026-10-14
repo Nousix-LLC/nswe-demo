@@ -129,11 +129,6 @@ impl PostgresRepository {
 /// `DATABASE_URL`).
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
-/// The shared message appended to every not-yet-implemented durable operation, naming the
-/// downstream owner so a caller (or log) sees exactly why the operation failed.
-const NOT_IMPLEMENTED: &str =
-    "durable PostgreSQL backend not yet implemented (EPIC-PERSIST SUBTASK_durable_impl)";
-
 /// Current wall-clock time as epoch-milliseconds, for stamping a newly created durable entity.
 ///
 /// Mirrors the in-memory backing's `now_millis`: a pre-epoch system clock (which does not occur in
@@ -1160,10 +1155,128 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
-    async fn delete_account(&self, _user: UserId) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "delete_account: {NOT_IMPLEMENTED}"
-        )))
+    /// Durably deletes `user` and cascades the removal of ALL their dependent state — authored
+    /// chirps, follow edges (in both directions), like edges, sessions, the durable credential,
+    /// outstanding recovery tokens, and materialised export artefacts — as ONE confirmed-write
+    /// transaction, reconciling the denormalized counts of every SURVIVING neighbour in that same
+    /// transaction (`multiwrite_atomic`, `counts_match_edges_under_cascade`,
+    /// `confirmed_write_durable`).
+    ///
+    /// # Cascade versus explicit reconciliation
+    ///
+    /// The schema's `ON DELETE CASCADE` foreign keys remove the dependent *rows* for free once the
+    /// `users` row is deleted (chirps by author — and their like edges; follows on either side;
+    /// likes by the user; sessions; credential; recovery tokens; export artefacts; a surviving reply
+    /// to a removed chirp is `SET NULL`). What the database does NOT do is fix the denormalized
+    /// *count columns* on the neighbours that SURVIVE the deletion — that reconciliation is this
+    /// method's load-bearing work, and it MUST run while the edges still exist, i.e. BEFORE the
+    /// `users` row (and its cascade) is deleted:
+    ///
+    /// * every account the deleted user follows loses one follower → decrement its `follower_count`;
+    /// * every account that follows the deleted user loses one followee → decrement its
+    ///   `following_count`;
+    /// * every SURVIVING chirp the deleted user liked loses one like → decrement its `like_count`.
+    ///   A chirp authored by the deleted user is itself cascaded away, so it is excluded
+    ///   (`author_id <> user`): its count is irrelevant and touching a row about to vanish is
+    ///   pointless.
+    ///
+    /// The `follows_no_self` invariant guarantees both endpoints of every follow edge touching the
+    /// user are distinct, so each such edge has exactly one surviving neighbour to reconcile; and the
+    /// edge-set primary keys guarantee each neighbour appears at most once per family, so a single
+    /// set-based `UPDATE` per family moves each surviving count by exactly one and never underflows
+    /// the `CHECK (... >= 0)` backstop (the prior stage's `counts_match_edges` means the neighbour's
+    /// count is at least the edge being removed).
+    ///
+    /// The user's existence is decided inside the same transaction — a clean
+    /// [`NotFound`](ServerError::NotFound) for an absent or already-deleted account, never a silent
+    /// no-op — so the existence decision, the count reconciliation, and the cascade are one atomic
+    /// unit: a reader never observes a surviving count left stale behind a deleted edge, and a
+    /// mid-operation failure rolls the whole cascade back rather than leaving the account
+    /// half-deleted.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
+    /// [`Internal`](ServerError::Internal) if the transaction cannot be durably committed — an
+    /// undurable write is reported failed, never falsely confirmed.
+    async fn delete_account(&self, user: UserId) -> Result<(), ServerError> {
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let user_column = mapping::user_id_to_column(user)?;
+
+                // Existence is decided inside the transaction: an absent (or already-deleted)
+                // account is a clean NotFound, never a silent no-op — matching the in-memory
+                // reference and the trait's documented error contract.
+                ensure_user_exists(&mut *conn, user_column, user, "user").await?;
+
+                // Reconcile the SURVIVING neighbours' denormalized counts BEFORE the cascade removes
+                // the edges (afterwards the edge rows are gone and the information is lost). Each
+                // UPDATE is set-based and keyed on the still-present edge rows, so every surviving
+                // neighbour moves by exactly one.
+
+                // Accounts the user follows each lose one follower.
+                sqlx::query(
+                    "UPDATE users SET follower_count = follower_count - 1 \
+                     WHERE id IN (SELECT followee_id FROM follows WHERE follower_id = $1)",
+                )
+                .bind(user_column)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to reconcile follower_count on the accounts {user} follows: {error}"
+                    ))
+                })?;
+
+                // Accounts that follow the user each lose one followee.
+                sqlx::query(
+                    "UPDATE users SET following_count = following_count - 1 \
+                     WHERE id IN (SELECT follower_id FROM follows WHERE followee_id = $1)",
+                )
+                .bind(user_column)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to reconcile following_count on the followers of {user}: {error}"
+                    ))
+                })?;
+
+                // Surviving chirps the user liked each lose one like. A chirp authored by the user is
+                // cascaded away below, so it is excluded (`author_id <> user`).
+                sqlx::query(
+                    "UPDATE chirps SET like_count = like_count - 1 \
+                     WHERE id IN (SELECT chirp_id FROM likes WHERE user_id = $1) \
+                       AND author_id <> $1",
+                )
+                .bind(user_column)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to reconcile like_count on the surviving chirps {user} liked: {error}"
+                    ))
+                })?;
+
+                // Remove the account. The schema's ON DELETE CASCADE foreign keys remove every
+                // dependent family atomically with this delete: the user's chirps (and, cascading
+                // off them, their like edges), follow edges on both sides, like edges by the user,
+                // sessions, the credential, recovery tokens, and export artefacts; a surviving reply
+                // to one of the removed chirps has its reply_to SET NULL.
+                sqlx::query("DELETE FROM users WHERE id = $1")
+                    .bind(user_column)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|error| {
+                        ServerError::Internal(format!(
+                            "failed to durably delete account {user} and cascade its state: {error}"
+                        ))
+                    })?;
+
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Materializes a user's full data export as a consistent durable view: the user's profile, their
@@ -4617,6 +4730,353 @@ mod edge_toggle_tests {
             repo.unlike(user, absent_chirp)
                 .await
                 .expect_err("absent chirp")
+                .code(),
+            ErrorCode::NotFound
+        );
+    }
+}
+
+#[cfg(test)]
+mod deletion_cascade_tests {
+    //! Durable-behaviour tests for `delete_account` (the `account_deletion_cascade` capability)
+    //! against a REAL PostgreSQL backing, proving this stage's carried identities on the cascade
+    //! path:
+    //!
+    //!   * `multiwrite_atomic` / `confirmed_write_durable` — deleting the account removes ALL its
+    //!     dependent families (authored chirps and their likes, follow edges in both directions,
+    //!     like edges by the user, sessions, credential, recovery tokens, export artefacts) as ONE
+    //!     committed unit, visible via fresh reads after the call returns.
+    //!   * `counts_match_edges_under_cascade` — after the cascade every SURVIVING neighbour's
+    //!     denormalized `follower_count` / `following_count` / `like_count` still equals its current
+    //!     edge set; no stale count is left behind a deleted edge, and an edge not touching the
+    //!     deleted account is untouched.
+    //!   * the error contract — deleting an absent or already-deleted account is a clean
+    //!     [`NotFound`](crate::error::ServerError::NotFound), never a panic and never a silent no-op.
+    //!
+    //! They are **skipped** unless `CHIRP_TEST_DATABASE_URL` names a reachable test database (the same
+    //! harness as the edge-toggle tests), so the default store-free `cargo test` (which does not even
+    //! compile this `postgres`-gated module) stays green. Handles are derived from the durable
+    //! `token_seq`, so repeated runs against the same store never collide.
+
+    use super::{mapping, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateChirpRequest, CreateUserRequest, ErrorCode, LoginRequest};
+    use chirp_types::domain::{ChirpText, Username};
+    use chirp_types::ids::{ChirpId, UserId};
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// Connect to the test store and migrate it, or `None` to signal a skip.
+    async fn connect() -> Option<PostgresRepository> {
+        let url = test_database_url()?;
+        Some(
+            PostgresRepository::connect(&url)
+                .await
+                .expect("connect + migrate the test store"),
+        )
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Create a fresh account and return its id together with its handle (the handle is needed to
+    /// drive the real `login` / `begin_account_recovery` paths that seed the transient families).
+    async fn new_user(repo: &PostgresRepository) -> (UserId, Username) {
+        let handle = unique_handle(repo).await;
+        let id = repo
+            .create_user(CreateUserRequest {
+                username: handle.clone(),
+                display_name: format!("{handle} display"),
+                bio: None,
+            })
+            .await
+            .expect("create_user succeeds")
+            .id;
+        (id, handle)
+    }
+
+    /// Create a fresh top-level chirp authored by `author` and return its id.
+    async fn new_chirp(repo: &PostgresRepository, author: UserId) -> ChirpId {
+        repo.create_chirp(
+            author,
+            CreateChirpRequest {
+                text: ChirpText::parse("a chirp").expect("valid chirp text"),
+                reply_to: None,
+            },
+        )
+        .await
+        .expect("create_chirp succeeds")
+        .id
+    }
+
+    /// `COUNT(*)` of a one-bind (user-keyed) query — the "no rows remain" cascade probe, read with a
+    /// fresh pool connection so a surviving row would be observed (`confirmed_write_durable`).
+    async fn count_by_user(repo: &PostgresRepository, sql: &str, user: UserId) -> i64 {
+        sqlx::query_scalar(sql)
+            .bind(mapping::user_id_to_column(user).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .expect("count query")
+    }
+
+    #[tokio::test]
+    async fn delete_account_cascades_all_families_and_reconciles_survivor_counts_atomically() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+
+        let (alice, alice_handle) = new_user(&repo).await;
+        let (bob, _bob_handle) = new_user(&repo).await;
+        let (carol, _carol_handle) = new_user(&repo).await;
+
+        // Follow graph: alice→bob and carol→alice both touch alice; bob→carol is a control edge that
+        // must survive untouched.
+        repo.follow(alice, bob).await.unwrap();
+        repo.follow(carol, alice).await.unwrap();
+        repo.follow(bob, carol).await.unwrap();
+
+        // Content: bob's chirp survives; alice's is cascaded away.
+        let b1 = new_chirp(&repo, bob).await;
+        let a1 = new_chirp(&repo, alice).await;
+
+        // Likes: alice likes the surviving b1 (its count must reconcile to 0) and her own a1
+        // (cascaded away with it); bob likes a1 (that like edge is cascaded with a1).
+        repo.like(alice, b1).await.unwrap();
+        repo.like(alice, a1).await.unwrap();
+        repo.like(bob, a1).await.unwrap();
+
+        // A surviving reply to alice's chirp — its reply_to must become NULL when a1 is removed.
+        let reply = repo
+            .create_chirp(
+                carol,
+                CreateChirpRequest {
+                    text: ChirpText::parse("reply to alice").unwrap(),
+                    reply_to: Some(a1),
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+
+        // Seed the remaining per-account dependent families through the real durable paths: a
+        // credential, a session, and a recovery challenge.
+        repo.set_credential(alice, "secret").await.unwrap();
+        let session = repo
+            .login(LoginRequest {
+                username: alice_handle.clone(),
+            })
+            .await
+            .unwrap()
+            .token;
+        repo.begin_account_recovery(&alice_handle).await.unwrap();
+
+        // A materialised export artefact for alice (no trait method persists one, so insert the row
+        // directly — the point is to prove the `export_artifacts` ON DELETE CASCADE fires).
+        let export_id = i64::try_from(
+            PostgresRepository::allocate_token_value(repo.pool())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO export_artifacts (id, user_id, content, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(export_id)
+        .bind(mapping::user_id_to_column(alice).unwrap())
+        .bind("alice export document")
+        .bind(0_i64)
+        .bind(i64::MAX)
+        .execute(repo.pool())
+        .await
+        .expect("seed an export artefact row");
+
+        // --- Delete alice: the whole cascade commits (or rolls back) as one unit. ---
+        repo.delete_account(alice)
+            .await
+            .expect("delete_account succeeds");
+
+        // The account itself is gone.
+        assert_eq!(
+            repo.get_user(alice)
+                .await
+                .expect_err("alice deleted")
+                .code(),
+            ErrorCode::NotFound
+        );
+
+        // Surviving neighbours' denormalized counts are reconciled to match their current edge sets.
+        let bob_after = repo.get_user(bob).await.unwrap();
+        let carol_after = repo.get_user(carol).await.unwrap();
+        assert_eq!(
+            bob_after.follower_count, 0,
+            "alice's follow of bob is gone, so bob's follower_count reconciles to 0"
+        );
+        assert_eq!(
+            carol_after.following_count, 0,
+            "carol's follow of alice is gone, so carol's following_count reconciles to 0"
+        );
+        // The control edge bob→carol is untouched.
+        assert_eq!(bob_after.following_count, 1);
+        assert_eq!(carol_after.follower_count, 1);
+        let control_edge: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM follows WHERE follower_id = $1 AND followee_id = $2",
+        )
+        .bind(mapping::user_id_to_column(bob).unwrap())
+        .bind(mapping::user_id_to_column(carol).unwrap())
+        .fetch_one(repo.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            control_edge, 1,
+            "the bob→carol edge survives alice's deletion"
+        );
+
+        // b1 survives; its like_count reconciles to 0 (alice's like removed, in the same txn).
+        let b1_like_count: i64 = sqlx::query_scalar("SELECT like_count FROM chirps WHERE id = $1")
+            .bind(mapping::chirp_id_to_column(b1).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            b1_like_count, 0,
+            "alice's like of the surviving chirp is reconciled away"
+        );
+
+        // Every dependent family alice owned or touched is gone.
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM chirps WHERE author_id = $1",
+                alice
+            )
+            .await,
+            0,
+            "authored chirps are cascaded"
+        );
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM follows WHERE follower_id = $1 OR followee_id = $1",
+                alice,
+            )
+            .await,
+            0,
+            "follow edges on both sides are cascaded"
+        );
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM likes WHERE user_id = $1",
+                alice
+            )
+            .await,
+            0,
+            "the deleted user's like edges are cascaded"
+        );
+        let likes_on_a1: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM likes WHERE chirp_id = $1")
+            .bind(mapping::chirp_id_to_column(a1).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .unwrap();
+        assert_eq!(likes_on_a1, 0, "likes on the removed chirp are cascaded");
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM sessions WHERE user_id = $1",
+                alice
+            )
+            .await,
+            0,
+            "sessions are cascaded"
+        );
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM credentials WHERE user_id = $1",
+                alice
+            )
+            .await,
+            0,
+            "the credential is cascaded"
+        );
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM recovery_tokens WHERE user_id = $1",
+                alice,
+            )
+            .await,
+            0,
+            "recovery tokens are cascaded"
+        );
+        assert_eq!(
+            count_by_user(
+                &repo,
+                "SELECT COUNT(*) FROM export_artifacts WHERE user_id = $1",
+                alice,
+            )
+            .await,
+            0,
+            "export artefacts are cascaded"
+        );
+
+        // The surviving reply lost its target (ON DELETE SET NULL).
+        let reply_to: Option<i64> = sqlx::query_scalar("SELECT reply_to FROM chirps WHERE id = $1")
+            .bind(mapping::chirp_id_to_column(reply).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .unwrap();
+        assert_eq!(reply_to, None, "a reply to the removed chirp is SET NULL");
+
+        // The deleted account's session no longer resolves.
+        assert_eq!(
+            repo.resolve_token(&session)
+                .await
+                .expect_err("session invalidated by deletion")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_account_is_not_found_for_an_absent_or_already_deleted_account() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let (alice, _handle) = new_user(&repo).await;
+
+        // An id that was never used is NotFound (never a panic).
+        let absent = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.delete_account(absent)
+                .await
+                .expect_err("absent account")
+                .code(),
+            ErrorCode::NotFound
+        );
+
+        // The first deletion succeeds; a second on the now-deleted account is NotFound — never a
+        // silent no-op.
+        repo.delete_account(alice).await.expect("first delete");
+        assert_eq!(
+            repo.delete_account(alice)
+                .await
+                .expect_err("already deleted")
                 .code(),
             ErrorCode::NotFound
         );

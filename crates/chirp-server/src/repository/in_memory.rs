@@ -626,10 +626,115 @@ impl ChirpRepository for InMemoryRepository {
         Ok(record.clone())
     }
 
-    async fn delete_account(&self, _user: UserId) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "delete_account is not yet implemented in the in-memory backing".to_owned(),
-        ))
+    /// Deletes `user` and cascades the removal of ALL their dependent state, reconciling the
+    /// denormalized counts of every surviving neighbour — the store-free analogue of the durable
+    /// backing's single-transaction cascade (`multiwrite_atomic`,
+    /// `counts_match_edges_under_cascade`).
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no user has that id (an absent or already-deleted
+    /// account), matching the durable backing — never a silent no-op. The whole cascade runs under
+    /// the single store lock as one atomic critical section: the surviving neighbours' counts are
+    /// reconciled from the user's current edges FIRST (while the edges still exist), then every
+    /// family the user owns or touches is removed, so a read after the call never sees a surviving
+    /// count disagreeing with its edges. The removals mirror the durable schema's foreign keys: a
+    /// chirp authored by the user is removed together with its like edges (`ON DELETE CASCADE`), and
+    /// a surviving chirp that replied to a removed chirp loses its reply target (`ON DELETE SET
+    /// NULL`).
+    async fn delete_account(&self, user: UserId) -> Result<(), ServerError> {
+        let mut store = self.lock()?;
+        if !store.users.contains_key(&user) {
+            return Err(ServerError::NotFound(format!("user {user}")));
+        }
+
+        // Reconcile SURVIVING neighbours' denormalized counts from the user's current edges, BEFORE
+        // removing anything (afterwards the edges are gone and the information is lost). Mirrors the
+        // durable backing's pre-cascade UPDATEs.
+
+        // Accounts the user follows each lose one follower; accounts that follow the user each lose
+        // one followee. (No self-follow, so the user is never its own neighbour here.)
+        let following: Vec<UserId> = store
+            .follows
+            .iter()
+            .filter(|(follower, _)| *follower == user)
+            .map(|(_, followee)| *followee)
+            .collect();
+        let followers: Vec<UserId> = store
+            .follows
+            .iter()
+            .filter(|(_, followee)| *followee == user)
+            .map(|(follower, _)| *follower)
+            .collect();
+        for followee in following {
+            if let Some(f) = store.users.get_mut(&followee) {
+                f.follower_count = f.follower_count.saturating_sub(1);
+            }
+        }
+        for follower in followers {
+            if let Some(f) = store.users.get_mut(&follower) {
+                f.following_count = f.following_count.saturating_sub(1);
+            }
+        }
+
+        // Surviving chirps the user liked each lose one like. Chirps authored by the user are
+        // cascaded away below, so they are excluded — decrementing a count on a row about to vanish
+        // is pointless (and mirrors the durable `author_id <> user` filter).
+        let liked_surviving: Vec<ChirpId> = store
+            .likes
+            .iter()
+            .filter(|(liker, _)| *liker == user)
+            .map(|(_, chirp)| *chirp)
+            .filter(|chirp| store.chirps.get(chirp).is_some_and(|c| c.author_id != user))
+            .collect();
+        for chirp in liked_surviving {
+            if let Some(c) = store.chirps.get_mut(&chirp) {
+                c.like_count = c.like_count.saturating_sub(1);
+            }
+        }
+
+        // The set of chirps authored by the user — removed below, with their dependents cascaded.
+        let authored: HashSet<ChirpId> = store
+            .chirps
+            .iter()
+            .filter(|(_, chirp)| chirp.author_id == user)
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Remove the account's identity and its handle index entry.
+        if let Some(removed_user) = store.users.remove(&user) {
+            store.username_to_id.remove(removed_user.username.as_str());
+        }
+
+        // Remove the authored chirps and everything that cascades off them.
+        store.chirps.retain(|id, _| !authored.contains(id));
+        store.removed.retain(|id| !authored.contains(id));
+        // Like edges BY the user and like edges ON any removed chirp (by anyone) cascade away.
+        store
+            .likes
+            .retain(|(liker, chirp)| *liker != user && !authored.contains(chirp));
+        // A surviving chirp that replied to one of the removed chirps loses its target (SET NULL).
+        for chirp in store.chirps.values_mut() {
+            if chirp
+                .reply_to
+                .is_some_and(|parent| authored.contains(&parent))
+            {
+                chirp.reply_to = None;
+            }
+        }
+
+        // Follow edges on either side cascade away.
+        store
+            .follows
+            .retain(|(follower, followee)| *follower != user && *followee != user);
+
+        // Transient per-user state cascades away: sessions, credential, recovery tokens, suspension.
+        store.tokens.retain(|_, u| *u != user);
+        store.credentials.remove(&user);
+        store
+            .recovery_tokens
+            .retain(|_, challenge| challenge.user != user);
+        store.suspended.remove(&user);
+
+        Ok(())
     }
 
     /// Materializes a user's full data export, mirroring the durable backing: the user's profile,
@@ -1228,6 +1333,154 @@ mod tests {
         // Idempotent: no underflow below zero.
         let resp2 = repo.unlike(alice.id, chirp.id).await.expect("idempotent");
         assert_eq!(resp2.like_count, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_account_cascades_all_state_and_reconciles_survivor_counts() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let bob = seed_user(&repo, "bob").await;
+        let carol = seed_user(&repo, "carol").await;
+
+        // Follow graph: alice→bob and carol→alice (both touch alice), plus a control edge bob→carol
+        // that does NOT touch alice and must survive untouched.
+        repo.follow(alice.id, bob.id).await.unwrap();
+        repo.follow(carol.id, alice.id).await.unwrap();
+        repo.follow(bob.id, carol.id).await.unwrap();
+
+        // Content: bob authors a chirp that survives; alice authors one that is cascaded away.
+        let b1 = seed_chirp(&repo, bob.id, "bob chirp").await;
+        let a1 = seed_chirp(&repo, alice.id, "alice chirp").await;
+
+        // Likes: alice likes bob's surviving chirp (its count must reconcile to 0) and her own chirp
+        // (cascaded away with it); bob likes alice's chirp (that like edge is cascaded with a1).
+        repo.like(alice.id, b1.id).await.unwrap();
+        repo.like(alice.id, a1.id).await.unwrap();
+        repo.like(bob.id, a1.id).await.unwrap();
+
+        // A surviving reply to alice's chirp — its reply_to must become None when a1 is removed.
+        let reply = repo
+            .create_chirp(
+                carol.id,
+                CreateChirpRequest {
+                    text: ChirpText::parse("reply to alice").unwrap(),
+                    reply_to: Some(a1.id),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Transient per-account state: a session, a durable credential, and a recovery challenge.
+        let session = repo
+            .login(LoginRequest {
+                username: Username::parse("alice").unwrap(),
+            })
+            .await
+            .unwrap()
+            .token;
+        repo.set_credential(alice.id, "secret").await.unwrap();
+        repo.begin_account_recovery(&Username::parse("alice").unwrap())
+            .await
+            .unwrap();
+
+        // Sanity BEFORE deletion: the denormalized counts reflect the seeded edges.
+        assert_eq!(repo.get_user(bob.id).await.unwrap().follower_count, 1);
+        assert_eq!(repo.get_user(carol.id).await.unwrap().following_count, 1);
+
+        // --- Delete alice: the whole cascade is one atomic critical section. ---
+        repo.delete_account(alice.id)
+            .await
+            .expect("delete_account succeeds");
+
+        // The account itself is gone.
+        assert!(matches!(
+            repo.get_user(alice.id).await.unwrap_err(),
+            ServerError::NotFound(_)
+        ));
+
+        // Surviving neighbours' counts are reconciled to match their current edge sets.
+        assert_eq!(
+            repo.get_user(bob.id).await.unwrap().follower_count,
+            0,
+            "alice's follow of bob is gone, so bob's follower_count reconciles to 0"
+        );
+        assert_eq!(
+            repo.get_user(carol.id).await.unwrap().following_count,
+            0,
+            "carol's follow of alice is gone, so carol's following_count reconciles to 0"
+        );
+        // The control edge bob→carol is untouched by alice's deletion.
+        assert_eq!(repo.get_user(bob.id).await.unwrap().following_count, 1);
+        assert_eq!(repo.get_user(carol.id).await.unwrap().follower_count, 1);
+
+        {
+            let store = repo.lock().unwrap();
+            // b1 survives; its like_count reconciles to 0 (alice's like removed).
+            let b1_stored = store.chirps.get(&b1.id).expect("bob's chirp survives");
+            assert_eq!(
+                b1_stored.like_count, 0,
+                "alice's like of the surviving chirp is reconciled away"
+            );
+            // alice's chirp and everything cascading off it are gone.
+            assert!(
+                !store.chirps.contains_key(&a1.id),
+                "alice's chirp is cascaded away"
+            );
+            assert!(
+                !store.likes.iter().any(|(_, chirp)| *chirp == a1.id),
+                "likes ON the removed chirp are cascaded away"
+            );
+            assert!(
+                !store.likes.iter().any(|(liker, _)| *liker == alice.id),
+                "likes BY the deleted user are cascaded away"
+            );
+            // The surviving reply lost its target (ON DELETE SET NULL analogue).
+            let reply_stored = store.chirps.get(&reply.id).expect("carol's reply survives");
+            assert_eq!(reply_stored.reply_to, None);
+            // No follow edge references alice anymore; the control edge remains.
+            assert!(
+                !store
+                    .follows
+                    .iter()
+                    .any(|(f, t)| *f == alice.id || *t == alice.id),
+                "follow edges on either side of the deleted user are cascaded away"
+            );
+            assert!(store.follows.contains(&(bob.id, carol.id)));
+            // Transient per-account state is gone.
+            assert!(!store.credentials.contains_key(&alice.id));
+            assert!(!store.recovery_tokens.values().any(|c| c.user == alice.id));
+            assert!(!store.tokens.values().any(|u| *u == alice.id));
+            // The handle index entry is freed, so the handle could be re-registered.
+            assert!(!store.username_to_id.contains_key("alice"));
+        }
+
+        // The deleted account's session no longer resolves.
+        assert!(matches!(
+            repo.resolve_token(&session).await.unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_account_is_not_found_for_an_absent_or_already_deleted_account() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+
+        // An account that never existed is NotFound (no panic).
+        assert!(matches!(
+            repo.delete_account(UserId::new(9999)).await.unwrap_err(),
+            ServerError::NotFound(_)
+        ));
+
+        // The first deletion succeeds; a second on the now-deleted account is NotFound — never a
+        // silent no-op, matching the trait's documented error contract.
+        repo.delete_account(alice.id)
+            .await
+            .expect("first delete succeeds");
+        assert!(matches!(
+            repo.delete_account(alice.id).await.unwrap_err(),
+            ServerError::NotFound(_)
+        ));
     }
 
     // ---- Account recovery (store-free) ----------------------------------------------------------
