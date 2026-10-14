@@ -57,6 +57,11 @@ struct Store {
     likes: HashSet<(UserId, ChirpId)>,
     /// Issued session tokens → the user they authenticate.
     tokens: HashMap<String, UserId>,
+    /// Durable credential per user: user id → the at-rest secret representation. One per user,
+    /// mirroring the `credentials` table's `user_id` primary key. The secret's exact format and the
+    /// verification protocol are owned by identity & trust (`REQ-ID-*`); this backing only holds the
+    /// slot and compares what it was given, so the in-memory and durable backings agree.
+    credentials: HashMap<UserId, String>,
     /// Next user id to assign.
     next_user_id: u64,
     /// Next chirp id to assign.
@@ -381,20 +386,48 @@ impl ChirpRepository for InMemoryRepository {
     // behaviour is not yet built reports a `ServerError` and NEVER falsely confirms success. The one
     // exception is `store_health`, which is genuinely, truthfully healthy for an in-process store.
 
-    async fn set_credential(&self, _user: UserId, _secret: &str) -> Result<(), ServerError> {
-        Err(ServerError::Internal(
-            "set_credential is not yet implemented in the in-memory backing".to_owned(),
-        ))
+    /// Sets (or replaces) `user`'s credential, mirroring the durable backing's set/replace semantics.
+    ///
+    /// The user must exist ([`NotFound`](ServerError::NotFound) otherwise, matching the durable
+    /// backing's `credentials.user_id` foreign key); setting an existing credential replaces it. The
+    /// secret is stored verbatim as the at-rest representation — the credential protocol is owned
+    /// downstream (`REQ-ID-*`); this backing only holds the slot.
+    async fn set_credential(&self, user: UserId, secret: &str) -> Result<(), ServerError> {
+        let mut store = self.lock()?;
+        if !store.users.contains_key(&user) {
+            return Err(ServerError::NotFound(format!("user {user}")));
+        }
+        store.credentials.insert(user, secret.to_owned());
+        Ok(())
     }
 
+    /// Verifies `secret` against the stored credential for the account named by `username`,
+    /// returning the authenticated [`UserId`] on a match.
+    ///
+    /// Fails [`Unauthorized`](ServerError::Unauthorized) — indistinguishably — when the handle is
+    /// unknown, when no credential has been set for it, or when the secret does not match, so the
+    /// backing never discloses which of those held (no account enumeration).
     async fn verify_credential(
         &self,
-        _username: &Username,
-        _secret: &str,
+        username: &Username,
+        secret: &str,
     ) -> Result<UserId, ServerError> {
-        Err(ServerError::Internal(
-            "verify_credential is not yet implemented in the in-memory backing".to_owned(),
-        ))
+        let store = self.lock()?;
+        let id = *store
+            .username_to_id
+            .get(username.as_str())
+            .ok_or_else(|| ServerError::Unauthorized("invalid username or secret".to_owned()))?;
+        let stored = store
+            .credentials
+            .get(&id)
+            .ok_or_else(|| ServerError::Unauthorized("invalid username or secret".to_owned()))?;
+        if stored == secret {
+            Ok(id)
+        } else {
+            Err(ServerError::Unauthorized(
+                "invalid username or secret".to_owned(),
+            ))
+        }
     }
 
     async fn invalidate_session(&self, _token: &SessionToken) -> Result<(), ServerError> {
@@ -595,6 +628,82 @@ mod tests {
             .await
             .expect_err("bogus token");
         assert!(matches!(err, ServerError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn set_then_verify_credential_round_trips_to_the_user() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+
+        repo.set_credential(alice.id, "s3cr3t")
+            .await
+            .expect("set credential for an existing user");
+
+        let verified = repo
+            .verify_credential(&Username::parse("alice").unwrap(), "s3cr3t")
+            .await
+            .expect("the right secret verifies");
+        assert_eq!(verified, alice.id);
+    }
+
+    #[tokio::test]
+    async fn set_credential_replaces_the_previous_secret() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+
+        repo.set_credential(alice.id, "old").await.unwrap();
+        repo.set_credential(alice.id, "new").await.unwrap();
+
+        // The replaced secret no longer verifies; only the current one does.
+        let handle = Username::parse("alice").unwrap();
+        assert!(matches!(
+            repo.verify_credential(&handle, "old").await.unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+        assert_eq!(
+            repo.verify_credential(&handle, "new").await.unwrap(),
+            alice.id
+        );
+    }
+
+    #[tokio::test]
+    async fn set_credential_is_not_found_for_an_absent_user() {
+        let repo = InMemoryRepository::new();
+        let err = repo
+            .set_credential(UserId::new(9999), "secret")
+            .await
+            .expect_err("no such user");
+        assert!(matches!(err, ServerError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn verify_credential_is_unauthorized_for_unknown_handle_missing_credential_or_mismatch() {
+        let repo = InMemoryRepository::new();
+        let alice = seed_user(&repo, "alice").await;
+        let alice_handle = Username::parse("alice").unwrap();
+
+        // Unknown handle.
+        assert!(matches!(
+            repo.verify_credential(&Username::parse("ghost").unwrap(), "x")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+        // Known handle, but no credential has been set yet.
+        assert!(matches!(
+            repo.verify_credential(&alice_handle, "x")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
+        // Known handle with a credential set, but the wrong secret.
+        repo.set_credential(alice.id, "right").await.unwrap();
+        assert!(matches!(
+            repo.verify_credential(&alice_handle, "wrong")
+                .await
+                .unwrap_err(),
+            ServerError::Unauthorized(_)
+        ));
     }
 
     #[tokio::test]

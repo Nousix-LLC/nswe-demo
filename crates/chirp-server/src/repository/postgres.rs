@@ -300,20 +300,114 @@ impl ChirpRepository for PostgresRepository {
 
     // ---- Release-bar additions (scaffold stubs, #66 / REQ-DOM-018) ------------------------------
 
-    async fn set_credential(&self, _user: UserId, _secret: &str) -> Result<(), ServerError> {
-        Err(ServerError::Internal(format!(
-            "set_credential: {NOT_IMPLEMENTED}"
-        )))
+    /// Durably sets (or replaces) `user`'s credential inside a confirmed-write transaction,
+    /// returning only after the write has committed (`confirmed_write_durable`).
+    ///
+    /// The user's existence is checked inside the same transaction as the write, so the
+    /// [`NotFound`](ServerError::NotFound) decision and the credential write are one atomic unit (the
+    /// `credentials.user_id` foreign key is the in-store backstop). A present credential is replaced
+    /// via `ON CONFLICT (user_id)` — the primary key makes "one credential per user" a store
+    /// invariant. The `secret` is persisted verbatim as the at-rest representation: its format and
+    /// the verification protocol are owned downstream (identity & trust, `REQ-ID-*`); this method
+    /// fixes only the durable slot and never logs the secret.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist;
+    /// [`Internal`](ServerError::Internal) if the existence check or the write cannot be durably
+    /// committed — an undurable write is reported as failed, never falsely confirmed.
+    async fn set_credential(&self, user: UserId, secret: &str) -> Result<(), ServerError> {
+        let secret = secret.to_owned();
+        let updated_at = mapping::timestamp_to_column(now_millis());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let user_column = mapping::user_id_to_column(user)?;
+
+                // Verify the account exists in the same transaction as the write, so NotFound and
+                // the credential upsert are one atomic decision. `EXISTS` yields a single BOOLEAN
+                // row, so the check neither depends on the `users` row shape nor decodes a scalar
+                // whose SQL type must be pinned.
+                let exists: bool =
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+                        .bind(user_column)
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                                "failed to check user {user} before setting a credential: {error}"
+                            ))
+                        })?;
+                if !exists {
+                    return Err(ServerError::NotFound(format!("user {user}")));
+                }
+
+                // Set-or-replace: the PRIMARY KEY on user_id makes this at most one row per user.
+                sqlx::query(
+                    "INSERT INTO credentials (user_id, secret, updated_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT (user_id) DO UPDATE \
+                     SET secret = EXCLUDED.secret, updated_at = EXCLUDED.updated_at",
+                )
+                .bind(user_column)
+                .bind(&secret)
+                .bind(updated_at)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably record the credential for user {user}: {error}"
+                    ))
+                })?;
+
+                Ok(())
+            })
+        })
+        .await
     }
 
+    /// Verifies a presented `secret` for the account named by `username` against the durable store,
+    /// returning the authenticated [`UserId`] on a match.
+    ///
+    /// A single pooled read joins the handle to its credential; no transaction is needed for a
+    /// read-only lookup. The handle is bound as a parameter (never concatenated), so the lookup
+    /// carries no injection surface. Verification fails [`Unauthorized`](ServerError::Unauthorized)
+    /// **indistinguishably** whether the handle is unknown, has no stored credential, or the secret
+    /// does not match — the store never discloses which held, so an attacker cannot enumerate
+    /// accounts. The secret comparison is a direct equality against the stored at-rest
+    /// representation; the credential/verification protocol (hashing, timing properties) is owned
+    /// downstream (`REQ-ID-*`), not decided here.
+    ///
+    /// # Errors
+    ///
+    /// [`Unauthorized`](ServerError::Unauthorized) if the handle is unknown, has no credential, or
+    /// the secret does not match; [`Internal`](ServerError::Internal) if the read fails or a stored
+    /// id column is corrupt.
     async fn verify_credential(
         &self,
-        _username: &Username,
-        _secret: &str,
+        username: &Username,
+        secret: &str,
     ) -> Result<UserId, ServerError> {
-        Err(ServerError::Internal(format!(
-            "verify_credential: {NOT_IMPLEMENTED}"
-        )))
+        let row: Option<(i64, String)> = sqlx::query_as(
+            "SELECT c.user_id, c.secret FROM credentials c \
+             JOIN users u ON u.id = c.user_id WHERE u.username = $1",
+        )
+        .bind(username.as_str())
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!(
+                "failed to read a credential for verification: {error}"
+            ))
+        })?;
+
+        match row {
+            // A stored credential exists and the presented secret matches it: lift the id back
+            // through the boundary mapping (a corrupt id column surfaces as Internal).
+            Some((user_id, stored)) if stored == secret => mapping::column_to_user_id(user_id),
+            // Unknown handle, no credential, or a mismatch — all reported identically.
+            _ => Err(ServerError::Unauthorized(
+                "invalid username or secret".to_owned(),
+            )),
+        }
     }
 
     async fn invalidate_session(&self, _token: &SessionToken) -> Result<(), ServerError> {
@@ -1619,5 +1713,180 @@ mod proving_slice_tests {
             .await
             .expect_err("a corrupt stored handle is rejected at the boundary");
         assert_eq!(error.code(), ErrorCode::ValidationError);
+    }
+}
+
+#[cfg(test)]
+mod credential_durability_tests {
+    //! End-to-end tests for durable `set_credential` / `verify_credential` against a REAL
+    //! PostgreSQL backing, composing on the committed store-access substrate and the `credentials`
+    //! table from `SUBTASK_store_substrate`.
+    //!
+    //! Like the proving-slice tests they are **skipped** unless `CHIRP_TEST_DATABASE_URL` names a
+    //! reachable test database, so the default `cargo test` (which does not compile this
+    //! `postgres`-gated module) and `cargo test --features postgres` without a database both stay
+    //! green and store-free. When a store IS provided they demonstrate, against the durable backing:
+    //!
+    //!   * `confirmed_write_durable` — a credential set is visible to a later verify, and still
+    //!     verifies across a fresh reconnect (durable, pod-independent).
+    //!   * set/replace semantics — re-setting a credential replaces it (one row per user); the old
+    //!     secret stops verifying and the new one starts.
+    //!   * `domain_boundary_validated` error contract — `set_credential` is [`NotFound`] for an
+    //!     absent user, and `verify_credential` is [`Unauthorized`] for an unknown handle, a
+    //!     handle with no credential, or a secret mismatch — never a panic.
+    //!
+    //! Handles are derived from the durable token counter so repeated runs never collide on the
+    //! unique-handle index.
+    //!
+    //! [`NotFound`]: crate::error::ServerError::NotFound
+    //! [`Unauthorized`]: crate::error::ServerError::Unauthorized
+
+    use super::PostgresRepository;
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateUserRequest, ErrorCode};
+    use chirp_types::domain::{User, Username};
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter, so repeated
+    /// runs against the same store never collide on `users_username_key`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Creates a durable user with a unique handle and returns the created profile.
+    async fn seed_user(repo: &PostgresRepository) -> User {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+    }
+
+    #[tokio::test]
+    async fn set_credential_then_verify_round_trips_and_is_durable_across_reconnect() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let user = seed_user(&repo).await;
+        repo.set_credential(user.id, "s3cr3t")
+            .await
+            .expect("set_credential succeeds for an existing user");
+
+        // confirmed_write_durable: the set is visible to a verify after returning.
+        let verified = repo
+            .verify_credential(&user.username, "s3cr3t")
+            .await
+            .expect("the right secret verifies");
+        assert_eq!(verified, user.id);
+
+        // Durable across restart: a FRESH connection to the same store still verifies.
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        let after_restart = reconnected
+            .verify_credential(&user.username, "s3cr3t")
+            .await
+            .expect("the credential verifies after reconnect");
+        assert_eq!(after_restart, user.id);
+    }
+
+    #[tokio::test]
+    async fn set_credential_replaces_the_previous_secret() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        let user = seed_user(&repo).await;
+        repo.set_credential(user.id, "old").await.unwrap();
+        repo.set_credential(user.id, "new").await.unwrap();
+
+        // The replaced secret no longer verifies; only the current one does (one row per user).
+        let old = repo
+            .verify_credential(&user.username, "old")
+            .await
+            .expect_err("the replaced secret must not verify");
+        assert_eq!(old.code(), ErrorCode::Unauthorized);
+        assert_eq!(
+            repo.verify_credential(&user.username, "new").await.unwrap(),
+            user.id
+        );
+    }
+
+    #[tokio::test]
+    async fn set_credential_is_not_found_for_an_absent_user() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // An id freshly drawn from the counter but never used to create a user row.
+        let absent = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        let error = repo
+            .set_credential(absent, "secret")
+            .await
+            .expect_err("no such user");
+        assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn verify_credential_is_unauthorized_for_unknown_handle_missing_credential_or_mismatch() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // Unknown handle (never created).
+        let unknown = unique_handle(&repo).await;
+        assert_eq!(
+            repo.verify_credential(&unknown, "x")
+                .await
+                .expect_err("unknown handle")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+
+        // Known handle, but no credential has been set yet.
+        let user = seed_user(&repo).await;
+        assert_eq!(
+            repo.verify_credential(&user.username, "x")
+                .await
+                .expect_err("no credential set")
+                .code(),
+            ErrorCode::Unauthorized
+        );
+
+        // Known handle with a credential, but the wrong secret.
+        repo.set_credential(user.id, "right").await.unwrap();
+        assert_eq!(
+            repo.verify_credential(&user.username, "wrong")
+                .await
+                .expect_err("wrong secret")
+                .code(),
+            ErrorCode::Unauthorized
+        );
     }
 }
