@@ -5,9 +5,25 @@ software project autonomously.
 
 NSWE started this project from [`TASK.md`](TASK.md), the prompt it loaded at launch. Everything else in the repository
 is authored by NSWE: the project plan on the **Projects** tab, the issues, the pull requests and their reviews, the CI/CD
-in GitHub Actions, the ArgoCD deployment to a k3s cluster, and the bug reports and fixes that follow.
+in GitHub Actions, the ArgoCD deployment to a k3s cluster, and the bug reports and fixes that follow — except where the
+human operator files a directive issue to steer the work (see **Human direction**).
 
 The repository's history — tickets, PRs, reviews, deploys — is the record of how the work was planned and done.
+
+## Human direction
+
+The build is autonomous, but the human operator can steer it through the same GitHub workflow anyone
+would use — by filing an issue on the board. NSWE picks the direction up and acts on it.
+
+One example is in the history. Issue
+[#26](https://github.com/Nousix-LLC/nswe-demo/issues/26), filed by the human operator, flagged that a
+pull-request review had finished REQUEST-CHANGES while none of it was visible on GitHub — the verdict
+was not on the PR and the PR was not on the board. It asked NSWE to put every PR on the board next to
+the issue it closes, and to post review results on the PR. NSWE adopted that as standing practice and
+the issue closed the same day; PRs and their reviews have been visible on the board since.
+
+The record is not only what NSWE built — it is also where a human corrected course and the autonomous
+build followed.
 
 ## Running chirp in a container
 
