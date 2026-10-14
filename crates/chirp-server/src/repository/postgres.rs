@@ -551,30 +551,237 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
+    /// Durably makes `follower` follow `followee`, maintaining the denormalized follow counts in the
+    /// SAME confirmed-write transaction as the edge insert (`counts_match_edges`, `multiwrite_atomic`,
+    /// `confirmed_write_durable`).
+    ///
+    /// The edge insert and both count updates commit as one atomic unit, so a reader never observes a
+    /// `follower_count` / `following_count` that disagrees with the `follows` edge set, even under
+    /// concurrency or a mid-operation failure. The write is **idempotent**: the `(follower, followee)`
+    /// primary key makes a repeated follow an `ON CONFLICT DO NOTHING` no-op, and the counts move only
+    /// on a genuine edge change (`rows_affected == 1`) — exactly mirroring the in-memory reference. The
+    /// no-self-follow invariant is enforced at the durable boundary via
+    /// [`mapping::ensure_distinct_users`] (the schema's `follows_no_self` CHECK is the in-store
+    /// backstop), and both users' existence is decided inside the transaction so a missing account is a
+    /// clean [`NotFound`](ServerError::NotFound) rather than a raw foreign-key error.
+    ///
+    /// # Errors
+    ///
+    /// [`Forbidden`](ServerError::Forbidden) if `follower == followee`;
+    /// [`NotFound`](ServerError::NotFound) if either user does not exist;
+    /// [`Internal`](ServerError::Internal) if the transaction cannot be durably committed — an
+    /// undurable write is reported failed, never falsely confirmed.
     async fn follow(
         &self,
-        _follower: UserId,
-        _followee: UserId,
+        follower: UserId,
+        followee: UserId,
     ) -> Result<FollowResponse, ServerError> {
-        Err(ServerError::Internal(format!("follow: {NOT_IMPLEMENTED}")))
+        // Domain-boundary invariant first, exactly as the in-memory implementor orders it: a
+        // self-follow is Forbidden and never reaches the store.
+        mapping::ensure_distinct_users(follower, followee)?;
+
+        let created_at = mapping::timestamp_to_column(now_millis());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let follower_column = mapping::user_id_to_column(follower)?;
+                let followee_column = mapping::user_id_to_column(followee)?;
+
+                // Both endpoints' existence is decided in the SAME transaction as the write, so
+                // NotFound and the edge insert are one atomic decision (matching the in-memory order:
+                // follower, then followee).
+                ensure_user_exists(&mut *conn, follower_column, follower, "follower").await?;
+                ensure_user_exists(&mut *conn, followee_column, followee, "followee").await?;
+
+                // Idempotent insert: the (follower_id, followee_id) PK makes a repeat follow a no-op.
+                let inserted = sqlx::query(
+                    "INSERT INTO follows (follower_id, followee_id, created_at) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                )
+                .bind(follower_column)
+                .bind(followee_column)
+                .bind(created_at)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably insert a follow edge {follower} -> {followee}: {error}"
+                    ))
+                })?
+                .rows_affected();
+
+                // Counts move only on a genuine state change, in the same transaction as the edge.
+                if inserted == 1 {
+                    bump_follow_counts(&mut *conn, follower_column, followee_column, 1).await?;
+                }
+
+                let follower_count =
+                    read_follower_count(&mut *conn, followee_column, followee).await?;
+                Ok(FollowResponse {
+                    followee_id: followee,
+                    following: true,
+                    follower_count,
+                })
+            })
+        })
+        .await
     }
 
+    /// Durably makes `follower` stop following `followee`, maintaining the denormalized follow counts
+    /// in the SAME confirmed-write transaction as the edge delete (`counts_match_edges`,
+    /// `multiwrite_atomic`, `confirmed_write_durable`).
+    ///
+    /// Idempotent: unfollowing a user who is not followed deletes no row (`rows_affected == 0`), leaves
+    /// the counts unchanged, and succeeds — mirroring the in-memory reference. The counts decrement
+    /// only when an edge actually existed, so they can never fall below the edge set (the schema's
+    /// `CHECK (... >= 0)` is the backstop). Both users' existence is decided inside the transaction.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if either user does not exist;
+    /// [`Internal`](ServerError::Internal) if the transaction cannot be durably committed.
     async fn unfollow(
         &self,
-        _follower: UserId,
-        _followee: UserId,
+        follower: UserId,
+        followee: UserId,
     ) -> Result<FollowResponse, ServerError> {
-        Err(ServerError::Internal(format!(
-            "unfollow: {NOT_IMPLEMENTED}"
-        )))
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let follower_column = mapping::user_id_to_column(follower)?;
+                let followee_column = mapping::user_id_to_column(followee)?;
+
+                ensure_user_exists(&mut *conn, follower_column, follower, "follower").await?;
+                ensure_user_exists(&mut *conn, followee_column, followee, "followee").await?;
+
+                let removed =
+                    sqlx::query("DELETE FROM follows WHERE follower_id = $1 AND followee_id = $2")
+                        .bind(follower_column)
+                        .bind(followee_column)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(|error| {
+                            ServerError::Internal(format!(
+                        "failed to durably delete a follow edge {follower} -> {followee}: {error}"
+                    ))
+                        })?
+                        .rows_affected();
+
+                if removed == 1 {
+                    bump_follow_counts(&mut *conn, follower_column, followee_column, -1).await?;
+                }
+
+                let follower_count =
+                    read_follower_count(&mut *conn, followee_column, followee).await?;
+                Ok(FollowResponse {
+                    followee_id: followee,
+                    following: false,
+                    follower_count,
+                })
+            })
+        })
+        .await
     }
 
-    async fn like(&self, _user: UserId, _chirp: ChirpId) -> Result<LikeResponse, ServerError> {
-        Err(ServerError::Internal(format!("like: {NOT_IMPLEMENTED}")))
+    /// Durably records that `user` likes `chirp`, maintaining the chirp's denormalized `like_count` in
+    /// the SAME confirmed-write transaction as the edge insert (`counts_match_edges`,
+    /// `multiwrite_atomic`, `confirmed_write_durable`).
+    ///
+    /// Idempotent via the `(user_id, chirp_id)` primary key (≤ 1 like per pair): a repeated like is an
+    /// `ON CONFLICT DO NOTHING` no-op and does not double-count. `like` requires an existing chirp (and
+    /// user), decided inside the transaction so a missing entity is a clean
+    /// [`NotFound`](ServerError::NotFound) rather than a foreign-key error — mirroring the in-memory
+    /// reference (user checked first, then chirp).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the user or the chirp does not exist;
+    /// [`Internal`](ServerError::Internal) if the transaction cannot be durably committed.
+    async fn like(&self, user: UserId, chirp: ChirpId) -> Result<LikeResponse, ServerError> {
+        let created_at = mapping::timestamp_to_column(now_millis());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let user_column = mapping::user_id_to_column(user)?;
+                let chirp_column = mapping::chirp_id_to_column(chirp)?;
+
+                ensure_user_exists(&mut *conn, user_column, user, "user").await?;
+                ensure_chirp_exists(&mut *conn, chirp_column, chirp).await?;
+
+                let inserted = sqlx::query(
+                    "INSERT INTO likes (user_id, chirp_id, created_at) \
+                     VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                )
+                .bind(user_column)
+                .bind(chirp_column)
+                .bind(created_at)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!(
+                        "failed to durably insert a like edge {user} -> {chirp}: {error}"
+                    ))
+                })?
+                .rows_affected();
+
+                if inserted == 1 {
+                    bump_like_count(&mut *conn, chirp_column, 1).await?;
+                }
+
+                let like_count = read_like_count(&mut *conn, chirp_column, chirp).await?;
+                Ok(LikeResponse {
+                    chirp_id: chirp,
+                    liked: true,
+                    like_count,
+                })
+            })
+        })
+        .await
     }
 
-    async fn unlike(&self, _user: UserId, _chirp: ChirpId) -> Result<LikeResponse, ServerError> {
-        Err(ServerError::Internal(format!("unlike: {NOT_IMPLEMENTED}")))
+    /// Durably removes `user`'s like of `chirp`, maintaining the chirp's denormalized `like_count` in
+    /// the SAME confirmed-write transaction as the edge delete (`counts_match_edges`,
+    /// `multiwrite_atomic`, `confirmed_write_durable`).
+    ///
+    /// Idempotent: unliking a chirp the user has not liked deletes no row, leaves the count unchanged,
+    /// and succeeds. The count decrements only when an edge actually existed. `unlike` requires an
+    /// existing chirp (and user), decided inside the transaction — mirroring the in-memory reference.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the user or the chirp does not exist;
+    /// [`Internal`](ServerError::Internal) if the transaction cannot be durably committed.
+    async fn unlike(&self, user: UserId, chirp: ChirpId) -> Result<LikeResponse, ServerError> {
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let user_column = mapping::user_id_to_column(user)?;
+                let chirp_column = mapping::chirp_id_to_column(chirp)?;
+
+                ensure_user_exists(&mut *conn, user_column, user, "user").await?;
+                ensure_chirp_exists(&mut *conn, chirp_column, chirp).await?;
+
+                let removed = sqlx::query("DELETE FROM likes WHERE user_id = $1 AND chirp_id = $2")
+                    .bind(user_column)
+                    .bind(chirp_column)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|error| {
+                        ServerError::Internal(format!(
+                            "failed to durably delete a like edge {user} -> {chirp}: {error}"
+                        ))
+                    })?
+                    .rows_affected();
+
+                if removed == 1 {
+                    bump_like_count(&mut *conn, chirp_column, -1).await?;
+                }
+
+                let like_count = read_like_count(&mut *conn, chirp_column, chirp).await?;
+                Ok(LikeResponse {
+                    chirp_id: chirp,
+                    liked: false,
+                    like_count,
+                })
+            })
+        })
+        .await
     }
 
     // ---- Release-bar additions (scaffold stubs, #66 / REQ-DOM-018) ------------------------------
@@ -1304,6 +1511,132 @@ async fn fetch_user_ids(
         .into_iter()
         .map(mapping::column_to_user_id)
         .collect()
+}
+
+// ---- Social-graph edge-toggle helpers (follow/unfollow/like/unlike) -----------------------------
+// Each runs on the caller's transaction connection, so the existence check, the edge mutation, and
+// the denormalized-count maintenance commit as one atomic unit (`multiwrite_atomic`).
+
+/// Decides a user's existence INSIDE the caller's transaction, returning a clean
+/// [`NotFound`](ServerError::NotFound) labelled by `role` (e.g. `"follower"`, `"followee"`, `"user"`)
+/// rather than letting a later foreign-key violation surface as an opaque error — mirroring the
+/// in-memory implementor's existence checks.
+async fn ensure_user_exists(
+    conn: &mut sqlx::PgConnection,
+    user_column: i64,
+    id: UserId,
+    role: &str,
+) -> Result<(), ServerError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
+        .bind(user_column)
+        .fetch_one(conn)
+        .await
+        .map_err(|error| ServerError::Internal(format!("failed to check {role} {id}: {error}")))?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ServerError::NotFound(format!("{role} {id}")))
+    }
+}
+
+/// Decides a chirp's existence INSIDE the caller's transaction (a clean
+/// [`NotFound`](ServerError::NotFound), not an opaque foreign-key error) — so `like`/`unlike` require
+/// an existing chirp exactly as the in-memory implementor does.
+async fn ensure_chirp_exists(
+    conn: &mut sqlx::PgConnection,
+    chirp_column: i64,
+    id: ChirpId,
+) -> Result<(), ServerError> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chirps WHERE id = $1)")
+        .bind(chirp_column)
+        .fetch_one(conn)
+        .await
+        .map_err(|error| ServerError::Internal(format!("failed to check chirp {id}: {error}")))?;
+    if exists {
+        Ok(())
+    } else {
+        Err(ServerError::NotFound(format!("chirp {id}")))
+    }
+}
+
+/// Adjusts BOTH denormalized follow counts by `delta` (`+1` on follow, `-1` on unfollow) in the
+/// caller's transaction: the follower's `following_count` and the followee's `follower_count`. Called
+/// ONLY when the edge genuinely changed, so the counts track set membership and never fall below it
+/// (the schema's `CHECK (... >= 0)` is the in-store backstop).
+async fn bump_follow_counts(
+    conn: &mut sqlx::PgConnection,
+    follower_column: i64,
+    followee_column: i64,
+    delta: i64,
+) -> Result<(), ServerError> {
+    sqlx::query("UPDATE users SET following_count = following_count + $1 WHERE id = $2")
+        .bind(delta)
+        .bind(follower_column)
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!("failed to adjust following_count: {error}"))
+        })?;
+    sqlx::query("UPDATE users SET follower_count = follower_count + $1 WHERE id = $2")
+        .bind(delta)
+        .bind(followee_column)
+        .execute(conn)
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!("failed to adjust follower_count: {error}"))
+        })?;
+    Ok(())
+}
+
+/// Adjusts a chirp's denormalized `like_count` by `delta` in the caller's transaction (only on a
+/// genuine edge change, so it tracks the `likes` set and never underflows the `CHECK (... >= 0)`).
+async fn bump_like_count(
+    conn: &mut sqlx::PgConnection,
+    chirp_column: i64,
+    delta: i64,
+) -> Result<(), ServerError> {
+    sqlx::query("UPDATE chirps SET like_count = like_count + $1 WHERE id = $2")
+        .bind(delta)
+        .bind(chirp_column)
+        .execute(conn)
+        .await
+        .map_err(|error| ServerError::Internal(format!("failed to adjust like_count: {error}")))?;
+    Ok(())
+}
+
+/// Reads a user's current `follower_count` inside the caller's transaction and lifts it to the
+/// `chirp-types` `u64` through the committed mapping (a negative stored value is corrupt and surfaces
+/// as an error, never a panic — `domain_boundary_validated`).
+async fn read_follower_count(
+    conn: &mut sqlx::PgConnection,
+    user_column: i64,
+    id: UserId,
+) -> Result<u64, ServerError> {
+    let count: i64 = sqlx::query_scalar("SELECT follower_count FROM users WHERE id = $1")
+        .bind(user_column)
+        .fetch_one(conn)
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!("failed to read follower_count for {id}: {error}"))
+        })?;
+    mapping::column_to_u64(count, "follower_count")
+}
+
+/// Reads a chirp's current `like_count` inside the caller's transaction and lifts it to `u64` through
+/// the committed mapping (a negative stored value surfaces as an error, never a panic).
+async fn read_like_count(
+    conn: &mut sqlx::PgConnection,
+    chirp_column: i64,
+    id: ChirpId,
+) -> Result<u64, ServerError> {
+    let count: i64 = sqlx::query_scalar("SELECT like_count FROM chirps WHERE id = $1")
+        .bind(chirp_column)
+        .fetch_one(conn)
+        .await
+        .map_err(|error| {
+            ServerError::Internal(format!("failed to read like_count for {id}: {error}"))
+        })?;
+    mapping::column_to_u64(count, "like_count")
 }
 
 impl PostgresRepository {
@@ -3970,6 +4303,320 @@ mod content_timeline_durability_tests {
             repo.list_following(absent, TimelineQuery::default())
                 .await
                 .expect_err("no such user")
+                .code(),
+            ErrorCode::NotFound
+        );
+    }
+}
+
+#[cfg(test)]
+mod edge_toggle_tests {
+    //! Durable-behaviour tests for the social-graph edge toggles `follow`/`unfollow`/`like`/`unlike`
+    //! against a REAL PostgreSQL backing, proving this stage's carried identities on the toggle paths:
+    //!
+    //!   * `counts_match_edges` — after every toggle the denormalized `follower_count` /
+    //!     `following_count` / `like_count` equals the COUNT of the current `follows` / `likes` edge
+    //!     set, read directly from the store.
+    //!   * `multiwrite_atomic` / `confirmed_write_durable` — the edge mutation and its count move as one
+    //!     committed unit, visible (and still consistent) via a fresh read after the call returns.
+    //!   * idempotency — a repeated follow/like does not double-count; a repeat unfollow/unlike on an
+    //!     absent edge is a well-defined no-op; the count reflects set membership, not call count.
+    //!   * entity invariants at the durable boundary — no self-follow (Forbidden); like/unlike require
+    //!     an existing chirp; an absent user/chirp is NotFound — all via the `ServerError` contract,
+    //!     never a panic.
+    //!
+    //! They are **skipped** unless `CHIRP_TEST_DATABASE_URL` names a reachable test database, so the
+    //! default `cargo test` (which does not compile this `postgres`-gated module) and
+    //! `cargo test --features postgres` without a database both stay green and store-free. Handles are
+    //! derived from the durable `token_seq`, so repeated runs against the same store never collide.
+
+    use super::{mapping, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateChirpRequest, CreateUserRequest, ErrorCode};
+    use chirp_types::domain::{ChirpText, Username};
+    use chirp_types::ids::{ChirpId, UserId};
+
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// Connect to the test store and migrate it, or `None` to signal a skip.
+    async fn connect() -> Option<PostgresRepository> {
+        let url = test_database_url()?;
+        Some(
+            PostgresRepository::connect(&url)
+                .await
+                .expect("connect + migrate the test store"),
+        )
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// Create a fresh account and return its id.
+    async fn new_user(repo: &PostgresRepository) -> UserId {
+        let handle = unique_handle(repo).await;
+        repo.create_user(CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        })
+        .await
+        .expect("create_user succeeds")
+        .id
+    }
+
+    /// Create a fresh chirp authored by `author` and return its id.
+    async fn new_chirp(repo: &PostgresRepository, author: UserId) -> ChirpId {
+        repo.create_chirp(
+            author,
+            CreateChirpRequest {
+                text: ChirpText::parse("a chirp to be liked").expect("valid chirp text"),
+                reply_to: None,
+            },
+        )
+        .await
+        .expect("create_chirp succeeds")
+        .id
+    }
+
+    /// The COUNT of the current `follows` edges whose followee is `user` — the authoritative edge set
+    /// the denormalized `follower_count` must equal.
+    async fn edge_follower_count(repo: &PostgresRepository, user: UserId) -> u64 {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE followee_id = $1")
+            .bind(mapping::user_id_to_column(user).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .expect("count follower edges");
+        u64::try_from(n).unwrap()
+    }
+
+    /// The COUNT of the current `follows` edges whose follower is `user`.
+    async fn edge_following_count(repo: &PostgresRepository, user: UserId) -> u64 {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM follows WHERE follower_id = $1")
+            .bind(mapping::user_id_to_column(user).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .expect("count following edges");
+        u64::try_from(n).unwrap()
+    }
+
+    /// The COUNT of the current `likes` edges on `chirp`.
+    async fn edge_like_count(repo: &PostgresRepository, chirp: ChirpId) -> u64 {
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM likes WHERE chirp_id = $1")
+            .bind(mapping::chirp_id_to_column(chirp).unwrap())
+            .fetch_one(repo.pool())
+            .await
+            .expect("count like edges");
+        u64::try_from(n).unwrap()
+    }
+
+    /// Assert `counts_match_edges` for a user: both denormalized follow counts equal their edge sets,
+    /// read with a FRESH connection so the assertion also proves `confirmed_write_durable`.
+    async fn assert_user_counts_match_edges(url: &str, repo: &PostgresRepository, user: UserId) {
+        let fresh = PostgresRepository::connect(url).await.expect("reconnect");
+        let profile = fresh.get_user(user).await.expect("get_user");
+        assert_eq!(
+            profile.follower_count,
+            edge_follower_count(repo, user).await,
+            "follower_count must equal the follows edge set"
+        );
+        assert_eq!(
+            profile.following_count,
+            edge_following_count(repo, user).await,
+            "following_count must equal the follows edge set"
+        );
+    }
+
+    #[tokio::test]
+    async fn follow_sets_the_edge_updates_counts_atomically_and_is_idempotent() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let url = test_database_url().unwrap();
+        let (a, b) = (new_user(&repo).await, new_user(&repo).await);
+
+        // First follow sets the edge and moves BOTH counts in one committed unit.
+        let response = repo.follow(a, b).await.expect("follow succeeds");
+        assert_eq!(response.followee_id, b);
+        assert!(response.following);
+        assert_eq!(response.follower_count, 1);
+        assert_eq!(repo.get_user(a).await.unwrap().following_count, 1);
+        assert_user_counts_match_edges(&url, &repo, a).await;
+        assert_user_counts_match_edges(&url, &repo, b).await;
+
+        // Idempotent: a repeat follow does not double-count and does not error.
+        let again = repo.follow(a, b).await.expect("repeat follow is a no-op");
+        assert!(again.following);
+        assert_eq!(again.follower_count, 1);
+        assert_eq!(repo.get_user(a).await.unwrap().following_count, 1);
+        assert_user_counts_match_edges(&url, &repo, b).await;
+    }
+
+    #[tokio::test]
+    async fn unfollow_removes_the_edge_updates_counts_and_is_idempotent() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let url = test_database_url().unwrap();
+        let (a, b) = (new_user(&repo).await, new_user(&repo).await);
+        repo.follow(a, b).await.expect("follow succeeds");
+
+        // Unfollow removes the edge and moves both counts back to zero, atomically.
+        let response = repo.unfollow(a, b).await.expect("unfollow succeeds");
+        assert!(!response.following);
+        assert_eq!(response.follower_count, 0);
+        assert_eq!(repo.get_user(a).await.unwrap().following_count, 0);
+        assert_user_counts_match_edges(&url, &repo, a).await;
+        assert_user_counts_match_edges(&url, &repo, b).await;
+
+        // Idempotent: unfollowing an absent edge is a well-defined no-op, counts unchanged.
+        let again = repo
+            .unfollow(a, b)
+            .await
+            .expect("repeat unfollow is a no-op");
+        assert!(!again.following);
+        assert_eq!(again.follower_count, 0);
+        assert_user_counts_match_edges(&url, &repo, b).await;
+    }
+
+    #[tokio::test]
+    async fn follow_forbids_self_follow_and_is_not_found_for_absent_users() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let a = new_user(&repo).await;
+
+        // No self-follow, reported via the ServerError contract (never a panic, never an Internal).
+        assert_eq!(
+            repo.follow(a, a).await.expect_err("self-follow").code(),
+            ErrorCode::Forbidden
+        );
+
+        // An absent endpoint is NotFound in either position, decided inside the transaction.
+        let absent = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            repo.follow(a, absent)
+                .await
+                .expect_err("absent followee")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            repo.follow(absent, a)
+                .await
+                .expect_err("absent follower")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            repo.unfollow(a, absent)
+                .await
+                .expect_err("absent followee")
+                .code(),
+            ErrorCode::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn like_sets_the_edge_updates_count_atomically_and_is_idempotent() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let author = new_user(&repo).await;
+        let liker = new_user(&repo).await;
+        let chirp = new_chirp(&repo, author).await;
+
+        let response = repo.like(liker, chirp).await.expect("like succeeds");
+        assert_eq!(response.chirp_id, chirp);
+        assert!(response.liked);
+        assert_eq!(response.like_count, 1);
+        assert_eq!(edge_like_count(&repo, chirp).await, 1);
+
+        // Idempotent: a repeat like does not double-count.
+        let again = repo
+            .like(liker, chirp)
+            .await
+            .expect("repeat like is a no-op");
+        assert!(again.liked);
+        assert_eq!(again.like_count, 1);
+        assert_eq!(edge_like_count(&repo, chirp).await, 1);
+    }
+
+    #[tokio::test]
+    async fn unlike_removes_the_edge_updates_count_and_is_idempotent() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let author = new_user(&repo).await;
+        let liker = new_user(&repo).await;
+        let chirp = new_chirp(&repo, author).await;
+        repo.like(liker, chirp).await.expect("like succeeds");
+
+        let response = repo.unlike(liker, chirp).await.expect("unlike succeeds");
+        assert!(!response.liked);
+        assert_eq!(response.like_count, 0);
+        assert_eq!(edge_like_count(&repo, chirp).await, 0);
+
+        // Idempotent: unliking a chirp the user has not liked is a no-op.
+        let again = repo
+            .unlike(liker, chirp)
+            .await
+            .expect("repeat unlike is a no-op");
+        assert!(!again.liked);
+        assert_eq!(again.like_count, 0);
+    }
+
+    #[tokio::test]
+    async fn like_and_unlike_require_an_existing_chirp_and_user() {
+        let Some(repo) = connect().await else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let user = new_user(&repo).await;
+        let author = new_user(&repo).await;
+        let chirp = new_chirp(&repo, author).await;
+
+        let absent_chirp = PostgresRepository::allocate_chirp_id(repo.pool())
+            .await
+            .unwrap();
+        let absent_user = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            repo.like(user, absent_chirp)
+                .await
+                .expect_err("absent chirp")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            repo.like(absent_user, chirp)
+                .await
+                .expect_err("absent user")
+                .code(),
+            ErrorCode::NotFound
+        );
+        assert_eq!(
+            repo.unlike(user, absent_chirp)
+                .await
+                .expect_err("absent chirp")
                 .code(),
             ErrorCode::NotFound
         );
