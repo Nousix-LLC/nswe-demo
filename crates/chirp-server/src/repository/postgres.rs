@@ -36,7 +36,7 @@ use chirp_types::api::{
     LoginRequest, Page, SessionToken, TimelineQuery,
 };
 use chirp_types::domain::{Chirp, User, Username};
-use chirp_types::ids::{ChirpId, UserId};
+use chirp_types::ids::{ChirpId, Timestamp, UserId};
 
 use crate::error::ServerError;
 use crate::repository::ChirpRepository;
@@ -134,22 +134,112 @@ const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 const NOT_IMPLEMENTED: &str =
     "durable PostgreSQL backend not yet implemented (EPIC-PERSIST SUBTASK_durable_impl)";
 
+/// Current wall-clock time as epoch-milliseconds, for stamping a newly created durable entity.
+///
+/// Mirrors the in-memory backing's `now_millis`: a pre-epoch system clock (which does not occur in
+/// practice) degrades to `0` rather than panicking, keeping the durable path panic-free.
+fn now_millis() -> Timestamp {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0);
+    Timestamp::from_millis(millis)
+}
+
 #[async_trait]
 impl ChirpRepository for PostgresRepository {
     // ---- Existing capability_set (scaffold stubs) -----------------------------------------------
     // The durable bodies are downstream; each stub reports a failed action and never falsely
     // confirms success, preserving the error contract and the `confirmed_write_durable` identity.
 
-    async fn create_user(&self, _request: CreateUserRequest) -> Result<User, ServerError> {
-        Err(ServerError::Internal(format!(
-            "create_user: {NOT_IMPLEMENTED}"
-        )))
+    /// Durably registers a new user: allocates an opaque server id, stamps the creation time, and
+    /// inserts the row inside a confirmed-write transaction, returning the created [`User`] only
+    /// after the write has durably committed.
+    ///
+    /// The id is allocated from `user_id_seq` on the transaction's own connection, so the
+    /// allocation and the insert are one atomic unit. The unique-handle index (`users_username_key`)
+    /// makes a duplicate handle a unique violation, which is mapped to
+    /// [`Conflict`](ServerError::Conflict); the row is lowered through the committed mapping pattern
+    /// ([`mapping::UserRow::from_user`]) so `chirp-types` is the single source of the column shape.
+    /// The `CreateUserRequest.username` is a [`Username`] — unrepresentable-if-invalid — so an
+    /// invalid handle cannot reach the store through this path (`domain_boundary_validated`).
+    ///
+    /// # Errors
+    ///
+    /// [`Conflict`](ServerError::Conflict) if the handle is already taken;
+    /// [`Internal`](ServerError::Internal) if the id cannot be allocated or the write cannot be
+    /// durably committed — an undurable write is reported as failed, never falsely confirmed
+    /// (`confirmed_write_durable`).
+    async fn create_user(&self, request: CreateUserRequest) -> Result<User, ServerError> {
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let id = PostgresRepository::allocate_user_id(&mut *conn).await?;
+                let user = User {
+                    id,
+                    username: request.username,
+                    display_name: request.display_name,
+                    bio: request.bio,
+                    created_at: now_millis(),
+                    follower_count: 0,
+                    following_count: 0,
+                };
+                // Lower through the committed mapping pattern; counts/moderation columns take their
+                // schema defaults (0 / not-suspended) for a freshly created account.
+                let row = mapping::UserRow::from_user(&user)?;
+                sqlx::query(
+                    "INSERT INTO users (id, username, display_name, bio, created_at) \
+                     VALUES ($1, $2, $3, $4, $5)",
+                )
+                .bind(row.id)
+                .bind(row.username)
+                .bind(row.display_name)
+                .bind(row.bio)
+                .bind(row.created_at)
+                .execute(&mut *conn)
+                .await
+                .map_err(|error| {
+                    if mapping::is_unique_violation(&error) {
+                        ServerError::Conflict(format!(
+                            "username '{}' is already taken",
+                            user.username
+                        ))
+                    } else {
+                        ServerError::Internal(format!("failed to insert user: {error}"))
+                    }
+                })?;
+                Ok(user)
+            })
+        })
+        .await
     }
 
-    async fn get_user(&self, _id: UserId) -> Result<User, ServerError> {
-        Err(ServerError::Internal(format!(
-            "get_user: {NOT_IMPLEMENTED}"
-        )))
+    /// Fetches a user's public profile by id, lifting the stored row back into a validated
+    /// [`User`] through the committed mapping pattern.
+    ///
+    /// A plain pooled read (no transaction is needed for a single-statement lookup). The row is
+    /// lifted through [`mapping::UserRow::into_user`], which re-parses the stored handle at the
+    /// durable boundary, so a corrupt row surfaces as an error rather than a malformed value or a
+    /// panic (`domain_boundary_validated`).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no user has that id;
+    /// [`Validation`](ServerError::Validation) if a stored row violates a `chirp-types` invariant;
+    /// [`Internal`](ServerError::Internal) if the read fails or a stored id/count column is corrupt.
+    async fn get_user(&self, id: UserId) -> Result<User, ServerError> {
+        let row: Option<mapping::UserRow> = sqlx::query_as(
+            "SELECT id, username, display_name, bio, created_at, follower_count, \
+             following_count, suspended, suspended_at FROM users WHERE id = $1",
+        )
+        .bind(mapping::user_id_to_column(id)?)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(|error| ServerError::Internal(format!("failed to read user {id}: {error}")))?;
+
+        match row {
+            Some(row) => row.into_user(),
+            None => Err(ServerError::NotFound(format!("user {id}"))),
+        }
     }
 
     async fn login(&self, _request: LoginRequest) -> Result<AuthResponse, ServerError> {
@@ -1322,5 +1412,212 @@ mod mapping_tests {
                 .code(),
             ErrorCode::Forbidden
         );
+    }
+}
+
+#[cfg(test)]
+mod proving_slice_tests {
+    //! End-to-end proving-slice tests for durable `create_user` (incl. the unique-handle index)
+    //! and `get_user`, exercised against a REAL PostgreSQL backing — the walking skeleton that
+    //! proves the store-access substrate before any later `durable_impl` stage builds on it.
+    //!
+    //! They are **skipped** unless `CHIRP_TEST_DATABASE_URL` names a reachable test database, so
+    //! the default `cargo test` (which does not compile this `postgres`-gated module) and
+    //! `cargo test --features postgres` without a database both stay green and store-free. When a
+    //! store IS provided, the slice demonstrates the three substrate identities end-to-end against
+    //! the durable backing:
+    //!
+    //!   * `confirmed_write_durable` — a committed `create_user` is durably visible afterwards (and
+    //!     across a reconnect); a rejected duplicate write is never falsely confirmed.
+    //!   * `ids_opaque_monotonic_stable` — assigned [`UserId`]s are strictly increasing and stay
+    //!     larger across a reconnect (monotonic, stable across restart, never reused).
+    //!   * `domain_boundary_validated` — a handle that violates the `chirp-types` invariant cannot
+    //!     be read back out of the store; the boundary surfaces a validation error, not a bad value.
+    //!
+    //! Each test derives its handles from the durable token counter so repeated runs against the
+    //! same store never collide on the unique-handle index.
+
+    use super::{mapping, PostgresRepository};
+    use crate::repository::ChirpRepository;
+    use chirp_types::api::{CreateUserRequest, ErrorCode};
+    use chirp_types::domain::Username;
+
+    /// The test store URL, or `None` when unset/blank (→ the test skips).
+    fn test_database_url() -> Option<String> {
+        std::env::var("CHIRP_TEST_DATABASE_URL")
+            .ok()
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// A rerun-safe, schema-valid handle derived from the durable `token_seq` counter.
+    ///
+    /// `"u"` + up to 14 digits stays within the 1..=15-char username limit and the ASCII
+    /// alphanumeric/underscore charset, so repeated runs against the same store never collide on
+    /// `users_username_key`.
+    async fn unique_handle(repo: &PostgresRepository) -> Username {
+        let counter = PostgresRepository::allocate_token_value(repo.pool())
+            .await
+            .expect("allocate a token value for a unique handle");
+        Username::parse(format!("u{}", counter % 100_000_000_000_000))
+            .expect("the derived handle is a valid Username")
+    }
+
+    /// A `CreateUserRequest` for `handle` with a derived display name and no bio.
+    fn request(handle: &Username) -> CreateUserRequest {
+        CreateUserRequest {
+            username: handle.clone(),
+            display_name: format!("{handle} display"),
+            bio: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_is_durable_and_get_user_round_trips() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url)
+            .await
+            .expect("connect + migrate the test store");
+
+        let handle = unique_handle(&repo).await;
+        let created = repo
+            .create_user(request(&handle))
+            .await
+            .expect("create_user succeeds");
+
+        // The returned profile carries a server-assigned id and zeroed counts, and matches the
+        // request's handle.
+        assert_eq!(created.username, handle);
+        assert_eq!(created.follower_count, 0);
+        assert_eq!(created.following_count, 0);
+
+        // confirmed_write_durable + round trip: the write is visible via get_user AFTER returning.
+        let fetched = repo
+            .get_user(created.id)
+            .await
+            .expect("get_user after create");
+        assert_eq!(fetched, created);
+
+        // Stable across restart: a FRESH connection to the same durable store still sees the row.
+        let reconnected = PostgresRepository::connect(&url)
+            .await
+            .expect("reconnect to the same store");
+        let after_restart = reconnected
+            .get_user(created.id)
+            .await
+            .expect("get_user after reconnect");
+        assert_eq!(after_restart, created);
+    }
+
+    #[tokio::test]
+    async fn get_user_is_not_found_for_an_absent_id() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // An id freshly drawn from the counter but never used to create a row.
+        let absent = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        let error = repo.get_user(absent).await.expect_err("absent user");
+        assert_eq!(error.code(), ErrorCode::NotFound);
+    }
+
+    #[tokio::test]
+    async fn duplicate_handle_is_a_conflict_and_is_never_falsely_confirmed() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+        let handle = unique_handle(&repo).await;
+
+        let first = repo
+            .create_user(request(&handle))
+            .await
+            .expect("first create succeeds");
+
+        // The unique-handle index rejects the duplicate as a Conflict...
+        let error = repo
+            .create_user(request(&handle))
+            .await
+            .expect_err("a duplicate handle must conflict");
+        assert_eq!(error.code(), ErrorCode::Conflict);
+
+        // ...and the rejected write was never confirmed: the handle still resolves to exactly the
+        // first account, unchanged (confirmed_write_durable, negative case).
+        let fetched = repo
+            .get_user(first.id)
+            .await
+            .expect("the first user is still present");
+        assert_eq!(fetched, first);
+    }
+
+    #[tokio::test]
+    async fn assigned_ids_are_opaque_monotonic_and_stable_across_restart() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        let handle_one = unique_handle(&repo).await;
+        let handle_two = unique_handle(&repo).await;
+        let user_one = repo.create_user(request(&handle_one)).await.unwrap();
+        let user_two = repo.create_user(request(&handle_two)).await.unwrap();
+
+        // Strictly increasing ⇒ monotonic and never reused within a run.
+        assert!(user_one.id.get() < user_two.id.get());
+
+        // Stable across restart + never reused: a fresh connection assigns a STILL-larger id, and
+        // the earlier users remain retrievable unchanged.
+        let reconnected = PostgresRepository::connect(&url).await.unwrap();
+        let handle_three = unique_handle(&reconnected).await;
+        let user_three = reconnected
+            .create_user(request(&handle_three))
+            .await
+            .unwrap();
+        assert!(user_three.id.get() > user_two.id.get());
+        assert_eq!(reconnected.get_user(user_one.id).await.unwrap(), user_one);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_handle_cannot_be_read_back_out_of_the_store() {
+        let Some(url) = test_database_url() else {
+            eprintln!("skipping: CHIRP_TEST_DATABASE_URL not set");
+            return;
+        };
+        let repo = PostgresRepository::connect(&url).await.unwrap();
+
+        // domain_boundary_validated: the well-typed create path cannot introduce an invalid handle
+        // (`Username` is unrepresentable-if-invalid). To prove the READ boundary guards the store,
+        // inject a corrupt handle directly via SQL (bypassing the domain type) — "has a space" is
+        // 11 chars, so it clears the in-store length CHECK but violates the Username charset — then
+        // assert get_user surfaces a validation error rather than a malformed value or a panic.
+        let id = PostgresRepository::allocate_user_id(repo.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, username, display_name, bio, created_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(mapping::user_id_to_column(id).unwrap())
+        .bind("has a space")
+        .bind("Corrupt")
+        .bind(Option::<String>::None)
+        .bind(0_i64)
+        .execute(repo.pool())
+        .await
+        .expect("inject a corrupt row directly");
+
+        let error = repo
+            .get_user(id)
+            .await
+            .expect_err("a corrupt stored handle is rejected at the boundary");
+        assert_eq!(error.code(), ErrorCode::ValidationError);
     }
 }
