@@ -67,7 +67,18 @@
 
 pub mod in_memory;
 
+/// The durable PostgreSQL backing (compiling scaffold), behind the optional `postgres` feature.
+///
+/// Gated so the default build and the store-free test suite pull in neither `sqlx` nor a database;
+/// production builds enable `--features postgres` and select it at the composition root when a
+/// connection string is configured. See the [`postgres`] module and ADR-0001.
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 pub use in_memory::InMemoryRepository;
+
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresRepository;
 
 use async_trait::async_trait;
 use chirp_types::api::{

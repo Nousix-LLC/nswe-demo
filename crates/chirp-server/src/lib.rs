@@ -42,6 +42,9 @@ pub use api::{build_router, AppState, AuthUser, ValidatedJson};
 pub use error::ServerError;
 pub use repository::{ChirpRepository, InMemoryRepository};
 
+#[cfg(feature = "postgres")]
+pub use repository::PostgresRepository;
+
 // NOTE: `pub mod api;` and the `AppState` / `AuthUser` re-exports are the transport foundations
 // handlers compile against; `build_router` is the router-and-bootstrap composition root. Together
 // they give `tests/` and the `main` binary one shared way to construct the app over an

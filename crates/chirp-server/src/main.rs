@@ -18,6 +18,14 @@
 //!   `static/` directory; it currently holds a placeholder page until the SPA bundle lands in #9).
 //! * `RUST_LOG` — the `tracing-subscriber` env-filter (default
 //!   `info,chirp_server=debug,tower_http=info`).
+//! * `CHIRP_DATABASE_URL` / `DATABASE_URL` — the PostgreSQL connection string that selects the
+//!   **durable** backing (ADR-0001). The selection is **config-driven, not a code edit**: when the
+//!   binary is built with `--features postgres` *and* a non-empty connection string is set (the
+//!   production path), the server constructs the durable `PostgresRepository`, applies migrations,
+//!   and serves against it; when the string is absent/empty, or the binary was built without the
+//!   `postgres` feature (the test/local default), it constructs the in-memory
+//!   [`InMemoryRepository`] and needs no database. `CHIRP_DATABASE_URL` takes precedence over
+//!   `DATABASE_URL` when both are set.
 
 use std::sync::Arc;
 
@@ -27,8 +35,9 @@ use chirp_server::{build_router, AppState, InMemoryRepository};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
-    // Default backing store: fully in-memory, so the server boots with no database.
-    let state = AppState::new(Arc::new(InMemoryRepository::new()));
+    // Config-driven backend selection (ADR-0001): durable PostgreSQL when configured and compiled
+    // in, in-memory otherwise. No code edit is required to switch between them.
+    let state = build_app_state().await?;
     let app = build_router(state);
 
     let addr = std::env::var("CHIRP_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
@@ -41,6 +50,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("chirp-server stopped");
     Ok(())
+}
+
+/// Builds the shared [`AppState`] by selecting the persistence backing from configuration.
+///
+/// Returns the durable `PostgresRepository` when the binary is built with the `postgres` feature
+/// **and** a non-empty connection string is configured (`CHIRP_DATABASE_URL` or `DATABASE_URL`);
+/// otherwise the in-memory [`InMemoryRepository`]. Constructing the durable backing also applies the
+/// embedded migrations, so a returned durable state is already schema-current. Only the backend
+/// *construction* varies here — the router, handlers, and `AppState`'s `Arc<dyn ChirpRepository>`
+/// shape are identical for both backings.
+///
+/// # Errors
+///
+/// Propagates an error if the durable backing is selected but its connection pool cannot be
+/// established or its migrations fail.
+async fn build_app_state() -> Result<AppState, Box<dyn std::error::Error>> {
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(database_url) = durable_database_url() {
+            tracing::info!(
+                "durable backing selected: connecting to PostgreSQL and applying migrations"
+            );
+            let repo = chirp_server::PostgresRepository::connect(&database_url).await?;
+            return Ok(AppState::new(Arc::new(repo)));
+        }
+        tracing::info!("no database URL configured; using the in-memory backing");
+    }
+
+    #[cfg(not(feature = "postgres"))]
+    {
+        // The durable backing is not compiled in. If a URL is nonetheless set, warn loudly so a
+        // production misconfiguration (DB URL present, but the binary built without `postgres`) is
+        // visible rather than silently serving non-durable data.
+        if durable_database_url().is_some() {
+            tracing::warn!(
+                "a database URL is configured but this binary was built without the `postgres` \
+                 feature; falling back to the in-memory backing (data is NOT durable)"
+            );
+        }
+    }
+
+    Ok(AppState::new(Arc::new(InMemoryRepository::new())))
+}
+
+/// Reads the durable-store connection string from the environment, preferring `CHIRP_DATABASE_URL`
+/// over `DATABASE_URL`. An unset, empty, or whitespace-only value is treated as "not configured".
+fn durable_database_url() -> Option<String> {
+    ["CHIRP_DATABASE_URL", "DATABASE_URL"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// Install the global `tracing` subscriber.
