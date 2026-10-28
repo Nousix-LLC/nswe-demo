@@ -1,1450 +1,1876 @@
 # Operational readiness
 
-*`design/operational-readiness.md` — owner: operational-readiness concern of the `Nousix-LLC/nswe-demo`
-(`chirp`) release design. Requirement scheme: `REQ-OPS-*`.*
+This document is the operational-readiness area of the chirp product design: what must be true in production **beyond "it runs"** for chirp to be operated, not just started. It states durable data, a backup and recovery path, limits and quotas, observability, and a status and incident posture — each as a testable `REQ-OPS-*` release requirement whose acceptance criteria a person who never met the author can check against the live product. It is **requirements, not implementation**: every engineering "how" (which backup tool, which metrics backend, which rate-limiter) is stated as a property the operated product must have and deferred to later code work.
 
-## Overview
+It builds on, and does not restate, the domain persistence model (`REQ-DOM-100..118`) and the product-level operational needs (`REQ-PROD-037..041`, operator journey J9); it references those ids at the seam. The register below holds 75 requirements (`REQ-OPS-001..095`), 59 of them release-gating.
 
-This document states **what must be true for `chirp` in production, beyond "it runs"** — the operational
-bar a product must clear to be *operated*, not merely *started*. It is written as **requirements and
-acceptance criteria, not operational implementation**: every topic with an operational "how" (which durable
-store, which backup tool, which metrics backend, which alerting pipeline) is stated here as a requirement
-with a testable bar, and the implementation is deferred to later code work. Each `REQ-OPS-*` carries a
-statement from the operator's/user's side, acceptance criteria a stranger could check against the live
-product, a `release_gating` flag, the `REQ-DOM-*`/`REQ-PROD-*` it builds on, and a `verification_method`
-from the design's shared vocabulary (`manual_user_check` | `automated_test` | `inspection` |
-`operational_check`).
-
-Everything here **builds on the durable-persistence model the domain design already fixed** — it does not
-redesign persistence; it designs the operations around it. The baseline it stands on, referenced by id and
-never restated:
-
-- **`REQ-DOM-012`** — a user's data endures across process restart, redeploy, and reschedule.
-- **`REQ-DOM-013`** — durable state lives outside any single process's ephemeral memory/filesystem.
-- **`REQ-DOM-014`** — all durable state crosses the one `ChirpRepository` seam.
-- **`REQ-DOM-015` / `REQ-DOM-016`** — counts never diverge across the durability boundary; the seam is safe
-  for concurrent access.
-- **`REQ-DOM-021`** — the health signal can report **unhealthy when the durable store is unreachable**
-  (explicitly handed from the domain design to `REQ-OPS-*`).
-- **`REQ-DOM-022`** — the durable schema has a defined initial version and a forward migration path.
-- **`REQ-DOM-005` / `REQ-DOM-006`** — durable credentials and durable sessions behind the seam.
-
-**Grounding.** Observations of the product as it stands are grounded in `Nousix-LLC/nswe-demo` at commit
-`c805525`, which may be exercised read-only to ground acceptance criteria. At that commit `chirp` runs on an
-in-memory repository with a single replica and no persistent volume, no backups, no rate/size limits, a
-liveness-only `/healthz`, and no metrics or incident posture — so most gating requirements below are
-conditions today's product fails. Each is written so the same yes/no can be reached against the running
-product.
-
-## Document index — required sections, in order
-
-This deliverable contains every required section of `operational-readiness.md` from the design's
-`design_artifact_map.yaml`, in order. The five area sections are composed from the per-area work without
-rewriting their requirements; the final two sections are authored at integration.
-
-| # | Section | REQ-OPS range | Source |
-|---|---------|---------------|--------|
-| 1 | `durable_data` | `REQ-OPS-001..019` | durable-data area |
-| 2 | `backups_and_recovery` | `REQ-OPS-020..039` | backups-&-recovery area |
-| 3 | `limits_and_quotas` | `REQ-OPS-040..059` | limits-&-quotas area |
-| 4 | `observability` | `REQ-OPS-060..079` | observability area |
-| 5 | `status_and_incident` | `REQ-OPS-080..099` | status-&-incident area |
-| 6 | `existing_followups` | — | integration (placement of #23/#24/#25) |
-| 7 | `requirements_and_acceptance_criteria` | all `REQ-OPS-*` | integration (consolidated register) |
+The seven sections below are, in order: `durable_data`, `backups_and_recovery`, `limits_and_quotas`, `observability`, `status_and_incident`, `existing_followups`, and `requirements_and_acceptance_criteria`.
 
 ---
 
 ## durable_data
 
-*(section: `durable_data` of `design/operational-readiness.md`)*
+*Durable data in production.*
 
-This section states **what durability and data retention `chirp` requires in production** — the
-operational face of the durable-persistence model that domain & application design already fixed. It does
-**not** redesign persistence or choose a store: *which* durable store is used, *how* it is provisioned,
-the schema-migration tooling, and the backup/restore mechanism are owned elsewhere (domain design's
-`REQ-DOM-*` and later code work for the store; `backups_and_recovery` for backup, restore, rollback and
-migration safety; `observability` for the health signal, metrics and logs; `limits_and_quotas` for
-rate/size limits and per-user quotas). This section pins the **outcome a user and an operator must be
-able to observe**: that a user's data provably survives normal operation, that the product commits to a
-stated retention for each kind of state, and that durability can be demonstrated against the live product.
 
-Every requirement here **builds on** the domain persistence model and references it by id rather than
-restating it. The Inherited Baseline it stands on:
+This is the `durable_data` section of `design/operational-readiness.md`: the **operational posture**
+around chirp's persistence model, stated as testable `REQ-OPS-*` requirements. The domain design already
+fixed the persistence *model* — authoritative state in a durable store distinct from the serving process,
+acknowledged writes survive, invariants hold across restart/redeploy/restore, readiness reflects store
+reachability, upgrades preserve data (`REQ-DOM-100..118`). This section does not restate that model. It
+states what an **operator and a user are owed in production** once that model is in place: that the
+product's authoritative state lives durably as a standing property of an operated deployment, survives the
+normal operations of running a service, and is **retained for as long as the product promises and no
+longer**. The backups-and-recovery section (`REQ-OPS-020..039`) builds its backup, restore, and
+recovery-target requirements on the durability posture fixed here; the readiness *signal* itself is the
+observability section's (`REQ-OPS-060..079`) — this section states only that durability requires the store
+to be run as a reachable, persistent component.
 
-- **`REQ-DOM-012`** — a user's data endures across process restart, redeploy, and reschedule.
-- **`REQ-DOM-013`** — durable state lives outside any single process's ephemeral memory and filesystem.
-- **`REQ-DOM-014`** — all durable state crosses the one `ChirpRepository` seam (a durable store is a
-  second implementor; the in-memory store is a baseline to replace).
-- **`REQ-DOM-015` / `REQ-DOM-016`** — counts never diverge across the durability boundary; the seam is
-  safe for concurrent access.
-- **`REQ-DOM-004`** — ids are monotonic, non-reused, and stable across restarts.
-- **`REQ-DOM-005` / `REQ-DOM-006`** — durable credentials and durable sessions behind the seam.
-- **`REQ-DOM-009`** — account deletion has defined cascade semantics.
-- **`REQ-DOM-022`** — the durable schema carries a defined version (its migration path is
-  `backups_and_recovery`'s concern; this section requires only that the version is itself durable state).
+### What this section fixes, and what it defers
 
-**Grounding.** Observations of the product as it stands are grounded in `Nousix-LLC/nswe-demo` at commit
-`c805525`. At that commit `chirp-server` is backed by an in-memory repository and
-`deploy/chirp/10-deployment.yaml` runs `replicas: 1` with a read-only root filesystem and a single
-writable `emptyDir` scratch mount — **no database and no persistent volume**. The consequence, stated
-from the user's side, is that every account, chirp, follow, like, credential, and session is lost on any
-restart, redeploy, or reschedule. Every requirement below is a condition that today's product fails, and
-each acceptance criterion is written so a stranger can reach the same yes/no against the running product.
+- **In this section**: the production durability expectation (a running deployment loses no user data to a
+  restart, update, or redeploy); acknowledged-write durability as an operated property; the integrity
+  properties that must still hold after an operational restart and after a restore; the requirement that the
+  durable store be operated as a reachable, persistent component distinct from the serving process; and a
+  stated **data-retention posture** — how long live user data, deleted-account data, sessions, and private
+  identity data are kept, consistent with the defined deletion outcome (`REQ-DOM-037`, `REQ-DOM-112`) and
+  with export (`REQ-DOM-117`).
+- **Referenced, owned elsewhere**: the persistence *model* and its invariants (`REQ-DOM-100..118`, domain
+  design) — consumed here by reference, not restated; the backup cadence, retention schedule,
+  recovery-point / recovery-time targets, and the restore procedure (`REQ-OPS-020..039`,
+  backups-and-recovery), which build on this section; the readiness *signal*, the health-vs-readiness
+  distinction, and the audit trail (`REQ-OPS-060..079`, observability); the structure and handling of the
+  account **Credential** and **Verified contact** (`REQ-ID-*`, identity/security); and the user-facing
+  export surface and portable format (`REQ-UX-*` / `REQ-ID-*`).
+- **Deferred to the code work (the "how")**: which store engine, replication or snapshot mechanism, schema,
+  migrations, connection handling, and serialization. Every requirement below is a property the operated
+  product must have, not a mechanism; where a mechanism is tempting it is stated as the property and the
+  choice handed to the engineering code DAGs.
 
----
+Entities are named by the domain model's canonical vocabulary (Account, Chirp, Follow, Like, Session,
+Credential, Verified contact); this section introduces none the model does not define. The product and the
+in-memory backing it closes are named by repository identity — `Nousix-LLC/nswe-demo @ c805525`, the
+`ChirpRepository` seam in the `chirp-server` crate — never by any host, cluster, or deployment address.
 
-### What "data endures" must mean in operation
+### The posture in prose
 
-"Durable" is not one property; in operation it is five distinct guarantees, each with its own failure
-mode and its own test. A releasable `chirp` must hold all five:
+**Durability is a standing property of an operated deployment, not a one-time property of a fresh start.**
+The domain design requires that authoritative state survives a restart (`REQ-DOM-100`). The operational
+requirement is stronger in a different direction: a deployment that an operator runs — restarting it,
+updating it, redeploying it, rolling the serving process to a fresh instance — loses no user data in the
+course of those routine operations, every time, for the life of the deployment. The operator does not have
+to treat a restart as a risky event; it is a normal one. This is the operational face of `REQ-DOM-113/114`
+(authoritative state in a durable store distinct from the serving process) and `REQ-DOM-118` (an upgrade
+preserves existing data).
 
-1. **The medium is durable and pod-independent** — data lives on storage whose lifecycle is not tied to
-   any one pod (not process memory, not the ephemeral root or scratch mount). *(REQ-OPS-001)*
-2. **No loss across a process restart** — the same workload restarting keeps everything. *(REQ-OPS-002)*
-3. **No loss across a redeploy** — rolling out a new revision keeps everything. *(REQ-OPS-003)*
-4. **No loss across a reschedule** — a pod deleted and recreated, possibly on a different node, keeps
-   everything. *(REQ-OPS-004)*
-5. **Safe under more than one replica** — either replicas share one durable store (no split-brain state),
-   or running more than one replica is prevented until the store supports it. *(REQ-OPS-005)*
+**The store is a component the deployment runs, not a convenience of the process.** For durability to be a
+standing property, the durable store named by `REQ-DOM-113` must be operated as a persistent component
+whose lifecycle is independent of any single serving process. An operator can replace the serving process
+without touching the store, and the store outlives the process. A deployment that keeps authoritative state
+only in the serving process's memory — the `c805525` blocker — does not meet this posture no matter how
+rarely it restarts.
 
-Around those five sit the guarantees that make durability trustworthy rather than nominal: a confirmed
-write is durable *before* it is confirmed (REQ-OPS-006); *every* kind of state is covered, not just the
-obvious ones (REQ-OPS-007); and derived projections stay correct across the durability boundary
-(REQ-OPS-008).
+**Integrity survives the events of operating the product.** Recovery that brings the rows back but breaks
+the model's invariants has not recovered the product (`REQ-DOM-110`). The operational posture is that after
+an operational restart *and* after a restore from backup, every reference still resolves, ids are still
+unique and never reused, counts still equal their edges, and an applied account deletion stays applied —
+and that an interrupted write (a crash or restart mid-operation) never leaves half-applied state visible.
+The backups-and-recovery section inherits this: a restore is "correct" only when these properties hold, and
+that is the bar its restore-verification requirements are written against.
 
-### Retention & lifetime commitments
+**Retention is a promise with a stated length, in both directions.** A releasable product owes its users a
+plain answer to two questions: *how long do you keep my data?* and *when I delete my account, when is my
+data actually gone?* The posture here is that live user data is retained for as long as the account exists —
+no silent expiry, no background deletion of a live account's content — and that deleted-account data is
+removed or de-identified per the stated deletion outcome (`REQ-DOM-037`, `REQ-DOM-112`) within a stated,
+bounded window rather than lingering indefinitely, including in backups. Retention and export name the same
+set: while an account exists, the data the product keeps for it is the data it can hand back (`REQ-DOM-117`).
+The product states this posture where a user and an operator can find it.
 
-Durability says data *can* survive; retention says *how long the product commits to keeping it*. The
-product commits to a stated lifetime for each kind of state:
+The formal requirements are **REQ-OPS-001..016** in the register below.
 
-- **User content is retained for the life of the account** and is never silently expired, evicted, or
-  truncated by the store (REQ-OPS-009).
-- **Intentionally time-bounded durable state** — sessions, recovery factors, and any materialised export
-  artefacts — has a defined, documented expiry so it does not accumulate forever (REQ-OPS-010).
-- **Deletion is durable and bounded** — once a user or operator deletes data, it is purged from the live
-  store within a short, defined window and is not served again (REQ-OPS-011).
-- **Capacity honours the retention commitment** — the store has headroom for expected growth, and running
-  out of space fails writes honestly rather than silently losing or corrupting committed data
-  (REQ-OPS-012).
+### Requirements and acceptance criteria (`REQ-OPS-001..019`)
 
-### Demonstrating durability on the live product
+Each requirement carries an `id` (within this section's assigned range `REQ-OPS-001..019`), a `statement`
+(what must be true in production, from the operator's or user's side), testable `acceptance_criteria`, a
+`verification_method` from the contract vocabulary (`manual_user_check`, `automated_test`, `inspection`,
+`operational_check`), a `release_gating` flag, and `traces_to` the product/domain requirement it builds on.
+The range is generous; it is not filled, and the gaps are deliberate.
 
-Durability is worthless if it cannot be checked. The product ships (or documents) a repeatable durability
-drill that a stranger can run against the deployment to confirm, rather than assert, that nothing a user
-created is lost (REQ-OPS-013). This is the `operational_check` that most `REQ-OPS-*` in this section share.
+#### Production durability as an operated property
 
----
+##### REQ-OPS-001 — A running deployment loses no user data to restart, update, or redeploy
+- **statement**: An operated chirp deployment does not lose any user data — Accounts, Chirps, Follows, Likes, Sessions — to the normal operations of running the service: restarting the serving process, updating it, and redeploying it are routine operations after which all user data is present and unchanged. This is the operational standing of the domain model's survival requirement, held as a property of the operated service rather than of a single fresh start.
+- **acceptance_criteria**: On an operated deployment, create Accounts and post Chirps, Follows, and Likes; perform each of a process restart, a redeploy, and an update as an operator would; after each, every Account and its Chirps, Follows, and Likes are present and unchanged, with no manual intervention to recover them.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-100
 
-### Requirements & acceptance criteria
+##### REQ-OPS-002 — Authoritative state is operated in a durable store distinct from the serving process
+- **statement**: The deployment runs the product's authoritative state in a durable store that is a separate, persistent component from the serving process, with its own lifecycle; the serving process holds no authoritative state that exists only in its memory. The in-memory backing of the `ChirpRepository` seam at `Nousix-LLC/nswe-demo @ c805525` does not meet this and is the blocker this posture closes.
+- **acceptance_criteria**: Inspect the deployment: the durable store is a component whose lifecycle is independent of the serving process (stopping or replacing the serving process does not stop or reset the store). Confirm `REQ-DOM-113/114` hold against the operated product. No deployment configuration keeps authoritative state solely in serving-process memory.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-113, REQ-DOM-114
 
-Ids are from this section's allocated range (`REQ-OPS-001 .. REQ-OPS-019`); `REQ-OPS-014 .. 019` are left
-as amendment headroom. Each requirement carries a `statement`, testable `acceptance_criteria`, a
-`release_gating` flag, `traces_to` the baseline it builds on, and a `verification_method` from the parent
-vocabulary (`manual_user_check` | `automated_test` | `inspection` | `operational_check`).
+##### REQ-OPS-003 — Replacing the serving process is a routine operation that touches no user data
+- **statement**: An operator can replace or roll the serving process to a fresh instance, with no shared process memory, as a normal operation; all user data remains intact because it lives in the durable store, not the process.
+- **acceptance_criteria**: On a populated deployment, replace the serving process with a fresh instance without touching the durable store; afterward all Accounts, Chirps, Follows, Likes, and active Sessions are intact, demonstrating the authoritative state did not live in the replaced process.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-113
 
-#### REQ-OPS-001 — Durable state lives on pod-independent storage
-- **Statement:** All durable domain state is held on storage whose lifecycle is independent of any single
-  pod — a persistent volume or an external managed store — and never in process memory or the pod's
-  ephemeral filesystem (the read-only root or the writable scratch mount).
-- **Acceptance criteria:** Inspecting the running deployment shows application data bound to storage that
-  is not destroyed when the pod is destroyed (not process memory, not an `emptyDir`); deleting and
-  recreating the pod preserves all data. At `c805525` this fails — `chirp-server` uses an in-memory
-  repository and `deploy/chirp/10-deployment.yaml` mounts only an `emptyDir` scratch — and passes only
-  when a pod-independent store backs the `ChirpRepository` seam.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-013`, `REQ-DOM-012`, `REQ-DOM-014`, `REQ-PROD-031`.
-- **Verification method:** inspection
+##### REQ-OPS-004 — An operated upgrade preserves existing user data
+- **statement**: Performing an upgrade in production — including a redeploy that changes how the data is shaped — preserves the user data that existed before it: afterward the prior Accounts, Chirps, Follows, and Likes are all present and still satisfy their invariants. The migration mechanics are the code work's; the preservation property across an operated upgrade is the bar's.
+- **acceptance_criteria**: On a populated deployment, perform an upgrade that changes the data's shape; afterward the Accounts, Chirps, Follows, and Likes created before the upgrade are all present and their references still resolve. No data created before the upgrade is lost or corrupted by it.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-118
 
-#### REQ-OPS-002 — Data survives a process restart
-- **Statement:** Restarting the service process (same workload, same node) loses no durable state.
-- **Acceptance criteria:** Create an account, post ≥1 chirp, and follow ≥1 account; restart the service;
-  then the account still signs in and its chirps, follows, likes, and counts are all present and correct —
-  nothing created is lost.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-PROD-026`, `REQ-PROD-031`.
-- **Verification method:** operational_check
+#### Acknowledged-write durability as an operated property
 
-#### REQ-OPS-003 — Data survives a redeploy / rolling update
-- **Statement:** Rolling out a new revision of the service loses no durable state, including across the
-  window in which old and new pods briefly overlap during a rolling update.
-- **Acceptance criteria:** With user data present, roll the deployment to a new revision; afterwards every
-  account, chirp, follow, like, count, and signed-in session is intact, and no data written during the
-  rollout is lost or served inconsistently by the overlapping pods.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-DOM-016`, `REQ-PROD-026`, `REQ-PROD-031`.
-- **Verification method:** operational_check
+##### REQ-OPS-005 — An acknowledged write survives an immediate restart in production
+- **statement**: In the operated product, any create or change the product has confirmed to a person — a posted Chirp, a Follow or unfollow, a Like or unlike, a profile edit, an account deletion — is durable at the moment it is acknowledged, so a restart or process replacement happening immediately after the success response does not lose it. Durability is a correctness property of the acknowledgement, not a tendency observed over time.
+- **acceptance_criteria**: On an operated deployment, perform a write and receive the product's success response; with no further action, restart or replace the serving process; the written state is present afterward. Repeated across each write type, no acknowledged write is lost by a restart in the window immediately following its acknowledgement.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-109
 
-#### REQ-OPS-004 — Data survives a reschedule to another node
-- **Statement:** A pod that is deleted and recreated — possibly on a different node — loses no durable
-  state, because the durable store is reachable independently of where the pod runs.
-- **Acceptance criteria:** With user data present, delete the pod and let it be recreated (including onto
-  a different node); afterwards all user data is still present and the account still signs in. Storage
-  bound to a single node or to the pod's lifecycle fails this; node-independent durable storage passes it.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-013`, `REQ-DOM-012`, `REQ-PROD-031`.
-- **Verification method:** operational_check
+#### Integrity across operational events
 
-#### REQ-OPS-005 — Durability holds under more than one replica, or single-writer is enforced
-- **Statement:** Either all replicas share one durable store so no replica holds independent state, or the
-  deployment prevents running more than one replica until the store supports shared access — so scaling can
-  never silently fork user data across pods. The current `replicas: 1` is recorded as a **store** property,
-  not a property of the `ChirpRepository` seam.
-- **Acceptance criteria:** Documentation states whether the durable store supports more than one replica.
-  If it does, running two replicas and writing through either one shows a single consistent dataset (a
-  follow made on one replica is visible on the other). If it does not, the deployment constrains the
-  workload to one replica by configuration, and that constraint is documented as a store limitation — not
-  the undocumented, data-splitting `replicas: 1` of `c805525`.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-016`, `REQ-DOM-014`, `REQ-PROD-031`.
-- **Verification method:** inspection
+##### REQ-OPS-006 — Domain invariants hold after an operational restart
+- **statement**: After the serving process is restarted or replaced in production, the domain model's invariants still hold against the durable data: every reference resolves, ids are unique and never reused, each Account's follower/following counts and each Chirp's like count equal their current edges, and any applied account deletion stays applied. A restart never introduces a dangling reference, a reused id, or a count that disagrees with its edges.
+- **acceptance_criteria**: On a populated deployment, record a sample of references, ids, and counts; restart the serving process; traverse Chirps, Replies, Follows, and Likes — every referenced Account and Chirp resolves, no recorded id has moved or been reused, and the counts equal the current edges (add and remove a Follow and a Like after the restart and confirm the counts track by exactly one each way).
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-107, REQ-DOM-110, REQ-DOM-111, REQ-DOM-112
 
-#### REQ-OPS-006 — A confirmed write is durable before it is confirmed
-- **Statement:** Any action the product reports to the user as succeeded — account creation, posting a
-  chirp, following/liking, editing a profile, signing in — is committed to durable storage before success
-  is returned, so an immediate crash cannot lose an action the product already confirmed.
-- **Acceptance criteria:** Perform an action and observe its success in the product, then immediately
-  restart or kill the service before any graceful drain; after recovery the confirmed action is present
-  (the chirp exists, the follow holds, the profile edit persisted). No action the UI reported as succeeded
-  is absent after the crash.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-PROD-026`, `REQ-PROD-017`.
-- **Verification method:** operational_check
+##### REQ-OPS-007 — Domain invariants hold after a restore from backup (the posture backups build on)
+- **statement**: After a restore from backup, the durable data satisfies the same invariants required after a restart (`REQ-OPS-006`): references resolve, ids are unchanged and never reused, counts equal their edges, and applied deletions remain applied. A restore that brings rows back but breaks these invariants has not recovered a correct product. This is the durability posture the backups-and-recovery section's restore-correctness requirements (`REQ-OPS-020..039`) are written against.
+- **acceptance_criteria**: On a store restored from a backup of a populated deployment, traverse Chirps, Replies, Follows, and Likes — every reference resolves, recorded ids are unchanged and unreused, counts equal their edges, and any account deleted before the backup is still deleted with no dangling reference. A failing invariant is reported as an unsuccessful restore, never silently accepted.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-110, REQ-DOM-116
 
-#### REQ-OPS-007 — Every kind of domain state is durable (coverage)
-- **Statement:** Durability covers **all** domain state, not only the obvious entities: accounts and
-  profiles, durable credentials, sessions, chirps, follow edges, likes, the denormalised counts, the
-  id/sequence counters, moderation state, and the schema version. None of these is held only in process
-  memory.
-- **Acceptance criteria:** For each listed kind of state, exercise it and then restart the service; after
-  restart it is still present and correct — in particular a signed-in session still resolves (today it
-  does not: sessions are an in-process map) and a credentialed account still authenticates (today no
-  durable credential exists). An inspection confirms no listed kind of state is backed only by process
-  memory.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-005`, `REQ-DOM-006`, `REQ-DOM-004`, `REQ-DOM-011`, `REQ-DOM-022`, `REQ-DOM-012`,
-  `REQ-PROD-006`, `REQ-PROD-026`.
-- **Verification method:** operational_check
+##### REQ-OPS-008 — An interrupted write never leaves half-applied state visible
+- **statement**: A restart, crash, or process replacement that happens while a write is in progress leaves the durable data in a consistent state: the operation is observable afterward as either fully applied or not applied, never as a half-applied change with a dangling reference or a count that disagrees with its edges. Account deletion in particular is all-or-nothing across an interruption.
+- **acceptance_criteria**: Interrupt the serving process during representative writes (posting a Chirp, following, deleting an account that has Chirps, Follows, and Likes); after recovery, each interrupted operation is observably either fully applied or fully absent, and no partially applied state (a Chirp without a resolvable author, a half-deleted Account with dangling references, a count out of step with its edges) is observable.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-110, REQ-DOM-112
 
-#### REQ-OPS-008 — Derived state stays correct across the durability boundary
-- **Statement:** The invariants domain design requires of any store (`REQ-DOM-015`, `REQ-DOM-004`) continue
-  to hold **in operation** across a restart/redeploy/reschedule: denormalised counts still agree with the
-  edge sets, timelines remain reverse-chronological, and newly assigned ids remain monotonic and never
-  reuse a value assigned before the restart.
-- **Acceptance criteria:** After a restart, displayed follower/following and like counts equal the actual
-  edge counts; a fetched timeline is strictly newest-first; and entities created after the restart receive
-  ids strictly greater than every id assigned before it, with cursor paging returning each chirp exactly
-  once. (This is the operational face of `REQ-DOM-015`/`REQ-DOM-004`, not a restatement of them.)
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-015`, `REQ-DOM-004`, `REQ-PROD-020`, `REQ-PROD-021`, `REQ-PROD-026`.
-- **Verification method:** operational_check
+#### The durable store's reachability as a durability property
 
-#### REQ-OPS-009 — User content is retained for the life of the account
-- **Statement:** User-created durable state — accounts, profiles, chirps, follows, and likes — is retained
-  until the user or an authorized operator removes it; the store does not silently expire, evict, time-out,
-  or truncate user content.
-- **Acceptance criteria:** Content created and then left untouched for an extended period, and content left
-  across multiple restarts/redeploys, is still present and unchanged; the product (or its documentation)
-  states no automatic expiry or eviction of user content, and none is observed. Any configured data-lifetime
-  behaviour that would remove user content is documented and is off by default.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-PROD-026`.
-- **Verification method:** operational_check
+##### REQ-OPS-009 — Durability requires the store to be operated as a reachable, persistent component
+- **statement**: Because the serving process depends on the durable store to serve, durability in production requires the store to be run as a reachable, persistent component for the life of the deployment: a serving process that cannot reach its durable state cannot serve, and a deployment that does not keep its store reachable and persistent does not meet the durability posture. This section states the dependency as a durability requirement; the readiness *signal* that reports store reachability is the observability section's (`REQ-OPS-060..079`), building on `REQ-DOM-115` / `REQ-PROD-039`.
+- **acceptance_criteria**: Confirm the deployment runs the durable store as a persistent, reachable component independent of the serving process. With the store made unreachable to the serving process, the product does not serve user writes or reads from process memory as if durable (it does not silently fall back to a non-durable store). The readiness signal's behaviour under this condition is verified by the observability section.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039, REQ-DOM-115
 
-#### REQ-OPS-010 — Time-bounded durable state has a defined, enforced lifetime
-- **Statement:** Durable state that is intentionally transient — sessions, recovery factors/tokens, and
-  any materialised data-export artefacts — carries a defined, documented retention/expiry and is cleaned
-  up when it expires, so it does not accumulate indefinitely. (The session *lifetime value* and its
-  security properties are owned by identity & trust, `REQ-ID-*`; this requirement is that the store
-  **honours** expiry and cleanup.)
-- **Acceptance criteria:** An expired or invalidated session no longer resolves and its record is not
-  retained beyond its documented lifetime; a recovery token cannot be used past its documented validity; a
-  materialised export artefact, if the product produces one, is removed within its documented retention
-  window and is not left readable indefinitely. The retention window for each is documented.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-006`, `REQ-DOM-005`, `REQ-DOM-010`, `REQ-PROD-005`, `REQ-PROD-006`.
-- **Verification method:** inspection
+#### Data-retention posture
 
-#### REQ-OPS-011 — Deletion is durable and bounded
-- **Statement:** When a user deletes their account (or an operator removes content), the data is purged
-  from the live durable store within a short, defined window and is not served again; removal from any
-  offline/derived copies is bounded and documented too. (The cascade *semantics* are `REQ-DOM-009`; the
-  *authorization* is `REQ-ID-*`; purge from **backups** is owned by `backups_and_recovery`, which this
-  requirement cross-references for the backup-copy window.)
-- **Acceptance criteria:** After a confirmed deletion, the account cannot be signed into, its profile
-  returns not-found, and its chirps, follow/like edges, sessions, and credential are gone from the live
-  store and do not reappear after a subsequent restart or redeploy; the maximum time for the live-store
-  purge is documented and observed to hold, and the documentation states the bound for removal from backup
-  copies.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-009`, `REQ-PROD-010`, `REQ-PROD-012`.
-- **Verification method:** operational_check
+##### REQ-OPS-010 — Live user data is retained for the life of the account
+- **statement**: While an account exists, its user data — the Account and its profile, its Chirps, its Follows, and its Likes — is retained in full: the product does not silently expire, age out, or delete a live account's content as a side effect of operating the service. Any retention limit the product chooses to place on a live account's content is stated, not silent.
+- **acceptance_criteria**: Create an account with Chirps, Follows, and Likes; over a sustained operating period with ordinary restarts and redeploys, the account's content remains present and complete without the holder re-creating it. If any component of a live account's data is subject to an age-out, that limit is found stated in the product's retention posture (`REQ-OPS-016`) rather than observed as an unexplained loss.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037
 
-#### REQ-OPS-012 — Capacity honours the retention commitment; exhaustion fails safe
-- **Statement:** Durable storage is provisioned with headroom for expected growth so the retention
-  commitments above can be met, and if the store nears exhaustion the product fails writes with an honest
-  error rather than silently dropping, truncating, or corrupting committed data. (Capacity *monitoring and
-  alerting* are owned by `observability`; per-user size limits and quotas are owned by `limits_and_quotas`;
-  this requirement is only that capacity pressure can never destroy committed data or be hidden from the
-  user.)
-- **Acceptance criteria:** Already-committed data is never lost or corrupted as the store fills; a write
-  that cannot be durably stored is reported to the user as failed (not falsely confirmed), and no
-  previously confirmed data is affected. The provisioned capacity and the expected-growth assumption are
-  documented.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-PROD-026`, `REQ-PROD-017`.
-- **Verification method:** operational_check
+##### REQ-OPS-011 — Deleted-account data is removed within a stated, bounded window
+- **statement**: When an account is deleted, its data is removed or de-identified per the stated deletion outcome (`REQ-DOM-037`, `REQ-DOM-112`) within a stated, bounded retention window after the deletion is applied, rather than being retained indefinitely. The product states the window; after it elapses, the deleted account's data is not retained in the live durable store.
+- **acceptance_criteria**: Find the product's stated deleted-account retention window. Delete an account that has Chirps, Follows, and Likes; after the deletion is applied the stated outcome holds immediately (the account cannot sign in, no dangling reference remains per `REQ-DOM-112`), and after the stated window the deleted account's data is no longer present in the live durable store. The behaviour matches the stated window.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-037, REQ-DOM-112
 
-#### REQ-OPS-013 — Durability is demonstrable by a repeatable drill
-- **Statement:** The product ships, or its repository documents, a repeatable durability drill that a
-  person who never met the authors can run against the deployment to confirm that no user data is lost
-  across restart, redeploy, and reschedule.
-- **Acceptance criteria:** Following the documented steps, a stranger creates an account, posts a chirp,
-  and follows an account; triggers each of a restart, a redeploy, and a reschedule; and confirms after
-  each that the account still signs in and its content and counts are intact — reaching the same pass/fail
-  the authors would, using only what the repository provides.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-PROD-031`, `REQ-PROD-034`.
-- **Verification method:** operational_check
+##### REQ-OPS-012 — Backups do not retain deleted-account data beyond a stated bound
+- **statement**: Deleted-account data does not persist indefinitely in backups: a stated maximum backup-retention bound limits how long a deleted account's data can remain recoverable in backups, after which the backups holding it have aged out. This section fixes that such a bound exists and is consistent with the deletion posture; the backup cadence, retention schedule, and ageing mechanics are the backups-and-recovery section's (`REQ-OPS-020..039`), which builds on this.
+- **acceptance_criteria**: Find the product's stated maximum backup-retention bound and confirm it is consistent with the deleted-account retention posture (`REQ-OPS-011`). Confirm that no backup older than that bound is retained, so deleted-account data cannot be recovered from backups indefinitely. The concrete cadence and schedule are verified against the backups-and-recovery requirements.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-037, REQ-PROD-038
 
----
+##### REQ-OPS-013 — Retention and export cover the same per-account set
+- **statement**: The data the product retains for a live account is the data it can hand that person back: while an account exists, its retained profile, full set of Chirps, and full set of followed Accounts are enumerable for the holder's own export (`REQ-DOM-117`). A person cannot be told their data is kept while being unable to obtain it, and export reflects the committed durable state at the time of the request.
+- **acceptance_criteria**: For a signed-in account with Chirps and Follows, the data the product retains (per `REQ-OPS-010`) and the data a self-service export yields (per `REQ-DOM-117`) are the same set — the account's profile, its complete Chirps, and its complete followed Accounts — matching the committed durable state. No retained category of a person's own data is absent from what they can export.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-117, REQ-PROD-019
 
-### Traceability summary
+##### REQ-OPS-014 — Sessions are retained only for their bounded lifetime
+- **statement**: Active Sessions are retained durably so a signed-in person is not silently signed out by a restart or redeploy (`REQ-DOM-106`), but only until the Session ends (sign-out) or passes its lifetime (`REQ-DOM-030`, `REQ-DOM-031`); an ended or expired Session is not retained as usable and is never revived by a restart or a restore.
+- **acceptance_criteria**: Sign in to obtain a Session; restart or redeploy the service — a request carrying that Session's token is still accepted as the same account. Separately, end a Session (or let it pass its lifetime), then restart and restore from a backup taken while it was active — a request carrying that token is refused in both cases, not revived.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-106, REQ-DOM-030, REQ-DOM-031
 
-| REQ-OPS | Durability/retention guarantee | Release gating | Traces to | Verification |
-|---|---|---|---|---|
-| 001 | Durable state on pod-independent storage | true | REQ-DOM-013/012/014, REQ-PROD-031 | inspection |
-| 002 | Survives process restart | true | REQ-DOM-012, REQ-PROD-026/031 | operational_check |
-| 003 | Survives redeploy / rolling update | true | REQ-DOM-012/016, REQ-PROD-026/031 | operational_check |
-| 004 | Survives reschedule to another node | true | REQ-DOM-013/012, REQ-PROD-031 | operational_check |
-| 005 | Safe under >1 replica, or single-writer enforced | true | REQ-DOM-016/014, REQ-PROD-031 | inspection |
-| 006 | Confirmed write is durable before confirmed | true | REQ-DOM-012, REQ-PROD-026/017 | operational_check |
-| 007 | Every kind of domain state is durable | true | REQ-DOM-005/006/004/011/022/012, REQ-PROD-006/026 | operational_check |
-| 008 | Derived state correct across the boundary | true | REQ-DOM-015/004, REQ-PROD-020/021/026 | operational_check |
-| 009 | User content retained for life of account | true | REQ-DOM-012, REQ-PROD-026 | operational_check |
-| 010 | Time-bounded state has enforced lifetime | true | REQ-DOM-006/005/010, REQ-PROD-005/006 | inspection |
-| 011 | Deletion is durable and bounded | true | REQ-DOM-009, REQ-PROD-010/012 | operational_check |
-| 012 | Capacity honours retention; fails safe | true | REQ-DOM-012, REQ-PROD-026/017 | operational_check |
-| 013 | Durability demonstrable by a drill | true | REQ-DOM-012, REQ-PROD-031/034 | operational_check |
+##### REQ-OPS-015 — Private identity data is retained durably, kept non-public, and removed with the account
+- **statement**: The account-associated Credential and Verified contact are retained durably as part of the Account for the life of the account so a person can still sign in and still recover after a restart (`REQ-DOM-102`), are never exposed in any public response, and are removed or de-identified with the account under the stated deletion outcome and within the deleted-account retention window (`REQ-OPS-011`). Their structure and handling are the identity/security design's (`REQ-ID-*`); this requirement is that they persist, stay non-public, and are not retained past the account.
+- **acceptance_criteria**: After a restart and a restore, a person can still sign in with their Credential and the recovery path still recognises their Verified contact, and neither value ever appears in any public response. After an account is deleted and the retention window elapses, the deleted account's Credential and Verified contact are no longer retained in the live durable store.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-102, REQ-DOM-037
 
-### Boundaries and cross-references
-
-- **Not designed here (named, deferred):** the concrete durable store and its provisioning → domain design
-  (`REQ-DOM-013/014`) + later code work; backup, restore, rollback, and schema-migration safety →
-  `backups_and_recovery` (`REQ-OPS-020..039`, building on `REQ-DOM-022`); the health signal, capacity
-  monitoring, logs, and metrics → `observability` (`REQ-OPS-060..079`, building on `/healthz` and
-  `REQ-DOM-021`); rate/size limits and per-user quotas → `limits_and_quotas` (`REQ-OPS-040..059`);
-  authentication, session lifetime, recovery, deletion/export authorization → identity & trust
-  (`REQ-ID-*`).
+##### REQ-OPS-016 — The retention and deletion posture is stated where users and operators can find it
+- **statement**: The product states, in a place a user and an operator can find, what user data it keeps, for how long, and what account deletion removes and when — covering live-account retention (`REQ-OPS-010`), the deleted-account window (`REQ-OPS-011`), the backup bound (`REQ-OPS-012`), and session and private-identity-data handling (`REQ-OPS-014`, `REQ-OPS-015`). A releasable product does not leave its retention and deletion promise implicit.
+- **acceptance_criteria**: Locate the product's stated data-retention and deletion posture as a user/operator could. It names what is retained, the live-account retention, the deleted-account retention window, the backup-retention bound, and session/private-data handling, and these statements match the behaviour verified by `REQ-OPS-010..015`. A discrepancy between the stated posture and the observed behaviour is a defect.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-037
 
 ---
 
 ## backups_and_recovery
 
-*Section of `design/operational-readiness.md`. Requirement ids
-`REQ-OPS-020..039`. These are **requirements and acceptance criteria**, not operational implementation:
-they describe the recovery outcome and how a stranger could test it on the live product, not which backup
-tool, storage target, or CD mechanism delivers it — those are deferred to the implementing code works.*
+*Backups and recovery.*
 
-### What this section covers
 
-A product that "runs" is not a product you can operate. The question this section answers is the one every
-serious operator and every first customer eventually asks: **when something goes wrong, is there a defined
-way back to a working service with user data intact?** `chirp` must answer yes, and must be able to *prove*
-it. Three failure stories define the scope:
+This is the `backups_and_recovery` section of `design/operational-readiness.md`: the **backup and
+recovery path** a release of chirp requires, stated as testable `REQ-OPS-*` requirements. The domain
+design fixed that the capability must exist — the durable user data can be backed up and restored, and a
+restore brings the Accounts, Chirps, Follows, and Likes back consistent with every model invariant
+(`REQ-DOM-116`), and the product-level need is a release-gating product requirement (`REQ-PROD-038`). The
+durable-data section (`REQ-OPS-001..019`) fixed the operational durability posture this path protects:
+authoritative state lives in a durable store distinct from the serving process, and the invariants the
+model requires after a restart must hold again after a restore (`REQ-OPS-007`). This section does not
+restate either. It states what an **operator is owed** so that durable data, once it exists, can actually
+be recovered: that it is backed up on a known cadence, kept for a known period, recoverable to stated loss
+and downtime targets, restorable by a defined procedure that returns a correct product, recoverable after a
+bad deploy, and proven restorable rather than merely produced. This is the operational face of the operator
+journey's unmet need — *backup and recovery for durable data* (J9) — which the product requirements record
+as a release gap.
 
-1. **Data loss** — the durable store is corrupted, deleted, or lost. Recovery means restoring user data to
-   a recent, known-good state.
-2. **A bad deploy** — a release ships that is broken or regressed. Recovery means returning the running
-   service to the previously-known-good version without losing user data.
-3. **A schema change gone wrong** — a forward migration fails partway or corrupts data. Recovery means
-   getting back to a consistent store at a known schema version, with the data it held.
+### What this section fixes, and what it defers
 
-Backup, restore, deploy rollback, and migration safety are four faces of this one concern. They are stated
-here as `REQ-OPS-*` requirements, each with a testable bar.
+- **In this section**: that durable user data is backed up on a stated, regular cadence; that backups are
+  retained for a stated, bounded period; that each backup is an internally consistent point-in-time image
+  held independently of the primary store; a recovery-point target (tolerable data loss) and a
+  recovery-time target (tolerable downtime); a defined, operator-performable restore procedure that returns
+  the Accounts, Chirps, Follows, and Likes intact and consistent; recovery from a failed or data-damaging
+  deploy; and the requirement that backups are periodically proven restorable, that backup failures are
+  surfaced rather than silent, and that the whole posture is written where an operator can find it.
+- **Referenced, owned elsewhere**: the durability posture these requirements protect and the
+  invariants-after-restore bar they are written against (`REQ-OPS-001..019`, especially `REQ-OPS-007`;
+  durable-data) — consumed here by reference, not restated; the backup-retention bound as it constrains
+  **deleted-account** data (`REQ-OPS-012`, durable-data), which this section's retention requirement builds
+  on rather than redefines; the persistence model and its invariants (`REQ-DOM-100..118`, domain design);
+  the alerting *signal* that carries a backup failure to an operator, which is the observability section's
+  (`REQ-OPS-060..079`) — this section states that a failure must be surfaced, not how it is signalled.
+- **Deferred to the code work (the "how")**: which backup tool or mechanism, which storage target, the
+  snapshot or replication method, the restore scripting, and the deploy/rollback machinery. Every
+  requirement below is a property the operated product must have, not a mechanism; where a mechanism is
+  tempting it is stated as the property and the choice is handed to the engineering code DAGs.
 
-### What this builds on (consumed, not redesigned)
+Entities are named by the domain model's canonical vocabulary (Account, Chirp, Follow, Like, Session); this
+section introduces none the model does not define. The product and the durable store are named by
+repository identity — `Nousix-LLC/nswe-demo @ c805525`, the `ChirpRepository` seam in the `chirp-server`
+crate — never by any host, cluster, or deployment address.
 
-This section **consumes** the durable-persistence model fixed by the domain/application design and does not
-restate or alter it:
+### The posture in prose
 
-- **`REQ-DOM-012` / `REQ-DOM-013` / `REQ-DOM-014`** — all domain state is durable, lives **outside** any
-  single pod's ephemeral memory and filesystem, and crosses the one `ChirpRepository` seam. This is what
-  makes "back up the data" and "roll back the code without touching the data" meaningful at all.
-- **`REQ-DOM-015` / `REQ-DOM-016`** — counts never diverge from edges across the durability boundary; the
-  seam is safe for concurrent access. A restore must land on a store that still satisfies these.
-- **`REQ-DOM-022`** — the durable schema has a **defined initial version and a forward migration path**.
-  Recovery and migration safety are two faces of the same concern: a migration is a deliberate, risky
-  change to the very thing backups protect, so this section pairs every migration requirement with a
-  recovery requirement.
-- **`REQ-DOM-021`** — the health signal can report unhealthy when the durable store is unreachable. Backup
-  and restore health build on this; the probe/alert wiring itself is the `observability` area
-  (`REQ-OPS-060..079`), referenced here, not duplicated.
+**A backup is only real once it has brought a correct product back.** The domain design already requires
+that the capability exists (`REQ-DOM-116`); the operational requirement is that the capability is run as a
+standing part of operating the service and is trusted because it has been exercised. A deployment that
+produces backups it has never restored from has a file, not a recovery path. The bar this section is
+written to is that an operator who has lost the durable store can, following a written procedure, bring the
+product back to a known-good point within a stated time, and that what comes back satisfies the same
+invariants a restart must satisfy (`REQ-OPS-007`, `REQ-DOM-110/111/107`): references resolve, ids are
+unchanged and never reused, counts equal their edges, and applied account deletions stay applied.
 
-### Honest statement of the starting point
+**Cadence and retention set the two numbers a person's recovery depends on.** How often a backup is taken
+bounds how much a person can lose — the work done since the last good backup. How long backups are kept
+bounds how far back an operator can reach, and, in the other direction, how long a deleted account's data
+can still be recovered from a backup. The durable-data section already fixed that a maximum backup-retention
+bound exists and is consistent with the deletion posture (`REQ-OPS-012`); this section states the cadence
+and the retention period themselves, and keeps them consistent with that bound rather than redefining it.
 
-At the measured baseline (`Nousix-LLC/nswe-demo` @ `c805525`), `chirp-server` uses an **in-memory
-repository** — `deploy/chirp/10-deployment.yaml` runs a single replica with only an `emptyDir` scratch
-volume and a read-only root filesystem, and no persistent volume or database. **There is therefore nothing
-to back up yet, and all user data is lost on every restart** (the defect `REQ-DOM-012` exists to remove).
-These requirements describe the **releasable bar once the durable store required by `REQ-DOM-012..014`
-exists**; each backup/restore requirement is predicated on that store being present, and becomes testable at
-the moment it lands. Until then, the only "recovery" available is redeploying the code from Git — which
-restores the *service* but cannot restore *data that was never durable*. This is called out so the gap is
-declared, not discovered.
+**Loss and downtime are commitments, not hopes.** A releasable product that can be operated states how much
+data it is willing to lose in a disaster (a recovery-point objective) and how long it is willing to be down
+while recovering (a recovery-time objective), and it sets them so they can be met — the recovery-point
+objective no tighter than the backup cadence allows, the recovery-time objective no tighter than a
+rehearsed restore achieves. A target nobody has measured a restore against is an aspiration; the restore
+drill is what turns it into a commitment.
 
-Delivery is GitOps: the Argo CD `Application` at `deploy/argocd/application.yaml` tracks the `deploy/chirp`
-path on the default branch with `prune`, `selfHeal`, and `allowEmpty: false`, and the workload image is
-pinned by digest. That model — Git as the source of truth, image pinned by digest — is what makes a
-deterministic deploy rollback possible, and the rollback requirements below are grounded in it.
+**A bad deploy is the disaster most likely to happen.** Hardware loss is rare; a deploy that breaks the
+product or damages its data is routine enough that recovering from one is part of operating the service. A
+failed deploy must be reversible to the last working version without losing user data, and a deploy that
+has already damaged data must be recoverable by restoring from backup — consistent with the domain
+requirement that an upgrade preserves existing data (`REQ-DOM-118`). The rollback and restore are the same
+recovery path this section defines, applied to the most common cause of needing it.
 
----
+The formal requirements are **REQ-OPS-020..033** in the register below.
 
-### Requirements (`REQ-OPS-020..039`)
+### Requirements and acceptance criteria (`REQ-OPS-020..039`)
 
-#### REQ-OPS-020 — The durable store is backed up on a defined, recent schedule
-- **Statement:** Once durable persistence exists (`REQ-DOM-012..014`), the product's durable data is backed
-  up automatically on a defined schedule, such that a current backup always exists without an operator
-  having to remember to make one.
-- **Acceptance criteria:** An operator can point to the most recent backup and observe that its age is
-  within the stated schedule interval; no manual step was required to produce it; and the schedule and its
-  interval are documented in the repository (`Nousix-LLC/nswe-demo`). The *mechanism* (which tool, which
-  storage target) is out of scope here.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-DOM-013`, `REQ-PROD-031`, `REQ-PROD-032`
-- **Verification method:** operational_check
+Each requirement carries an `id` (within this section's assigned range `REQ-OPS-020..039`), a `statement`
+(what must be true in production, from the operator's side), testable `acceptance_criteria`, a
+`verification_method` from the contract vocabulary (`manual_user_check`, `automated_test`, `inspection`,
+`operational_check`), a `release_gating` flag, and `traces_to` the product/domain requirement it builds on.
+The range is generous; it is not filled, and the gaps are deliberate.
 
-#### REQ-OPS-021 — A backup is complete: it captures everything the durable model holds
-- **Statement:** A backup captures the **entire** durable domain state — accounts, durable credentials,
-  sessions, chirps, follows, likes, the denormalized counts, the id counters, and moderation state — plus
-  the durable schema version, so that a restore reconstructs a self-consistent store and not a partial one.
-- **Acceptance criteria:** Restoring a backup into a clean target yields a store in which every entity class
-  listed is present, the counts agree with the edges (`REQ-DOM-015`), and the schema version is recorded;
-  no entity class required by the durable model is absent from the backup.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-DOM-015`, `REQ-DOM-022`
-- **Verification method:** operational_check
+#### Backup posture: cadence, retention, consistency, independence
 
-#### REQ-OPS-022 — A recovery point objective (maximum tolerable data loss) is defined and met
-- **Statement:** The product declares how much recent data it may lose in a worst-case recovery — a recovery
-  point objective (RPO) expressed as a time window — and the backup schedule is set so that objective is
-  actually met.
-- **Acceptance criteria:** A stated RPO exists in the repository documentation; the backup interval is no
-  longer than the RPO; and after a simulated loss, the amount of data missing from the restored store is no
-  greater than the RPO window. A recovery path with no stated data-loss objective does not meet this bar.
-- **Release gating:** true
-- **Traces to:** `REQ-PROD-031`, `REQ-PROD-032`
-- **Verification method:** operational_check
+##### REQ-OPS-020 — Durable user data is backed up on a stated, regular cadence
+- **statement**: An operated chirp deployment backs up its durable user data — Accounts, Chirps, Follows, Likes — on a stated, regular cadence, as a standing part of operating the service rather than as an occasional manual act. The product states what the cadence is; backups are produced on it without an operator having to remember to take them.
+- **acceptance_criteria**: Find the product's stated backup cadence. On an operated deployment with user data, observe over a period spanning several cadence intervals that a backup is produced each interval without manual intervention, and that each produced backup is recorded where an operator can see it was taken. Backups appear on the stated cadence, not ad hoc.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-116
 
-#### REQ-OPS-023 — A recovery time objective (maximum tolerable time to recover) is defined and met
-- **Statement:** The product declares how long a full recovery of service and data may take — a recovery
-  time objective (RTO) — and the documented recovery path can actually be completed within it.
-- **Acceptance criteria:** A stated RTO exists in the repository documentation; a timed restore drill
-  (`REQ-OPS-024`) completes — service back up with data restored and verified — within the stated RTO.
-- **Release gating:** true
-- **Traces to:** `REQ-PROD-032`, `REQ-PROD-034`
-- **Verification method:** operational_check
+##### REQ-OPS-021 — Backups are retained for a stated, bounded period
+- **statement**: Backups are kept for a stated retention period that bounds how far back an operator can recover, and that period is bounded above so backups do not accumulate indefinitely. The retention period is consistent with the maximum backup-retention bound the durable-data section fixed for deleted-account data (`REQ-OPS-012`): a backup older than the stated period has aged out and is no longer retained.
+- **acceptance_criteria**: Find the product's stated backup-retention period and confirm it is consistent with the deleted-account backup bound (`REQ-OPS-012`). On an operated deployment, confirm that backups within the period are available to restore from and that backups older than the period are no longer retained. The oldest available backup is no older than the stated period.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-037
 
-#### REQ-OPS-024 — Restore is *proven*, not merely configured (periodic restore drill)
-- **Statement:** The product's restore path is exercised end-to-end on a regular cadence — a backup is
-  restored into a clean, separate target and the result is verified to be a known-good state — so that "we
-  have backups" is never assumed and only ever demonstrated. A backup that has never been restored is
-  treated as no backup.
-- **Acceptance criteria:** On a documented cadence, an operator (or an automated job) restores the latest
-  backup into a target that is not the live store, brings a service up against it, and confirms a
-  **known-good state**: a representative account can be signed into, and its chirps, follows, likes, and
-  counts are all present and correct — i.e. the `REQ-DOM-012` restart-survival bar holds against the
-  *restored* data. The date and outcome of the most recent successful drill are recorded.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-DOM-015`, `REQ-PROD-032`
-- **Verification method:** operational_check
+##### REQ-OPS-022 — Each backup is an internally consistent point-in-time image
+- **statement**: A single backup captures the durable user data as of one point in time, consistent within itself: restoring it yields a state in which the model's invariants hold, not a smear of rows captured at different moments with references that no longer resolve. A backup taken while the product is serving does not record a Chirp without its author or a count out of step with its edges.
+- **acceptance_criteria**: Take a backup of a populated deployment while writes are occurring; restore it to a separate store and traverse Chirps, Replies, Follows, and Likes — every reference resolves, ids are unchanged and unreused, and counts equal their edges, with no partially captured write visible. A backup that restores to a state violating an invariant is treated as an unusable backup, not accepted.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-116, REQ-DOM-110
 
-#### REQ-OPS-025 — Backup success and freshness are monitored; a broken backup is detectable before it is needed
-- **Statement:** The success, recency, and completion of backups are observable, so that a failed or stale
-  backup raises a signal **before** a recovery is needed — the product never discovers at restore time that
-  its backups were empty or absent.
-- **Acceptance criteria:** When a scheduled backup fails or no backup has completed within the RPO window
-  (`REQ-OPS-022`), that condition is observable to an operator through the product's operational signals;
-  when backups are current and succeeding, that is also observable. (The signal/alert wiring itself is the
-  `observability` area, `REQ-OPS-060..079`, and the store-reachability signal `REQ-DOM-021`; this
-  requirement states only that backup health must be among what is visible.)
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-021`, `REQ-PROD-032`
-- **Verification method:** operational_check
+##### REQ-OPS-023 — Backups are stored independently of the primary durable store
+- **statement**: Backups are held in a location whose loss is independent of the primary durable store, so that the failure a backup protects against — losing the store — does not also take the backups. A backup kept only alongside the data it backs up does not meet this posture.
+- **acceptance_criteria**: Inspect where backups are stored relative to the primary durable store; the two do not share a single point of failure such that losing the primary store also loses its backups. Confirm that, with the primary store made unavailable, a retained backup is still reachable to restore from.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
 
-#### REQ-OPS-026 — Backups are stored durably and separately from the primary store
-- **Statement:** Backups are kept on a target whose failure is independent of the primary durable store, so
-  that a loss which destroys the primary store does not also destroy its backups.
-- **Acceptance criteria:** Inspection of the documented backup configuration shows the backup target is not
-  the same volume/storage whose loss the backup is meant to protect against; a simulated loss of the primary
-  store leaves at least one usable backup intact and restorable (`REQ-OPS-024`).
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-013`, `REQ-PROD-032`
-- **Verification method:** inspection
+#### Recovery objectives
 
-#### REQ-OPS-027 — Backups are access-controlled and their retention is defined
-- **Statement:** Because a backup is a full copy of users' personal data, access to backups is restricted,
-  and backups are retained for a defined period and then disposed of, rather than kept indefinitely with no
-  stated policy.
-- **Acceptance criteria:** A documented retention period exists; backups older than the retention period are
-  removed; and access to backup storage is restricted rather than world-readable. (The user-facing privacy
-  statement of what data is held, including in backups, is owned by identity & trust, `REQ-ID-*`, and by
-  `REQ-PROD-029`; this requirement states the operational handling only.)
-- **Release gating:** false — *a correct, monitored, restorable, separately-stored backup is the hard
-  release bar; the exact retention duration and access policy are expected and must exist, but are tunable
-  policy rather than a gate on first release. Recorded here so the surface is designed, not forgotten.*
-- **Traces to:** `REQ-PROD-029`, `REQ-PROD-032`
-- **Verification method:** inspection
+##### REQ-OPS-024 — A stated recovery-point objective (tolerable data loss)
+- **statement**: The product states a recovery-point objective: the maximum amount of recent durable data, measured as a time window of work, that a recovery is permitted to lose in a disaster. The objective is set no tighter than the backup cadence (`REQ-OPS-020`) can actually achieve, so it is a target a recovery can meet rather than an aspiration.
+- **acceptance_criteria**: Find the product's stated recovery-point objective and confirm it is consistent with the backup cadence (a recovery-point objective of N cannot be met by a cadence coarser than N). The stated objective names a bounded quantity of tolerable data loss, not "none" without a mechanism that would achieve none.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
 
-#### REQ-OPS-028 — A documented recovery runbook exists
-- **Statement:** There is a written recovery procedure in the repository that an operator who did not build
-  the product can follow to recover a working service and restore user data after a failure, and to verify
-  afterward that accounts and content are present — the operator-facing face of `REQ-PROD-032`.
-- **Acceptance criteria:** The repository (`Nousix-LLC/nswe-demo`) contains documented recovery steps
-  covering at least: restoring the durable store from a backup, bringing the service up against the restored
-  store, and verifying a known-good state; a reader following only those steps and what the repository
-  provides can complete a recovery without undocumented knowledge (`REQ-PROD-034`).
-- **Release gating:** true
-- **Traces to:** `REQ-PROD-032`, `REQ-PROD-034`
-- **Verification method:** inspection
+##### REQ-OPS-025 — A stated recovery-time objective (tolerable downtime)
+- **statement**: The product states a recovery-time objective: the maximum time the product may be unavailable to users while an operator recovers it from backup after a disaster. The objective is a commitment the restore procedure is built and rehearsed to meet, bounding the downtime a person experiences in a recovery.
+- **acceptance_criteria**: Find the product's stated recovery-time objective. It names a bounded recovery duration and is consistent with the availability the product commits to (`REQ-PROD-040`). The objective is the one the restore drill (`REQ-OPS-031`) measures the restore against.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-PROD-040
 
-#### REQ-OPS-029 — A bad deploy can be rolled back to the previously-known-good running state
-- **Statement:** When a release is broken or regressed, an operator can return the running service to the
-  previously-known-good version through the repository's GitOps delivery path, deterministically and without
-  hand-editing the cluster.
-- **Acceptance criteria:** Reverting the tracked source (`deploy/chirp` on the branch the
-  `deploy/argocd/application.yaml` `Application` tracks) to a previously-known-good commit causes the
-  reconciler to restore that version in the cluster; because the workload image is pinned by digest, the
-  rolled-back state is byte-for-byte the prior release; and `allowEmpty: false` prevents a bad revision from
-  pruning the app to zero. An operator can demonstrate a rollback returns the service to health
-  (`/healthz`, `REQ-DOM-021`) on the prior version. *(Hardening of the deploy/CD path this rollback relies
-  on is tracked by follow-ups #23 (native k3s install path) and #24 (Argo CD least-privilege RBAC +
-  supply-chain) — referenced here for relevance; their placement across the areas is tracked on the delivery board and not duplicated as a requirement here.)*
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-019`, `REQ-PROD-031`, `REQ-PROD-032`
-- **Verification method:** operational_check
+#### Restore procedure
 
-#### REQ-OPS-030 — A deploy rollback does not destroy user data
-- **Statement:** Rolling the application version back (or forward) is decoupled from the durable store:
-  because durable state lives outside any single pod (`REQ-DOM-013`), changing the deployed code version
-  does not drop, reset, or reinitialize user data.
-- **Acceptance criteria:** After a rollback of the application version that does **not** cross a schema
-  migration, all user accounts, chirps, follows, likes, and counts present before the rollback are still
-  present and correct afterward; no user data is lost as a side effect of the version change. (The case
-  where a rollback *does* cross a schema migration is governed by `REQ-OPS-032`.)
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-012`, `REQ-DOM-013`, `REQ-PROD-031`
-- **Verification method:** operational_check
+##### REQ-OPS-026 — A restore is a defined, operator-performable procedure
+- **statement**: Recovering the product from a backup is a defined procedure an operator can follow, not an improvisation invented during an incident: the steps to restore the durable store from a retained backup and return the product to service are written down and performable by an operator who did not design the system. The scripting and tooling are the code work's; that a defined, followable procedure exists is the bar's.
+- **acceptance_criteria**: Locate the product's stated restore procedure. An operator who did not build the system can follow it to restore a deployment from a retained backup and return it to service, without needing knowledge that is not in the procedure. The procedure names what is restored (Accounts, Chirps, Follows, Likes) and how the product is returned to serving.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-116
 
-#### REQ-OPS-031 — Forward schema migrations are applied safely
-- **Statement:** A forward schema migration (`REQ-DOM-022`) is applied so that existing user data is
-  preserved and the schema version advances; a fresh deploy initializes the schema from empty; and a
-  migration is always preceded by a backup so a known-good pre-migration state exists.
-- **Acceptance criteria:** Applying the documented migration path to a store holding data preserves that
-  data and advances the recorded schema version (`REQ-DOM-022`); deploying against an empty store
-  initializes the schema cleanly; and a backup satisfying `REQ-OPS-020`/`REQ-OPS-021` is captured
-  immediately before the migration runs and is restorable afterward. The migration *tooling and DDL* are a
-  engineering how, deferred to the implementing code work.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-022`, `REQ-PROD-026`, `REQ-PROD-034`
-- **Verification method:** operational_check
+##### REQ-OPS-027 — A restore brings back accounts, chirps, follows, and likes intact and consistent
+- **statement**: A restore from a retained backup returns the durable user data intact and consistent: the Accounts, Chirps, Follows, and Likes present at the backup's point in time are all present afterward, and they satisfy the same invariants a restart must satisfy (`REQ-OPS-007`) — references resolve, ids are unchanged and never reused, counts equal their edges, and any account deleted before the backup stays deleted with no dangling reference. A restore that brings rows back but breaks these invariants has not recovered a correct product.
+- **acceptance_criteria**: On a store restored from a backup of a populated deployment, every Account, Chirp, Follow, and Like present at the backup point is present; traverse Chirps, Replies, Follows, and Likes — every reference resolves, recorded ids are unchanged and unreused, counts equal their edges, and an account deleted before the backup is still deleted with no dangling reference. A failing invariant is reported as an unsuccessful restore, never silently accepted.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-116, REQ-DOM-110, REQ-DOM-111, REQ-DOM-107
 
-#### REQ-OPS-032 — A failed or bad schema migration has a defined recovery path
-- **Statement:** If a schema migration fails partway, corrupts data, or produces a version that must be
-  abandoned, there is a defined path back to a consistent store at a known-good schema version — and a
-  half-migrated store is never left serving users.
-- **Acceptance criteria:** Given a deliberately failed migration, an operator can follow the documented
-  recovery path — restore the pre-migration backup (`REQ-OPS-031`) into a clean target and bring the
-  matching service version up against it, or apply a defined roll-forward fix — and reach a consistent
-  store whose schema version and data are known-good and verified (`REQ-OPS-024`); at no point is a store
-  stuck between schema versions left answering user requests.
-- **Release gating:** true
-- **Traces to:** `REQ-DOM-022`, `REQ-PROD-032`
-- **Verification method:** operational_check
+##### REQ-OPS-028 — An exercised restore meets the stated recovery-point and recovery-time objectives
+- **statement**: When the restore procedure is exercised, it recovers the product within the stated recovery-time objective (`REQ-OPS-025`) and loses no more than the stated recovery-point objective (`REQ-OPS-024`): the downtime and data loss a real recovery incurs are within the commitments the product has made, not merely asserted by them.
+- **acceptance_criteria**: Perform a timed restore from a backup on a representative deployment: measure the elapsed time from starting the restore to the product serving users again — it is within the stated recovery-time objective — and measure the data lost relative to the disaster point — it is within the stated recovery-point objective. A drill that exceeds either objective is a defect in the objective or the procedure, reported rather than ignored.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
 
-#### REQ-OPS-033 — The recovery path works on the self-hostable surface
-- **Statement:** A person self-hosting `chirp` from the repository can back up and restore their own
-  deployment using only what the repository provides, so recovery is not an ability reserved to the original
-  operator.
-- **Acceptance criteria:** Following the repository's documented steps (`REQ-OPS-028`, `REQ-PROD-034`), a
-  self-hoster can produce a backup of their durable store and restore it into a working deployment, and
-  verify a known-good state afterward, with no hidden prerequisites beyond the documented durable-store
-  configuration.
-- **Release gating:** true
-- **Traces to:** `REQ-PROD-034`, `REQ-PROD-032`
-- **Verification method:** operational_check
+#### Recovery from a bad deploy
 
----
+##### REQ-OPS-029 — A failed deploy can be rolled back to the last working version with no user-data loss
+- **statement**: A deploy that fails or ships a broken product can be rolled back to the last working version as a routine operation, and the rollback loses no user data: the Accounts, Chirps, Follows, and Likes present before the deploy are all present after the rollback. Rolling back is a recovery operation an operator can perform, not a reason to lose data.
+- **acceptance_criteria**: On a populated deployment, perform a deploy and then roll it back to the prior version as an operator would; afterward the product serves on the prior version and every Account, Chirp, Follow, and Like that existed before the deploy is present and unchanged. The rollback requires no manual reconstruction of user data.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-118
+
+##### REQ-OPS-030 — A data-damaging deploy can be recovered from by restore
+- **statement**: A deploy that damages durable data — corrupting it or losing part of it despite the preserve-existing-data requirement (`REQ-DOM-118`) — can be recovered from by restoring from a backup taken before the deploy, returning the product to a correct state consistent with `REQ-OPS-027`. The preserve-data property is the first line; a restore path for when it is breached is the second.
+- **acceptance_criteria**: Simulate a deploy that damages or loses durable data on a populated deployment; recover by restoring from a pre-deploy backup following the restore procedure (`REQ-OPS-026`); afterward the durable data is intact and consistent per `REQ-OPS-027`, recovered to the pre-deploy point within the stated objectives (`REQ-OPS-028`). The product does not depend on the damaging deploy being reversible in place.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-118, REQ-DOM-116
+
+#### Backup verifiability
+
+##### REQ-OPS-031 — Backups are periodically proven restorable
+- **statement**: Backups are proven restorable on a recurring basis, not merely produced: a restore from a recent backup is exercised periodically against a store where its correctness can be checked, and the exercise verifies the restored data satisfies its invariants (`REQ-OPS-027`) and meets the stated objectives (`REQ-OPS-028`). A backup that has never been restored is not yet known to be a backup.
+- **acceptance_criteria**: Find the product's stated restore-drill cadence and the record of its most recent drills. Confirm a restore from a recent backup has been exercised within that cadence, that the drill checked the restored data's invariants and timing, and that a failed drill is recorded and acted on rather than passed over. The drill is recurring, not a one-time pre-release event.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-116
+
+##### REQ-OPS-032 — A failed or missing backup is surfaced, not silent
+- **statement**: When a scheduled backup fails or does not run, that fact is surfaced to operators rather than passing silently, so a deployment cannot drift into having no recent usable backup without anyone knowing. This section requires that the failure is detectable and raised; the alerting signal that carries it to an operator is the observability section's (`REQ-OPS-060..079`), building on the same posture.
+- **acceptance_criteria**: Induce a backup failure or a missed scheduled backup on an operated deployment; the condition is surfaced to operators (a visible failure state or alert), not absorbed silently. Confirm that a run of successful backups and a failed backup are distinguishable to an operator. The signal's shape is verified against the observability requirements.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
+
+##### REQ-OPS-033 — The backup and recovery posture is stated where an operator can find it
+- **statement**: The product states, in a place an operator can find, its backup cadence and retention (`REQ-OPS-020`, `REQ-OPS-021`), its recovery-point and recovery-time objectives (`REQ-OPS-024`, `REQ-OPS-025`), and the restore and rollback procedures (`REQ-OPS-026`, `REQ-OPS-029`). A releasable product that can be operated does not leave its recovery procedure to be reconstructed under incident pressure.
+- **acceptance_criteria**: Locate the product's stated backup-and-recovery posture as an operator could. It names the cadence, the retention period, the recovery-point and recovery-time objectives, and the restore and rollback procedures, and these statements match the behaviour verified by `REQ-OPS-020..032`. A discrepancy between the stated posture and the observed behaviour is a defect.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
 
 ---
 
 ## limits_and_quotas
 
-*(section: `limits_and_quotas`)*
+*Limits and quotas.*
 
-chirp is a **publicly reachable** product: its read endpoints (timeline, profile) are served without
-authentication, and anyone on the internet can call them. A public surface with no limits is a product
-one impatient script can take down for everyone. This section states, as testable `REQ-OPS-*`
-requirements, the limits a releasable public chirp needs so that **no single caller can degrade the
-service for everyone** and **resource use stays bounded**: request-rate limits, request/payload size
-limits, pagination bounds, and the per-account quotas the product scope warrants. For each limit it
-states *what* is limited, the *observable behaviour a client sees when the limit is hit*, and *how the
-limit is verified*.
 
-These are **requirements and acceptance criteria, not a limiting mechanism.** Where a limit is enforced
-(in-process middleware, an ingress/edge proxy, the store itself) and the exact numeric thresholds are a
-*how* deferred to the implementing code work and operational tuning; what is fixed here is the
-user-/operator-observable property that must hold at the public surface, with a sane default and a
-documented, configurable value. All limits build on the single-service, single-origin entry points the
-domain design fixed (`REQ-DOM-019`: the JSON API under `/api/…`, the unauthenticated `GET /healthz`
-probe, and the SPA fallback) and on the durable model (`REQ-DOM-012`/`REQ-DOM-013`), which is what makes
-bounding resource use meaningful: a durable store *accumulates*, so unbounded creation grows real
-storage, not just process memory.
+chirp is a public, internet-facing consumer web application: anyone can reach it, and the write surface —
+posting a chirp, following an account, liking a chirp — is open to any signed-in account, with an
+unauthenticated surface (the landing page, sign-up, sign-in) open to anyone at all. A surface like that,
+released with no limits, can be driven past what the service can carry by a single script, and can be used
+by one account to bury everyone else's timeline. This section states the rate, size, and volume limits a
+release needs so that neither happens: the operational first line against overload and trivial abuse.
 
-**Current state (grounded in `Nousix-LLC/nswe-demo` at `c805525`).** The server mounts only a
-request-tracing layer across the whole stack — there is **no rate limiting of any kind**, so a single
-client may call any endpoint, including the unauthenticated reads, as fast as it can open connections.
-There is **no explicitly configured maximum request body size** (only the HTTP framework's implicit
-default applies, undocumented and not a deliberate product limit). **Pagination is partially bounded
-already**: the home timeline clamps its page size to `1..=100` and defaults to `20` when the caller omits
-`limit`, and a malformed or foreign opaque cursor fails safe to the first page — but this is the only
-paginated collection today, and the account-management list endpoints the release adds
-(following/followers, data export) do not yet exist and must inherit the same bound. There are **no
-per-account quotas**. The requirements below close the rate-limit and size-limit gaps, generalise the
-pagination bound to every collection the release introduces, and add the per-account quota the product
-scope warrants.
+These are requirements, not an implementation. Where a limit belongs (the edge, a gateway, the application),
+which algorithm enforces it (token bucket, leaky bucket, fixed window), and the exact numeric thresholds are
+the later code work's to decide. What a release owes is that the limits exist, that exceeding one is handled
+by refusing or slowing the excess rather than serving it without bound, and that the caller is told. The
+numbers themselves are deliberately left to enforcement: a requirement that hard-codes "N requests per
+minute" ages badly and tells a tester nothing they can check against intent. The requirements below fix the
+*behaviour* and leave the *threshold* to be set — and re-set — operationally.
 
-**Boundary with identity & trust (`REQ-ID-*`).** Abuse *policy* — who may be blocked or muted, how
-reports are handled, moderation and suspension of accounts, and the security properties of credential
-and session handling — is identity & trust's area (`REQ-PROD-027`/`REQ-PROD-028`; `REQ-ID-*`). This
-section owns the **operational limit mechanics** (rate, size, quota) stated as release requirements.
-Where a limit *enforces* an abuse policy — rate-limiting credential attempts, throttling sign-up to
-blunt mass account creation — the requirement references the identity & trust area that owns the policy
-rather than restating it; the limit is the operational floor beneath that policy, valuable on its own as
-availability protection even before the policy exists.
+**What this section covers and what it leaves to its neighbours.**
 
----
+- **Rate and volume.** A per-client limit on the overall request rate, tighter limits on the actions that
+  create state, and a bounded volume of created content per account over a longer window. Together these are
+  the two halves of "cannot overwhelm the service" and "cannot flood others" (`REQ-PROD-041`).
+- **Size, at the edge.** A cap on request body size, and the page-size cap on list reads. The per-field
+  content bounds are already fixed by the domain design and are **referenced, not restated** here: a chirp
+  body is 1–280 characters (`REQ-DOM-012`) and a handle is 1–15 characters (`REQ-DOM-002`). The operational
+  requirement is that oversized input is refused at the edge, before it reaches a handler, consistent with
+  those bounds. Timeline reads are already required to come back a bounded page at a time behind an opaque
+  cursor with a server-enforced maximum (`REQ-DOM-027`, `REQ-DOM-218`); the operational requirement is that
+  this cap is enforced on every list surface so no client can ask for an unbounded page.
+- **The over-limit response.** When a limit is hit, the product rejects or throttles the excess and tells the
+  caller with a typed, machine-readable error, consistent with the error contract (`REQ-DOM-220`). A limit
+  that silently drops work, or that answers with an ad-hoc string the frontend cannot branch on, is not a
+  finished limit.
 
-### Rate limits
+**Boundaries — what this section references but does not own.**
 
-#### REQ-OPS-040 — The public API enforces a per-caller request-rate limit
-- **Statement:** Every client-facing HTTP endpoint under `/api/…` is subject to a request-rate limit
-  applied per caller, so that one caller cannot consume the service's request capacity without bound.
-  The limit applies to the **unauthenticated read endpoints** as well as the authenticated ones, because
-  the public reads are the surface any anonymous caller can reach.
-- **Acceptance criteria:** A single caller issuing requests to a public endpoint (for example repeated
-  `GET /api/timeline` or `GET /api/users/{id}`) faster than the configured limit begins receiving a
-  rejected, non-success response once the limit is exceeded, while a caller staying within the limit is
-  served normally; the service remains responsive to *other* callers throughout. Exercised against the
-  live product, sustained single-caller load does not deny service to a second caller.
-- **Release gating:** true — a publicly reachable product with no request-rate limit can be degraded for
-  everyone by one caller, which is exactly what this concern exists to prevent.
-- **Traceability:** `REQ-PROD-013` (public reads), `REQ-PROD-030`/`REQ-PROD-031` (the product keeps
-  serving users); builds on `REQ-DOM-019` (the `/api/…` surface). Anti-abuse policy → `REQ-ID-*`.
-- **Verification method:** operational_check
+- **Account-level abuse controls belong to identity and trust (`REQ-ID-*`).** The limits here are coarse and
+  content-blind: they bound how fast and how much any client may do, not *who* a client is or whether a
+  specific account is behaving abusively. Blocking and muting another account, reporting abuse, stated rules,
+  and the operator's supported action on an abusive account are the identity/security and product-safety
+  designs' (`REQ-ID-*`, and `REQ-PROD-025` / `REQ-PROD-028`). Rate and volume limiting is the first line that
+  holds while those controls do their slower, account-specific work; it is not a substitute for them.
+- **Operational access control (board follow-up #24).** Follow-up **#24** (least-privilege delivery RBAC and
+  supply-chain hardening) concerns who and what may change the *running system* through the delivery and
+  control plane — a privileged, operator-and-automation-facing access posture, distinct in subject from the
+  public, client-facing rate and volume limits owned here. Its substance is an operational access/limits
+  matter, but it bounds privileged control-plane actors rather than public clients. It is **referenced here
+  for the synthesis gate to place**, not re-filed and not owned as a `REQ-OPS-04x` limit; the synthesis gate
+  owns the final placement of #24 across the operational-readiness sections.
 
-#### REQ-OPS-041 — Rate limits are scoped to the caller and tightened for writes and sensitive endpoints
-- **Statement:** The rate limit distinguishes callers so one caller's traffic does not exhaust another's
-  allowance: **authenticated** requests are limited per account (keyed by the session identity), and
-  **unauthenticated** requests are limited per request source. State-changing (write) endpoints —
-  `POST /api/chirps`, `POST /api/users`, the follow/like mutations, and the account-management mutations
-  the release adds — are bounded **more tightly** than reads, and the **sensitive authentication
-  endpoints** (account creation `POST /api/users` and sign-in `POST /api/sessions`) carry a specifically
-  tighter limit to blunt mass account creation and credential-guessing.
-- **Acceptance criteria:** Two distinct callers each get their own allowance (one caller hitting its
-  limit does not cause the other to be throttled); a write endpoint rejects sustained load at a lower
-  request rate than a read endpoint does; and repeated rapid calls to `POST /api/sessions` or
-  `POST /api/users` from one source are throttled sooner than ordinary reads. The configured per-scope
-  and per-endpoint-class values are documented and inspectable.
-- **Release gating:** true
-- **Traceability:** `REQ-PROD-004`/`REQ-PROD-007` (credentialed sign-in and recovery — throttling guards
-  the credential surface), `REQ-PROD-001`/`REQ-PROD-003` (self-service sign-up and handle uniqueness —
-  throttling guards against mass account creation). Credential-attempt and account-abuse *policy* →
-  `REQ-ID-*`. Builds on `REQ-DOM-019`.
-- **Verification method:** automated_test
+#### Requirements
 
-#### REQ-OPS-042 — A rate-limited request gets a well-formed, non-destructive, recoverable response
-- **Statement:** When a request is rejected for exceeding a rate limit, the client sees a **distinct,
-  machine-readable response** — HTTP **429 (Too Many Requests)** carrying the product's standard error
-  body and an indication of when to retry — the rejected request causes **no state change**, and the
-  caller is served again once the window resets. The error is rendered consistently with the wire error
-  contract (`ApiError` with a machine-readable `code`), which, because the current `ErrorCode` set has
-  no rate-limit category, requires an **additive** wire error category per `REQ-DOM-017` (the specific
-  category name and the retry-signalling mechanism are deferred to the implementing code work).
-- **Acceptance criteria:** A caller driven past the limit receives HTTP 429 with a parseable error body
-  whose code identifies the condition as rate limiting (not a generic 400/500) and a retry indication
-  (for example a `Retry-After` value); a *write* that is rejected for rate limiting leaves no chirp,
-  follow, like, account, or session created or changed (verifiable by reading state afterward); and after
-  waiting the indicated interval the same caller's request succeeds. No rejected request returns an
-  ad-hoc plain-text body.
-- **Release gating:** true
-- **Traceability:** `REQ-DOM-017` (wire contract extended only, additively, through `chirp-types`);
-  `REQ-PROD-006` (failures are surfaced honestly, not silently). Builds on the `ApiError`/`ErrorCode`
-  contract.
-- **Verification method:** automated_test
+##### REQ-OPS-040 — The public request rate is bounded per client
+- **statement**: The product bounds the rate of requests it will accept from a single client, so one client cannot drive the service past what it can serve for everyone else by issuing requests as fast as it can. The threshold, the client-identification basis, and the enforcement point are set operationally; the requirement is that a bound exists and is applied per client rather than only in aggregate.
+- **acceptance_criteria**: From a single client, issue requests far faster than a person using the product would; past a point the product stops serving the excess (it refuses or slows further requests) rather than accepting every request without limit, and other clients continue to be served normally meanwhile.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
 
----
+##### REQ-OPS-041 — State-creating actions are rate-limited more tightly than reads
+- **statement**: The actions that create state — posting a chirp, following an account, liking a chirp — are subject to their own, tighter rate limit than ordinary reads, so a single account cannot flood timelines or follow/like en masse at machine speed. The specific limits are operational; the requirement is that a write-rate bound exists on each state-creating action.
+- **acceptance_criteria**: Signed in, perform one state-creating action (for example posting) repeatedly, far faster than a person would; past a point the product refuses or throttles the further writes rather than accepting them without limit. Reading remains possible within its own limit while writes are being throttled.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
 
-### Size limits
+##### REQ-OPS-042 — Created volume per account is bounded over a longer window
+- **statement**: Beyond the short-term write rate, the volume of content a single account can create over a longer rolling window is bounded, so an account cannot flood others by sustaining an at-the-limit rate indefinitely. This is the "volume" half of the product's rate-and-volume requirement, distinct from the burst limit of REQ-OPS-041. The window and the cap are operational; the requirement is that a sustained-volume bound exists per account.
+- **acceptance_criteria**: With one account, create content continuously at or just under the per-action rate limit for a sustained period; the product eventually bounds the account's further creation for that window rather than allowing unbounded accumulation, and resumes in a later window.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
 
-#### REQ-OPS-043 — Request payload size is bounded, and oversized requests are rejected early
-- **Statement:** The product enforces a **documented maximum size for request bodies** on the `/api/…`
-  surface; a request whose body exceeds the maximum is rejected before the handler does any work, with an
-  observable error, so a client cannot force the service to buffer or process an arbitrarily large
-  payload. This is the transport-level envelope; it is **distinct from and in addition to** the domain
-  field validation already owned by `REQ-DOM-002` (`Username` ≤ 15 characters, `ChirpText` ≤ 280
-  characters), which this requirement references and does not restate.
-- **Acceptance criteria:** Sending a request body larger than the configured maximum to a `POST`
-  endpoint (for example `POST /api/chirps`) is rejected with a clear, non-success response and creates
-  no resource, without the service attempting to fully buffer or validate the body first; a request body
-  within the maximum is processed normally. The configured maximum is documented and inspectable; a
-  body within the size limit but violating a field rule still fails as a `VALIDATION_ERROR` per
-  `REQ-DOM-002` (the two limits compose, neither replaces the other).
-- **Release gating:** true — an unbounded accepted payload is a trivial resource-exhaustion vector on a
-  public endpoint; the current implicit framework default is not a deliberate, documented product limit.
-- **Traceability:** `REQ-DOM-002` (field-level content validation — referenced, not restated),
-  `REQ-PROD-016` (compose within the limit), `REQ-PROD-030`/`REQ-PROD-031` (the product keeps serving).
-- **Verification method:** automated_test
+##### REQ-OPS-043 — Oversized request bodies are refused at the edge
+- **statement**: The product enforces a maximum request body size and refuses a request whose body exceeds it before the body is processed, so a client cannot consume unbounded memory or processing by sending an enormous payload. The cap is consistent with the already-fixed content bounds — a chirp body of 1–280 characters (REQ-DOM-012) and a handle of 1–15 characters (REQ-DOM-002) — and exists to stop payloads far larger than any valid request, not to re-enforce those per-field rules.
+- **acceptance_criteria**: Send a request whose body is far larger than any valid chirp or form submission (for example a multi-megabyte body to a write endpoint); the product refuses it with an error and does not attempt to process the oversized body. A normal, within-bounds request to the same endpoint succeeds.
+- **verification_method**: automated_test
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041, REQ-DOM-012, REQ-DOM-002
 
----
+##### REQ-OPS-044 — List reads are served only as bounded pages
+- **statement**: Every endpoint that returns a list enforces the server's maximum page size, so no client can force the product to assemble and return an unbounded result in one response. This is the operational enforcement of the domain requirement that timelines are read a bounded page at a time behind an opaque cursor (REQ-DOM-027, REQ-DOM-218); the operational requirement is that the cap holds on every list surface, not only the timeline.
+- **acceptance_criteria**: Request a list with no page size, and request one with a page size well above the server maximum; in both cases the response carries at most the server's maximum number of items, with a continuation cursor when more remain, rather than the full result set.
+- **verification_method**: automated_test
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041, REQ-DOM-218, REQ-DOM-027
 
-### Pagination bounds
+##### REQ-OPS-045 — Exceeding a limit refuses or throttles the excess and says so
+- **statement**: When any limit in this section is exceeded, the product rejects or throttles the excess rather than serving it without bound, and tells the caller with a typed, machine-readable error carrying a distinct category for being rate- or size-limited, consistent with the error contract (REQ-DOM-220). The caller can tell "you were limited" apart from other failures and can act on it (for example back off and retry later).
+- **acceptance_criteria**: Drive any one of the limits above past its threshold; the response is an error whose machine-readable category identifies it as a limit being hit — distinct from a validation error or a not-found — and the excess work is not performed. The error is the typed contract category, not an ad-hoc string.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041, REQ-DOM-220
 
-#### REQ-OPS-044 — Every collection endpoint is bounded by a maximum page size with a default
-- **Statement:** No endpoint returns an **unbounded** collection. Every list/collection response —
-  today's home timeline, and the following/followers listing and data export the release adds
-  (`REQ-DOM-010`, `REQ-DOM-018`) — is paginated with a **maximum page size** and a **default page size**
-  used when the caller omits an explicit limit, so a single request can never be made to return the
-  entire corpus.
-- **Acceptance criteria:** For each collection endpoint, a request that asks for more than the maximum
-  returns at most the maximum number of items and a continuation cursor for the rest; a request that
-  omits a limit returns the default page size; and no request parameter causes the endpoint to return an
-  unbounded number of items in one response. (Grounded: the home timeline already enforces a maximum of
-  100 and a default of 20 via its clamped `limit`; the release holds every new collection endpoint to
-  the same bounded-page contract.)
-- **Release gating:** true — bounded responses are a release property of a public collection API; new
-  list endpoints must not ship unbounded.
-- **Traceability:** `REQ-PROD-018` (timeline paging), `REQ-DOM-004` (opaque monotonic cursor the timeline
-  pages on), `REQ-DOM-010`/`REQ-DOM-018` (the follow-list and export collections the release adds).
-- **Verification method:** automated_test
+##### REQ-OPS-046 — The unauthenticated surface is limited too
+- **statement**: The request-rate limit applies to the unauthenticated surface — the landing page, sign-up, and sign-in — identified by client rather than by account, so a client cannot escape limiting simply by not signing in, and the pre-sign-in surface cannot be used as an unbounded overwhelm or credential-guessing vector. This bounds request volume on that surface; account-specific abuse handling and credential-attempt lockout belong to the identity design (REQ-ID-*) and are referenced, not owned here.
+- **acceptance_criteria**: Without signing in, issue requests to a public, unauthenticated endpoint far faster than a person would; past a point the product refuses or throttles the excess, the same as for an authenticated client.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
 
-#### REQ-OPS-045 — Pagination parameters clamp rather than error, and bad cursors fail safe
-- **Statement:** A page-size parameter outside the allowed range is **clamped** to the valid range rather
-  than rejected as an error, and a malformed, expired, or foreign (server-un-minted) cursor **fails safe
-  to the first page** rather than erroring or leaking, so routine pagination is robust against client
-  quirks and cannot be used to probe the service.
-- **Acceptance criteria:** Requesting a page size of 0, a negative value, or far above the maximum
-  returns a valid bounded page (clamped into range) rather than an error; supplying a cursor the server
-  did not mint returns the first page rather than an error or an internal failure. (Grounded: the home
-  timeline already clamps `limit` into `1..=100` and treats an unparseable cursor as "from the newest";
-  the release holds every new collection endpoint to the same robustness.)
-- **Release gating:** false — the primary collection (the timeline) already meets this and it is a
-  robustness/quality property rather than a release blocker; it is stated so every *new* collection
-  endpoint inherits the same behaviour, and is a recorded expectation, not an omission.
-- **Traceability:** `REQ-PROD-018`, `REQ-DOM-004`.
-- **Verification method:** automated_test
+##### REQ-OPS-047 — Under aggregate overload, the product sheds rather than collapses
+- **statement**: When total load exceeds what the product can serve — even from many within-limit clients at once — the product sheds or throttles the excess and keeps serving the traffic it can, rather than failing wholesale for everyone. This protects the product's reachability and reasonable availability (REQ-PROD-040) and is the aggregate counterpart to the per-client limits above. The capacity point and the shedding policy are operational.
+- **acceptance_criteria**: Apply aggregate load beyond the product's serving capacity; the product continues to serve a bounded share of requests (and reports the rest as limited or unavailable per REQ-OPS-045) rather than becoming unresponsive to all callers, and it recovers to normal service when the load subsides.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040, REQ-PROD-041
 
----
-
-### Per-account quotas
-
-#### REQ-OPS-046 — Per-account quotas bound runaway content creation and storage growth
-- **Statement:** Because durable state accumulates (`REQ-DOM-012`/`REQ-DOM-013`), the product can bound
-  the rate at which a single account creates durable resources — chirps, follows, likes — with a
-  per-account quota over a rolling window, so one account (human or automated) cannot grow the store or
-  the social graph without limit. This is the sustained-use bound that complements the short-window
-  request-rate limit of `REQ-OPS-040`/`REQ-OPS-041`.
-- **Acceptance criteria:** An account that creates chirps (or follows) past its configured per-account
-  quota within the window is prevented from creating more until the window resets, observing the same
-  well-formed, non-destructive rejection as `REQ-OPS-042` (HTTP 429, no resource created); an account
-  within the quota is unaffected; the configured quota values are documented and inspectable.
-- **Release gating:** false — the per-caller request-rate limits (`REQ-OPS-040`/`REQ-OPS-041`) already
-  bound sustained creation for a first releasable version, so a dedicated per-account content quota is a
-  recorded, recommended improvement rather than a release blocker. This is an honest cut, not an
-  oversight: it is called out so it is scoped deliberately and can be gated up if abuse is observed.
-- **Traceability:** `REQ-DOM-012`/`REQ-DOM-013` (durable store the quota protects), `REQ-PROD-031`
-  (operations keep user data/service healthy). Account-abuse *policy* → `REQ-ID-*`.
-- **Verification method:** automated_test
-
----
-
-### Cross-cutting
-
-#### REQ-OPS-047 — Limits are configurable with documented defaults, and operability surfaces are exempt
-- **Statement:** Every limit above has a **safe default** and is **configurable through documented
-  settings** (consistent with `REQ-DOM-019`'s documented-configuration rule and `REQ-PROD-034`'s
-  self-hostable surface), so an operator can tune limits for their environment without code changes. The
-  **operability surfaces are exempt** from the API rate limits: the unauthenticated `GET /healthz`
-  liveness/readiness probe and the static SPA assets must remain reachable so that rate limiting cannot
-  make the product appear unhealthy or unservable to its own operator.
-- **Acceptance criteria:** The repository documents each limit's default value and the setting that
-  overrides it; changing a setting changes the enforced limit without rebuilding application logic;
-  and health probing `GET /healthz` and loading the SPA shell are not throttled by the API rate limits
-  even under sustained load that would rate-limit `/api/…` calls.
-- **Release gating:** true — an operator who cannot keep the health probe reachable, or cannot tune
-  limits for their deployment, cannot operate the product; this is the self-hostable operability bar.
-- **Traceability:** `REQ-DOM-019` (documented configuration; `/healthz` and SPA entry points),
-  `REQ-PROD-034` (reproducible, documented, operable), `REQ-PROD-030` (truthful health signal).
-- **Verification method:** inspection
-
----
-
-### Deferred "how" (named here, built elsewhere)
-
-To keep this section to *what, not how*, the following are stated above as requirements and their
-implementation is deferred:
-
-- The **enforcement point and mechanism** of rate limiting (in-process middleware vs. ingress/edge), the
-  **token-bucket/window algorithm**, and the **exact numeric thresholds** → the implementing code work and
-  operational tuning, realising `REQ-OPS-040`–`REQ-OPS-042`, `REQ-OPS-046`.
-- The **additive wire error category** for the 429 response and its retry-signalling → the implementing
-  code work, additively through `chirp-types` per `REQ-DOM-017` (`REQ-OPS-042`).
-- The **abuse/credential/account policy** a limit enforces (who is blocked, credential-attempt handling,
-  moderation) → identity & trust (`REQ-ID-*`), with the limits here as the operational floor beneath it.
-
----
-
-### Register summary — `REQ-OPS-040..059` (limits & quotas)
-
-| REQ-OPS | Concern | Release gating | Traces to | Verification |
-|---|---|---|---|---|
-| 040 | Per-caller request-rate limit on the public API | true | REQ-PROD-013/030/031, REQ-DOM-019, REQ-ID-* | operational_check |
-| 041 | Rate limits scoped (per-account/per-source); writes + auth endpoints tighter | true | REQ-PROD-001/003/004/007, REQ-DOM-019, REQ-ID-* | automated_test |
-| 042 | 429 breach response: well-formed, non-destructive, recoverable | true | REQ-DOM-017, REQ-PROD-006 | automated_test |
-| 043 | Bounded, documented request payload size; rejected early | true | REQ-DOM-002, REQ-PROD-016/030/031 | automated_test |
-| 044 | Every collection bounded by a max page size + default | true | REQ-PROD-018, REQ-DOM-004/010/018 | automated_test |
-| 045 | Pagination params clamp; bad cursors fail safe | false | REQ-PROD-018, REQ-DOM-004 | automated_test |
-| 046 | Per-account quota bounds runaway creation / storage growth | false | REQ-DOM-012/013, REQ-PROD-031, REQ-ID-* | automated_test |
-| 047 | Limits configurable with documented defaults; `/healthz` + SPA exempt | true | REQ-DOM-019, REQ-PROD-034/030 | inspection |
-
-`REQ-OPS-048..059` are unused, reserved as amendment headroom within this area's allocated range.
+##### REQ-OPS-048 — Limits sit above ordinary use
+- **statement**: The limits in this section are set above the rate and volume of ordinary legitimate use, so a person using the product normally — reading a timeline, posting through the day, following and liking as they browse — does not hit them. Limiting targets abuse and overload, not use; a limit that blocks a normal person is a worse product than a more generous one. The thresholds are operational, but the requirement that they clear ordinary use is a release requirement.
+- **acceptance_criteria**: As one person, use the product the way a normal user would over a normal session — browse, post several times, follow and like a reasonable number of accounts — without being rate- or volume-limited. Only usage well beyond what a person does by hand triggers a limit.
+- **verification_method**: manual_user_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-041
 
 ---
 
 ## observability
 
-### What this section is, and is not
+*Observability.*
 
-This is the `observability` section of `design/operational-readiness.md`. It defines **what must be
-visible to operate chirp** — the signals an operator must be able to observe to know the product is
-working, to tell *why* it is not when it breaks, and to see it degrade before users do — stated as
-testable `REQ-OPS-*` requirements of the **product**, not as a choice of monitoring stack.
+To operate chirp an operator has to be able to answer two questions at any moment: **is it serving
+users, and what is it doing?** This section states what the product must expose so those questions can
+be answered — a health and readiness signal, operational logs, serving metrics, and an audit trail of
+operator actions. Each is stated as a requirement on what the product makes visible, not as a choice of
+tooling: which log shipper, which metrics backend, which dashboard, and which alert rules are deferred to
+later code work. The requirements here describe the *signals*; the status-and-incident posture
+(`REQ-OPS-080..099`) builds detection, alerting, and user communication on top of them.
 
-Three things must be observable: a **health signal** that is honest about whether the product can
-serve users; **logs** that let an operator reconstruct what happened and why; and **metrics** that
-make traffic, errors, latency, and saturation measurable over time. Each requirement states the
-signal that must exist and what it must *truthfully reflect* — never which backend produces it. Which
-database health is read from, which log collector ships stdout, and which time-series system scrapes
-the metrics are a *how* owned by later code work and the implementing deployment, not by this design.
+Three things anchor this section. First, chirp already answers a liveness probe (`/healthz` at `c805525`)
+that reports only that the process is running; the release needs a **readiness** meaning that reflects
+whether the product can serve users — including that its durable store is reachable
+(`REQ-PROD-039`, `REQ-DOM-115`, `REQ-DOM-226`). Second, chirp holds private account data — credentials,
+session tokens, verified contact — that is never public (`REQ-DOM-035`); that same rule binds everything
+the product logs or emits as telemetry, so operational visibility is never bought with a privacy leak.
+Third, the operator has a supported administrative surface (`REQ-PROD-028`, operator journey J9) that can
+reach into accounts and content; actions taken through it must leave a record.
 
-**The defect this section exists to prevent** is a signal that lies: a health check that is green
-while the product cannot serve users, a 5xx that leaves no trace, a slowdown nobody could see coming.
-The guiding principle throughout is **truthfulness** — a signal is worth having only if an operator
-can trust it.
+> **Note for the synthesis fold (issue #23):** the open follow-up #23 (exercise and harden the native
+> install path) touches operational visibility — exercising that path is where the readiness signal, the
+> logs, and the metrics below are first confirmed wired and observable in a real deployment. It is
+> referenced here so the `existing_followups` fold can place it against the operational-visibility
+> requirements it exercises, rather than being re-filed as a new requirement.
 
-### Where this builds on what already exists
+#### Health and readiness
 
-Grounded in `Nousix-LLC/nswe-demo` @ `c805525` (read-only):
+The product must distinguish **liveness** ("the process is running") from **readiness** ("the process can
+serve users"). An orchestrator uses liveness to decide whether to restart a crashed process and readiness
+to decide whether to send it traffic; conflating them either kills a process that is merely waiting on a
+recoverable dependency, or sends users to a process that cannot serve them. Because chirp's
+authoritative state now lives in a durable store distinct from the serving process, a process that cannot
+reach that store is running but not ready — and readiness must say so.
 
-- The service exposes `GET /healthz` (`crates/chirp-server/src/api/router.rs`), unauthenticated,
-  returning `200` with a small JSON body (`status`, `service`, `version`). **It touches no
-  application state**, so by construction it reports *process liveness only* — it stays green when
-  the product cannot actually serve users. The deployment currently points **all three** Kubernetes
-  probes (startup, liveness, readiness) at this same `/healthz` (`deploy/chirp/10-deployment.yaml`),
-  so "ready for traffic" and "process is up" are not distinguishable today.
-- Logging uses `tracing` + `tracing-subscriber` with a `RUST_LOG` env-filter and a `tower-http`
-  `TraceLayer` wrapping the whole HTTP stack, plus lifecycle logs on start/stop
-  (`crates/chirp-server/src/main.rs`). So request-level and lifecycle logging exist, but there is no
-  per-request correlation id and no guaranteed machine-parseable format or field set.
-- There are **no operational metrics**: no request/error/latency counters or exposition endpoint
-  exist in the server today.
+#### Structured operational logs
 
-These requirements build on the `/healthz` surface and especially on **`REQ-DOM-021`** — the domain
-design fixed that the model must expose a durable-store reachability check and *explicitly handed the
-probe wiring and the readiness/liveness policy to `REQ-OPS-*`*. This section discharges that hand-off.
+The product must record what it is doing in a form an operator can read and search after the fact,
+covering the events needed to explain normal operation and to investigate a failure — and it must do so
+without ever writing private account data. Logs are the operator's primary account of "what happened"
+when something goes wrong.
 
-### The seam with status & incident (kept clean)
+#### Serving metrics
 
-Observability **defines the signals and what they must reflect**. The sibling `status_and_incident`
-section **defines how people are told** — alert thresholds, on-call expectations, the status posture,
-and user-facing degradation messaging. The boundary: this section names the signals and the product
-SLIs (`REQ-OPS-074`) and requires they be truthful and collectable; it does **not** set alerting
-thresholds, page anyone, or specify the status page. Those consume the signals defined here.
+The product must expose enough quantitative signal to tell, at a glance and over time, whether it is
+serving users well: how much traffic it is handling, how much of that is failing, how slow it is, and how
+close it is to overload. These are the signals that make "the product is degraded" something an operator
+(and the status-and-incident posture) can detect rather than infer from user complaints.
 
----
+#### Operator and administrative audit trail
 
-### observability requirements
-
-#### REQ-OPS-060 — Health reports unhealthy when the product cannot serve users
-- **Statement:** The product's health signal MUST be able to report **unhealthy when the durable
-  store is unreachable**, so that "the process is up" cannot be mistaken for "the product works for
-  users". The signal reflects the product's actual ability to serve, not merely process liveness.
-- **Acceptance criteria:** With the product running and able to serve users, the health signal
-  reports healthy. When the durable store is made unreachable while the process stays alive, the
-  health signal reports unhealthy (not `200`/healthy). A reader who never met the author can perform
-  this check against the live product and get the same result.
-- **release_gating:** true
-- **traces_to:** `REQ-DOM-021`, `REQ-PROD-030`
-- **verification_method:** operational_check
-
-#### REQ-OPS-061 — Liveness and readiness are distinct signals with distinct meanings
-- **Statement:** The product MUST expose a **liveness** signal (is the process able to make progress,
-  such that restarting it would help) and a **readiness** signal (is the product able to serve user
-  requests right now, including its dependence on durable data) as **separately observable** signals,
-  so that a dependency outage takes the instance out of rotation (readiness) without triggering a
-  restart loop (liveness).
-- **Acceptance criteria:** Two signals are observable and documented. When the durable store is
-  unreachable, the readiness signal reports not-ready while the liveness signal still reports alive
-  (so an orchestrator stops routing traffic but does not kill and restart the process for a
-  dependency it cannot fix by restarting). Inspection of the deployment shows the readiness decision
-  is driven by the readiness signal, not by a liveness-only probe.
-- **release_gating:** true
-- **traces_to:** `REQ-DOM-021`, `REQ-PROD-030`
-- **verification_method:** operational_check
-
-#### REQ-OPS-062 — The readiness check actually exercises its dependency, bounded, and fails closed
-- **Statement:** The readiness signal MUST **actually verify the durable-store dependency** (not
-  assume it), complete within a bounded time, and **fail closed** — report unhealthy on timeout or
-  error rather than hanging or defaulting to healthy.
-- **Acceptance criteria:** When the store is reachable, readiness returns healthy within a small,
-  documented bound. When the store is slow past that bound or returns an error, readiness reports
-  unhealthy within the bound rather than blocking indefinitely or reporting healthy. The check does
-  not itself mutate product state.
-- **release_gating:** true
-- **traces_to:** `REQ-DOM-021`, `REQ-DOM-014`
-- **verification_method:** operational_check
-
-#### REQ-OPS-063 — Health recovers on its own when the dependency returns
-- **Statement:** When a dependency that made the product unhealthy is restored, the health signal
-  MUST return to healthy **without requiring a restart or manual intervention**.
-- **Acceptance criteria:** Starting from an unhealthy readiness caused by an unreachable store,
-  restoring store reachability causes the readiness signal to report healthy again on its next
-  evaluation, with no process restart and no operator action beyond fixing the dependency.
-- **release_gating:** true
-- **traces_to:** `REQ-DOM-021`, `REQ-PROD-031`
-- **verification_method:** operational_check
-
-#### REQ-OPS-064 — The health endpoint is cheap, safe, and self-identifying
-- **Statement:** The health signal MUST be **unauthenticated, side-effect-free, and inexpensive
-  enough to poll frequently**, and MUST return a machine-readable body identifying the service and
-  the running version, so an operator (and an automated probe) can consume it and know *which build*
-  is answering.
-- **Acceptance criteria:** The health endpoint is reachable without credentials, returns a
-  machine-readable body naming the service and version, does not alter product state when called, and
-  can be polled on the deployment's probe cadence without measurable user-facing cost. (Preserves the
-  existing `status`/`service`/`version` body at `/healthz`.)
-- **release_gating:** false
-- **traces_to:** `REQ-PROD-034`
-- **verification_method:** inspection
-
-#### REQ-OPS-065 — Every request produces a log record an operator can read traffic from
-- **Statement:** Each handled HTTP request MUST produce a log record carrying at least the **method,
-  the route (not raw user content), the response status, and the latency**, so an operator can see
-  traffic volume, error rate, and slow requests from logs alone.
-- **Acceptance criteria:** After exercising the live product with a mix of successful and failing
-  requests, the logs contain one record per request with method, route, status, and a latency
-  measurement; an operator can distinguish successful from failing requests and identify slow ones
-  without access to anything but the logs.
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-030`, `REQ-PROD-034`
-- **verification_method:** operational_check
-
-#### REQ-OPS-066 — Logs are structured, parseable, and emitted for platform collection
-- **Statement:** Logs MUST be emitted as **structured, machine-parseable records** (one event per
-  line, with documented fields) to the process's standard output/error streams, so the surrounding
-  platform can collect, search, and filter them without bespoke parsing. Log verbosity MUST be
-  configurable at deploy time without a rebuild.
-- **Acceptance criteria:** Log output is parseable by field (not only free-form prose), each line is
-  a single self-contained event, and the field set is documented. Logs go to stdout/stderr so a
-  collector can capture them. Changing the configured log level (e.g. via the documented `RUST_LOG`
-  setting) changes verbosity on the next start without recompiling.
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-034`
-- **verification_method:** inspection
-
-#### REQ-OPS-067 — Server faults are logged with enough context to diagnose, never silently
-- **Statement:** Every server-side fault (a `5xx`, an unhandled error, a failed dependency call) MUST
-  produce a log record with enough context to tell **what failed and why** — distinct from an
-  ordinary request line — so that no server error is silent.
-- **Acceptance criteria:** Inducing a server-side failure (for example, a store error) produces a log
-  record that identifies the failing operation and the error cause, correlatable to the request that
-  triggered it; there is no case where the product returns a `5xx` or drops an operation with no
-  corresponding diagnostic log entry.
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-030`
-- **verification_method:** operational_check
-
-#### REQ-OPS-068 — A request can be followed across log lines by a correlation id
-- **Statement:** Each request's log records MUST carry a **correlation/request identifier** so an
-  operator can follow a single request across all the lines it produced (and, where a client reports
-  an error, tie the client's report to the server-side trace).
-- **Acceptance criteria:** For a single request that emits multiple log lines, all those lines share
-  one identifier that is absent from unrelated requests; given that identifier an operator can
-  retrieve exactly the lines for that one request. (Closes the current gap: no per-request id exists
-  today.)
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-030`
-- **verification_method:** inspection
-
-#### REQ-OPS-069 — Logs never expose secrets or personal data
-- **Statement:** Logs MUST NOT contain **secrets or sensitive personal data** — no passwords,
-  authentication credentials, session or bearer tokens, or request/response bodies carrying personal
-  content. What is logged is metadata about the request, not its sensitive contents.
-- **Acceptance criteria:** Inspection of logs produced across authentication, posting, and account
-  operations shows no credential, token, or password values and no personal message bodies; where an
-  identifier is needed it is a non-sensitive reference, not a secret. A reviewer can confirm this
-  from the logs and the documented field set.
-- **release_gating:** true
-- **traces_to:** `REQ-DOM-005`, `REQ-DOM-006`, `REQ-PROD-029`
-- **verification_method:** inspection
-
-#### REQ-OPS-070 — Lifecycle and fatal-startup events are observable in logs
-- **Statement:** The product MUST log its **lifecycle events** — startup (with an effective,
-  secret-free configuration summary), receipt of shutdown signals and graceful drain, and clean
-  stop — and MUST log a clear, specific record when it **fails to start**, so an operator can tell
-  why an instance will not come up.
-- **Acceptance criteria:** A normal start/stop produces log records marking listening-start, signal
-  receipt, drain, and stop. A deliberately broken configuration (for example, an unreachable store or
-  a bad bind setting) produces a specific startup-failure log that names the cause, rather than an
-  instance that exits or crash-loops with no explanation. (Builds on the existing start/stop
-  lifecycle logs.)
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-034`, `REQ-DOM-019`
-- **verification_method:** operational_check
-
-#### REQ-OPS-071 — Quantitative request metrics are exposed for collection
-- **Statement:** The product MUST expose **quantitative operational metrics** for collection — at
-  least **request rate, error rate, and a latency distribution** broken down by route-class — so an
-  operator can measure how the product behaves over time rather than inferring it by reading logs.
-- **Acceptance criteria:** A collector can retrieve, from the running product, counters/measurements
-  sufficient to compute request rate, the proportion of error responses, and a latency distribution
-  (not just an average) per route-class. After driving known traffic, the retrieved values reflect
-  that traffic. (Closes the current gap: no metrics exist today.)
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-030`, `REQ-PROD-034`
-- **verification_method:** operational_check
-
-#### REQ-OPS-072 — Degradation is visible before users feel it
-- **Statement:** The product MUST expose a **saturation / degradation signal** — at least in-flight
-  request load and the **health and latency of the durable store as seen by the application** — so an
-  operator can see the product heading toward trouble (a slowing or struggling dependency, rising
-  concurrency) *before* it turns into user-visible failures.
-- **Acceptance criteria:** With the store artificially slowed but not yet failing, the degradation
-  signal moves observably (store latency as seen by the app rises, and/or in-flight load climbs)
-  while user requests are still largely succeeding — demonstrating early warning rather than
-  after-the-fact detection. The signal is retrievable by the same collection path as `REQ-OPS-071`.
-- **release_gating:** true
-- **traces_to:** `REQ-DOM-021`, `REQ-DOM-016`, `REQ-PROD-030`
-- **verification_method:** operational_check
-
-#### REQ-OPS-073 — Metrics exposition is separable from the user surface and safe to scrape
-- **Statement:** The metrics exposition MUST be **separable from the public user-facing surface**
-  (served off the user path and/or access-restricted) and cheap enough to scrape on a normal cadence
-  without degrading the product; it MUST NOT leak secrets or personal data.
-- **Acceptance criteria:** Inspection shows the metrics surface is not part of the normal user
-  request path and is either network-restricted or otherwise protected; scraping it on the intended
-  cadence has no measurable user-facing cost; the exposed metrics contain no credentials, tokens, or
-  personal content.
-- **release_gating:** false
-- **traces_to:** `REQ-PROD-029`, `REQ-PROD-034`
-- **verification_method:** inspection
-
-#### REQ-OPS-074 — The product's health is defined as named, quantitative SLIs
-- **Statement:** "Working" MUST be defined **quantitatively**, as a small set of named service-level
-  indicators the signals above make measurable — at least **successful-request ratio**, a **latency
-  indicator (e.g. p95) for the core read/write paths**, and **durable-store availability** — so that
-  the release bar and the `status_and_incident` posture can set thresholds and alerts against a shared
-  definition rather than inventing their own. This section **defines and names** the SLIs; it does not
-  set their thresholds or alerting (that is `status_and_incident` and the release bar).
-- **Acceptance criteria:** A named SLI set exists, each SLI states precisely what it measures and from
-  which signal (`REQ-OPS-060..072`) it is derived, and each is computable from the exposed
-  signals/metrics against the live product. A stranger can compute each SLI and get a defensible
-  number without further definition work.
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-030`, `REQ-DOM-021`
-- **verification_method:** operational_check
-
-#### REQ-OPS-075 — Observability is documented for whoever operates the product
-- **Statement:** The product's observability MUST be **documented for an operator**: what signals
-  exist (health, logs, metrics, SLIs), where to find each, and what each one means — consistent with
-  the self-hostable/operable surface, so someone who did not build chirp can operate it from what the
-  repository provides.
-- **Acceptance criteria:** Following only the repository's documentation, a person who did not build
-  chirp can locate the health signal, find and interpret the structured logs and the request
-  correlation id, retrieve the metrics, and identify the named SLIs and what each reflects — without
-  reading the source to discover that these signals exist.
-- **release_gating:** true
-- **traces_to:** `REQ-PROD-034`
-- **verification_method:** manual_user_check
+Because the supported administrative surface (`REQ-PROD-028`) can assist users, remove content, and action
+accounts, the product must record who did what, to what, and when. An audit trail makes operator action
+accountable and reviewable, and it is held to the same no-secrets/no-PII rule as the logs.
 
 ---
 
-### Scope notes and deferrals (requirements only — the "how" is a later code work)
+#### Requirements: `REQ-OPS-060..079`
 
-- **Which backends** produce these signals — the metrics/time-series system, the log collector, the
-  tracing system, the exact probe wiring in the deployment manifests — are deliberately **out of
-  scope** here and deferred to the implementing code work; this section fixes only *what must be
-  observable and what it must truthfully reflect*.
-- **Alert thresholds, on-call, the status page, and user-facing degradation messaging** are out of
-  scope here by the clean seam with `status_and_incident`; this section hands them the truthful
-  signals and the named SLIs (`REQ-OPS-074`) to act on.
-- **Distributed tracing across multiple services** is not required at this product's single-service
-  scope (`REQ-DOM-019`); the per-request correlation id (`REQ-OPS-068`) is the proportionate form of
-  request-level traceability for one service.
+##### REQ-OPS-060 — Readiness is a distinct signal meaning "serving users"
+- **statement**: The product exposes a readiness signal, distinct from liveness, whose meaning is that the
+  product can serve users — not merely that the process is running. An operator or orchestrator
+  can obtain readiness separately from liveness.
+- **acceptance_criteria**: With the product fully able to serve, the readiness signal reports ready. With
+  the product running but unable to serve its core loop, the readiness signal reports not-ready while the
+  liveness signal still reports alive; the two are separately observable and can disagree.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039, REQ-DOM-226
+
+##### REQ-OPS-061 — Readiness reflects durable-store reachability
+- **statement**: The readiness signal reports not-ready when the product's durable store is unreachable
+  from the serving process, and ready when the store is reachable and the product can serve. Readiness is
+  not satisfied by process liveness alone.
+- **acceptance_criteria**: Make the durable store unreachable to a running serving process; the readiness
+  signal reports not-ready. Restore reachability so the product can serve; the readiness signal reports
+  ready.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039, REQ-DOM-115
+
+##### REQ-OPS-062 — Liveness reports process health only, not dependency health
+- **statement**: The liveness signal reports whether the serving process itself is alive and able to make
+  progress; it does not report not-alive solely because a recoverable dependency (such as the durable
+  store) is temporarily unreachable. A dependency outage is reflected in readiness, not liveness, so an
+  orchestrator restarts a genuinely crashed process but does not kill one that is alive and waiting on its
+  store.
+- **acceptance_criteria**: With the durable store unreachable but the serving process otherwise healthy,
+  the liveness signal reports alive while the readiness signal reports not-ready. Liveness reports
+  not-alive only when the process itself cannot make progress.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-226
+
+##### REQ-OPS-063 — The health/readiness endpoint is unauthenticated and exposes no private data
+- **statement**: The health and readiness signal can be queried without an account or session, so an
+  operator or orchestrator can reach it, and its response discloses no private account data and no
+  internal secret — it conveys serving status, not the contents of the system.
+- **acceptance_criteria**: Query the health/readiness endpoint with no session; it responds with the
+  serving status. Inspect the response; it contains no credential, session token, verified-contact value,
+  or other private account data, and no secret such as a connection string.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-226, REQ-DOM-035
+
+##### REQ-OPS-064 — Readiness is machine-consumable
+- **statement**: The readiness signal is expressed so that an orchestrator or load balancer can
+  mechanically distinguish ready from not-ready without interpreting prose — a decidable ready/not-ready
+  outcome an automated caller can branch on.
+- **acceptance_criteria**: Inspect the readiness signal while ready and while not-ready; in each state the
+  signal carries a machine-distinguishable indication of the state (such that an automated caller routes
+  traffic only when ready) without requiring a human to read a message.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039
+
+##### REQ-OPS-065 — Readiness tracks current state and recovers without a restart
+- **statement**: The readiness signal reflects the product's current ability to serve, continuously: when
+  the condition that made it not-ready clears (for example the durable store becomes reachable again), the
+  signal returns to ready on its own, without restarting or redeploying the serving process.
+- **acceptance_criteria**: Drive readiness to not-ready by making the durable store unreachable, then
+  restore reachability without restarting the process; the readiness signal returns to ready on its own.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039
+
+##### REQ-OPS-066 — Operational events are recorded in a structured, parseable form
+- **statement**: The product records its operational events as structured, machine-parseable records with
+  consistent fields (such as a timestamp, a severity, an event category, and an outcome), not as
+  free-form prose, so an operator can search and filter them rather than reading them line by line.
+- **acceptance_criteria**: Exercise the product and inspect its log output; operational events appear as
+  structured records with consistent, named fields that a log tool can parse and filter.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**:
+
+##### REQ-OPS-067 — Logs let one request be followed end to end
+- **statement**: Log records carry a correlation identifier that ties together the events of a single
+  request or user action, so an operator can follow one action through the product's logs from receipt to
+  outcome.
+- **acceptance_criteria**: Perform a single user action that touches more than one logged step; the log
+  records for that action share a correlation identifier by which they can be selected together and read in
+  order.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**:
+
+##### REQ-OPS-068 — Logs cover the events needed to explain operation and failure
+- **statement**: The log record covers the operational events an operator needs to answer "what is it
+  doing, and what went wrong": request handling and its outcome, errors and failures with a cause
+  category, process start and stop, changes in durable-store connectivity, and authentication outcomes
+  (success and failure) without the secret material involved.
+- **acceptance_criteria**: Provoke, in a running product, a handled request, an error, a process restart, a
+  loss and recovery of durable-store connectivity, and a failed and a successful sign-in; each is present
+  in the logs as a distinct, categorized event with enough context to tell what happened.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+##### REQ-OPS-069 — Logs never contain credentials or private account data
+- **statement**: Credentials, session tokens, verified-contact values, and any other private account data
+  (`REQ-DOM-035`) are never written to the product's logs, in any field, at any severity. Operational
+  visibility is never obtained at the cost of exposing private data in the logs.
+- **acceptance_criteria**: Exercise sign-up, sign-in, recovery, and session use so that private data flows
+  through the product, then inspect the logs produced; no credential, session token, verified-contact
+  value, or other private account field appears in any log record. References to an account in a log use a
+  non-secret identifier, not its private data.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-035
+
+##### REQ-OPS-070 — Severity is applied consistently
+- **statement**: Log records carry a severity that is applied consistently, so an operator can separate
+  normal operation from warnings and errors by filtering on severity rather than by reading every line.
+- **acceptance_criteria**: Inspect logs from a period that includes both normal operation and at least one
+  error; normal events and error events carry distinct severities consistent with their nature, and
+  filtering to error severity surfaces the error events.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**:
+
+##### REQ-OPS-071 — Errors are logged with enough context to investigate
+- **statement**: When the product logs an error it includes enough diagnostic context — what operation
+  failed, a cause category, and identifiers needed to locate the affected request or resource — that an
+  operator can investigate without reproducing the failure, subject always to the no-secrets/no-PII rule
+  (`REQ-OPS-069`).
+- **acceptance_criteria**: Provoke a representative failure; its log record names the failing operation and
+  a cause category and carries a correlation or resource identifier sufficient to investigate, and contains
+  no private account data or secret.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-DOM-035
+
+##### REQ-OPS-072 — The product exposes request-rate and error-rate metrics
+- **statement**: The product exposes serving metrics that report the rate of requests it is handling and
+  the rate that are failing, broken down enough to see which class of surface is affected (for example
+  reads versus writes, or by outcome category). Metric labels carry no private account data.
+- **acceptance_criteria**: Generate a known mix of successful and failing requests; the metrics reflect the
+  request rate and the error rate, distinguishable by surface class or outcome. Inspect the metric labels;
+  they contain no handle-linked private data, credential, or contact value.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040, REQ-DOM-035
+
+##### REQ-OPS-073 — Request latency is observable as a distribution
+- **statement**: The product exposes request-handling latency as a distribution (not only an average), so
+  that a product which is up but slow — tail latency degrading while the mean looks acceptable — is
+  visible.
+- **acceptance_criteria**: Drive traffic including some slow requests; the latency metric reflects the
+  spread of response times (for example percentiles or buckets), not a single averaged value, and the slow
+  requests are visible in the distribution.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+##### REQ-OPS-074 — A saturation/headroom signal is observable
+- **statement**: The product exposes a saturation or headroom signal — a measure of how close it is to its
+  serving capacity, such as in-flight work against available capacity — so that approaching overload is
+  detectable before it turns into errors or timeouts.
+- **acceptance_criteria**: Drive load toward the product's capacity; the saturation signal rises as
+  headroom shrinks, giving an observable indication of approaching overload ahead of widespread failures.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+##### REQ-OPS-075 — A serving/availability signal detects a degraded product
+- **statement**: The product exposes an availability or serving signal sufficient to detect that it is
+  degraded or not serving its core loop — the signal on which the status-and-incident posture
+  (`REQ-OPS-080..099`) builds incident detection. It makes "the product is not serving users" an
+  observable fact rather than an inference from complaints.
+- **acceptance_criteria**: Put the product into a degraded state in which the core loop does not work for
+  users; the serving/availability signal reflects the degradation. Return it to serving; the signal
+  reflects recovery. The signal is suitable to drive automated detection.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+##### REQ-OPS-076 — Durable-store interaction is observable
+- **statement**: Because serving now depends on the durable store, the product exposes the health of its
+  interaction with that store — the rate of store errors and the latency of store operations — so an
+  operator can tell a store problem from an application problem.
+- **acceptance_criteria**: Induce elevated store latency or store errors; the product's store-interaction
+  metrics reflect it, distinguishably from application-level request errors.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-DOM-115
+
+##### REQ-OPS-077 — Administrative actions are recorded in an audit trail
+- **statement**: Every action taken through the supported administrative surface (`REQ-PROD-028`) —
+  assisting a user's recovery, removing content, and disabling or actioning an account — is recorded in an
+  audit trail that captures the acting operator/administrator identity, the action taken, the target
+  account or content, and the time.
+- **acceptance_criteria**: Through the supported administrative surface, assist a user's recovery, remove a
+  named chirp, and action an account; each action produces an audit entry naming who acted, what they did,
+  which account or content was affected, and when. An administrative action that reaches accounts or
+  content leaves no untraced path.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-028
+
+##### REQ-OPS-078 — Audit records are durable and not silently editable
+- **statement**: Audit-trail entries are durable — they survive restart and redeploy like the rest of the
+  product's authoritative state — and are not silently editable or erasable through the product's ordinary
+  surfaces, so the trail remains trustworthy when it is reviewed after the fact.
+- **acceptance_criteria**: Produce audit entries, then restart or redeploy the product; the entries are
+  still present and unchanged. No ordinary product surface offers a way to alter or delete an existing
+  audit entry without trace.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-028
+
+##### REQ-OPS-079 — The audit trail carries no secrets or private data
+- **statement**: The audit trail records who acted, what they did, and on which account or content using
+  stable, non-secret identifiers, and never stores credentials, session tokens, or verified-contact values
+  (`REQ-DOM-035`). The same no-secrets/no-PII rule that binds the logs binds the audit trail.
+- **acceptance_criteria**: Inspect audit entries produced by representative administrative actions; each
+  names the actor, action, and target by non-secret identifier and contains no credential, session token,
+  or verified-contact value.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-035
 
 ---
 
 ## status_and_incident
 
-*(section: `status_and_incident` — owns `REQ-OPS-080..099`)*
+*Status and incident.*
 
-This section designs **how operators and users learn when chirp is in trouble, and the minimum a
-releasable product commits to when it is.** It is deliberately a *status and incident posture*, not an
-SRE programme: the bar is that a degradation or outage is **noticed by a machine, reaches a responsible
-human, is shown honestly to the people using the product, and is handled by someone who owns it** — a
-credible first-release commitment, with the heavier discipline (noise-tuned alerting, status channels,
-post-incident review) named and tracked rather than pretended.
 
-It states **required outcomes, not tools**: it names no on-call vendor, no hosted status-page service, no
-alerting pipeline. Those are an operational "how" deferred to the implementing code/infra work; this
-section fixes *what must be true* so a stranger could check it against the live product.
+Observability (`REQ-OPS-060..079`) gives an operator the signals to see that chirp is degraded. This
+section states what has to happen next: that a degradation visible in those signals is **noticed and acted
+on**, that **users are told** when the product is down or going down for maintenance, and that the product
+owes a person a usable experience while it is impaired. It also states, as an operated commitment, what
+"reasonably available" (`REQ-PROD-040`) means for this product in a number someone can measure against.
 
-### What this section builds on, and the seam it does not cross
+The posture here is sized for what chirp is: a small hosted service run by the people who build it
+(operator journey J9), not a large product with a staffed on-call rotation. So the requirements ask for a
+detection path, a named person who is responsible when something fires, a way to reach users that does not
+itself go down with the product, and a stated availability target — and they stop there. The incident
+*tooling* (which alerting backend, which status-page service), the paging schedule, and the written
+runbooks are deferred to later code work; this section states the requirements they have to satisfy.
 
-- **Detection rides on the observability signals, which this section does not define.** The
-  observability area (its own `REQ-OPS-060..079` register) owns the product-health signal, logs, and
-  metrics — including a health check that can report **unhealthy when the durable store is unreachable**
-  (`REQ-DOM-021`, the domain design's hand-off to operational readiness). This section begins *after* a
-  signal exists and designs **how a signal becomes a human being told, and a user being informed** — the
-  monitoring condition, the notification, the user-facing failure, and the incident handling. Where a
-  requirement here needs a health/metric signal, it references the observability area by role, not by
-  redefining it.
-- **The user-facing side meets experience design.** Experience design (`REQ-UX-*`) owns the error,
-  empty, and degraded screen states and their copy; identity & trust (`REQ-ID-*`) owns session
-  behaviour. This section fixes the **operational requirement** that, during a real degradation or
-  outage, those states are *reached honestly* — the product fails openly instead of appearing to work —
-  and leaves the pixels and wording to experience design.
+Three boundaries keep this section from redrawing its neighbours. Incident **detection** builds directly on
+the observability serving/availability signal (`REQ-OPS-075`) and the request, saturation, and
+store-interaction metrics (`REQ-OPS-072`, `REQ-OPS-074`, `REQ-OPS-076`) — it does not define new signals.
+The **user-facing error and degraded screens** — what a person actually sees when an action fails or a list
+will not load — are the experience design's (`REQ-UX-*`, and the product-level `REQ-PROD-033` and
+`REQ-PROD-034`); this section requires that an incident lands the user *in* those designed states rather
+than in a blank page or a crash, and does not specify the states themselves. The **data** recovery-point
+and recovery-time targets belong to backups and recovery (`REQ-OPS-020..039`); the time target here is
+time-to-restore-serving during an incident, which is a different thing from restoring lost data.
 
-### The product as it stands (grounded at `Nousix-LLC/nswe-demo` @ `c805525`)
+#### Incident detection and response
 
-Two facts set the shape of the gap, both observable today:
+A product is not being operated if the first notice of an outage is a user complaint. The serving signal
+that observability exposes has to be watched, and a degradation in it has to reach a person who is
+responsible for acting. For a product this size that means a detection path from the signals to an alert, a
+light severity split so the response is proportionate to what broke, and a named expectation of who
+responds — not an organisation chart.
 
-1. **"Healthy" today means only "the process answers."** The liveness, readiness, and startup probes in
-   `deploy/chirp/10-deployment.yaml` all target `GET /healthz`, and that endpoint
-   (`crates/chirp-server/src/api/router.rs`) "touches no application state … reports process liveness
-   only." So the product can be failing for users while every probe still reports healthy — there is no
-   condition on which an incident could be *detected*, and nothing that would *tell anyone*.
-2. **A restart is a silent, total user-facing outage of state.** The service runs a single replica of an
-   in-memory store (`replicas: 1`, read-only root filesystem, `emptyDir` scratch — deliberate, per the
-   deployment's own comment), so every restart, redeploy, or reschedule discards all accounts, chirps,
-   follows, and sessions and silently signs everyone out (`REQ-DOM-012/013`, `REQ-PROD-026/031`,
-   `REQ-PROD-006`). Today that catastrophic event produces **no operator alert, no user-facing notice,
-   and no record**. The durable-persistence work removes the data loss; this section ensures that *if*
-   the product is ever degraded or down, people are not left to discover it in silence.
+#### Telling users: status and maintenance communication
 
-There is, today, **no status surface, no alerting, no incident ownership, and no incident record** of any
-kind. The requirements below define the minimum that changes.
+When chirp is down or degraded, a person trying to use it should be able to find out that it is chirp that
+is affected and not their own connection, without guessing. That calls for a status surface or an
+in-product notice — and, critically, one that does not travel down the same path that just failed, because
+a status page served by the same process that is down tells a user nothing. The same surface carries
+advance notice of planned maintenance, and reflects recovery when service returns. Whatever it shows is
+held to the product's no-secrets/no-private-data rule (`REQ-DOM-035`), the same rule that binds the logs
+and the audit trail.
 
-### The posture, in three parts
+#### The degraded-state experience boundary
 
-**1 — Detection → a human is told.** A monitored condition over the product-health signal defines "the
-product is in trouble," and crossing it notifies a responsible human within a bounded time — not merely
-lighting up a dashboard nobody is watching.
+What a person sees on a failed action or an unreachable list — the explained error, the preserved draft,
+the routed-to-sign-in on an expired session — is designed by the experience area (`REQ-UX-*`,
+`REQ-PROD-033`, `REQ-PROD-034`). The operational requirement is the join: when a dependency the product
+needs is unavailable in production (for example the durable store, per `REQ-DOM-115`), the operated product
+fails *into* those designed states rather than into a blank screen or a process crash, and contains a
+partial failure to the capability that is actually affected where its design allows.
 
-**2 — Honest user-facing failure.** When chirp cannot serve users, the people using it see an honest,
-recoverable "something is wrong on our side" state and are never misled into thinking a failed action
-succeeded; and they have a way to learn whether a current problem is already known.
+#### Availability as an operated commitment
 
-**3 — A minimal incident commitment.** Someone owns the response, incidents are recorded, and users are
-kept informed of significant impact — proportionate to a first release, with recurrence-prevention
-tracked.
+"Reasonably available" (`REQ-PROD-040`) is only testable if it is a number. This product states an
+availability target proportionate to a small hosted service, measures it from the serving/availability
+signal (`REQ-OPS-075`) over a stated window rather than asserting it, and accounts for announced
+maintenance so a routine deploy is not counted as an unplanned outage. Incident response aims to restore
+serving within a stated time that is consistent with that target.
 
 ---
 
-### Requirements & acceptance criteria (`REQ-OPS-080..099`)
+#### Requirements: `REQ-OPS-080..099`
 
-Each requirement states what must be true from the operator's or user's side; each acceptance criterion
-is written so a stranger could check it against the live product and reach the same yes/no. `traces_to`
-records the baseline or product requirement it builds on; `verification_method` is drawn from the parent
-schema vocabulary (`manual_user_check`, `automated_test`, `inspection`, `operational_check`).
+##### REQ-OPS-080 — A serving degradation is detected, not waited for
+- **statement**: The product's serving/availability signal (`REQ-OPS-075`) is watched in production so that
+  a degradation — the product not serving its core loop, or serving it with elevated errors — is detected
+  as an operational event and does not depend on a user reporting it. Detection reaches a responsible
+  operator (`REQ-OPS-083`).
+- **acceptance_criteria**: Put the product into a state where the core loop does not work for users; within
+  a bounded time the configured detection raises a notification to the responsible operator, without a user
+  having had to report the problem first. Return the product to serving; no further alert for that incident
+  is raised.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
-#### Detection and operator notification
+##### REQ-OPS-081 — Detection is driven by the observability signals
+- **statement**: Incident detection is built on the observability signals — the serving/availability signal
+  (`REQ-OPS-075`), the request- and error-rate metrics (`REQ-OPS-072`), the saturation/headroom signal
+  (`REQ-OPS-074`), and the durable-store interaction health (`REQ-OPS-076`) — rather than on a person
+  watching a screen. The conditions that constitute an incident are expressed against those signals.
+- **acceptance_criteria**: Inspect what drives detection; each alerting condition names an observability
+  signal and a threshold or state on it. Induce an elevated error rate, approaching saturation, and a
+  store-interaction fault in turn; each is capable of being surfaced as a detected condition from its
+  signal.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-080 — Product-trouble is detected on a product-health condition, not on process liveness
-- **Statement:** A monitored condition exists that distinguishes "the product can serve users" from "the
-  process is up," and defines when chirp is **in trouble** (degraded or down). The condition is evaluated
-  against the observability area's product-health signal — the one that can report unhealthy when the
-  durable store is unreachable (`REQ-DOM-021`) — not against a state-less liveness probe. "The pod is
-  Ready" MUST NOT be sufficient to conclude the product is healthy.
-- **Acceptance criteria:** With the product running normally, the monitored product-health condition
-  reads healthy. When the product is made unable to serve users (for example, its durable store is made
-  unreachable) while the process stays alive, the monitored condition reads **in trouble** within a
-  defined, documented evaluation window — i.e. a reader can point at a signal that went bad, not only at a
-  probe that stayed green. Documentation names the condition and its threshold.
-- **Release gating:** true
-- **Traceability:** `REQ-DOM-021`, `REQ-PROD-030`; consumes the observability health signal
-  (`REQ-OPS-060..079`).
-- **Verification method:** operational_check
+##### REQ-OPS-082 — Incidents carry a proportionate severity
+- **statement**: A detected incident is classified by a small severity scheme that at least distinguishes
+  "the product is not serving its core loop" (a major incident) from "the product is degraded or partially
+  impaired but still serving" (a minor incident), so that response and communication are proportionate to
+  what is actually broken. The scheme is kept to the scale of a small hosted product.
+- **acceptance_criteria**: Find the stated severity scheme; it defines at least a major and a minor level
+  with a criterion for each expressed against the serving signal. Classify a total-outage case and a
+  partial-degradation case; each maps to the intended level.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-081 — When the product is in trouble, a responsible human is notified within a bounded time
-- **Statement:** When the detection condition (`REQ-OPS-080`) holds for a defined duration, a responsible
-  human is **actively notified** through a defined channel, rather than the problem being visible only to
-  whoever happens to look. The required outcome is "someone is told, within a stated time"; the specific
-  notification tool is out of scope.
-- **Acceptance criteria:** Inducing a sustained in-trouble condition causes a notification to reach the
-  documented responsible party within the documented time bound; clearing the condition is likewise
-  observable to that party. The notification identifies *which* product and *what* is wrong well enough to
-  begin a response. The channel and time bound are documented in the repository.
-- **Release gating:** true
-- **Traceability:** `REQ-PROD-030`, `REQ-PROD-033`; builds on `REQ-OPS-080`.
-- **Verification method:** operational_check
+##### REQ-OPS-083 — A responsible operator is identified for incident response
+- **statement**: There is a stated expectation of who is responsible for responding when an incident is
+  detected — a role, not a staffed rotation — so that a fired alert has an owner rather than reaching no
+  one. This is the operator of operator journey J9.
+- **acceptance_criteria**: Find the stated responsibility; it names the role accountable for acknowledging
+  and acting on a detected incident. A detected major incident has a defined responder; no detected incident
+  is left with no one responsible for it.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-082 — Alerts are actionable and tuned not to page a healthy product
-- **Statement:** Each alert names what is wrong, where, and where to look next (a pointer to the relevant
-  signal or a short runbook), and the alerting threshold is set so that a healthy, normally-operating
-  product does not routinely generate alerts.
-- **Acceptance criteria:** A sample alert, inspected, states the affected product, the failing condition,
-  and a next step or runbook reference; over a normal operating period with no real degradation, the
-  product does not emit spurious in-trouble alerts (no routine paging on healthy operation).
-- **Release gating:** false — a first release can ship with the plain detection-and-notification of
-  `REQ-OPS-080/081`; actionability and noise-tuning are a real improvement, not a release blocker.
-- **Traceability:** `REQ-PROD-030`; refines `REQ-OPS-081`.
-- **Verification method:** inspection
+##### REQ-OPS-084 — An incident has a defined response path
+- **statement**: A detected incident has a defined response expectation — acknowledge, investigate using the
+  observability signals and logs, communicate to users per the status requirements, and resolve — recorded
+  so the responder follows a known path rather than improvising. The detailed step-by-step runbooks are
+  deferred to later operational work; this requires that the response path exist and be written down.
+- **acceptance_criteria**: Find the recorded incident-response expectation; it covers acknowledgement,
+  investigation against the observability signals, user communication, and resolution. Walk a representative
+  incident through it; each step has a defined owner and outcome.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
 
-#### User-facing degradation and status
+##### REQ-OPS-085 — Users can learn that the product is down or degraded
+- **statement**: When the product is unavailable or degraded, a person has a way to learn that chirp itself
+  is affected — a status surface or an in-product notice — rather than being left to infer it from a
+  failed action or a spinner. The notice states, at least, that the product is experiencing a problem.
+- **acceptance_criteria**: With the product in an outage or degraded state, a user consulting the status
+  surface or in-product notice sees that chirp is affected and is not left only with an unexplained failure.
+  With the product serving normally, the surface shows normal operation.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-083 — When chirp cannot serve users, users see an honest degraded/outage state, never a broken page
-- **Statement:** When the backend is unavailable or failing (for example, the API is down or the durable
-  store is unreachable), the product presents an honest, human, recoverable "something is wrong on our
-  side — please try again" state that is distinct from ordinary user-input/validation errors, rather than
-  a blank screen, a raw error, an infinite spinner, or a silent nothing.
-- **Acceptance criteria:** With the backend made unavailable, a visitor or signed-in user loading chirp
-  sees a clear system-side problem message (visibly different from a "that handle is taken"-style
-  validation message) and an obvious way to retry; they do not see a blank/broken page or an unexplained
-  spinner that never resolves. When the backend recovers, retrying returns the user to normal use. (The
-  exact screen and copy are experience design's, `REQ-UX-*`.)
-- **Release gating:** true
-- **Traceability:** `REQ-PROD-014`, `REQ-PROD-018`, `REQ-PROD-019`, `REQ-PROD-030`; meets experience
-  design (`REQ-UX-*`).
-- **Verification method:** manual_user_check
+##### REQ-OPS-086 — The status surface does not depend on the failed product
+- **statement**: The surface users consult to learn of an outage is reachable when the product itself is
+  down — it does not depend on the serving path, the durable store, or the process that may be the thing
+  that has failed. A status page that goes down with the product conveys nothing at the moment it is needed.
+- **acceptance_criteria**: Take the serving product fully offline, including its durable store; the status
+  surface is still reachable and reports the product as unavailable. The surface's availability does not
+  require the product's serving path to be up.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-084 — During a degradation the product fails honestly and never loses the user's work silently
-- **Statement:** While chirp is degraded or down, no user action may *appear* to succeed when it did not,
-  and no degraded read may present stale or empty data as if it were current and complete. A write that
-  cannot be durably applied (post, follow/unfollow, like/unlike, profile edit) is reported as failed and
-  the user's input is preserved so it can be retried — the product does not accept work it is about to
-  drop.
-- **Acceptance criteria:** With writes made to fail (backend degraded), composing a chirp and attempting
-  to post it surfaces an honest failure and leaves the typed text intact for retry (never a false
-  "posted"); a follow/like attempted during the degradation either visibly succeeds or visibly fails, and
-  the state shown after recovery matches what actually happened — no action silently vanishes and none is
-  shown as done when it was not.
-- **Release gating:** true
-- **Traceability:** `REQ-PROD-006`, `REQ-PROD-017`, `REQ-PROD-020`, `REQ-PROD-021`, `REQ-PROD-031`.
-- **Verification method:** manual_user_check
+##### REQ-OPS-087 — Planned maintenance is announced in advance
+- **statement**: When the operator plans maintenance that will make the product unavailable or degraded,
+  users are given advance notice through the same status surface or in-product notice, stating the expected
+  window, so a planned interruption is distinguishable to a user from an unexpected outage.
+- **acceptance_criteria**: Schedule a maintenance window and publish the notice; before the window a user
+  consulting the status surface sees the planned maintenance and its expected timing. During the window the
+  interruption is presented as planned, not as an unexplained failure.
+- **verification_method**: manual_user_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-085 — Users have a way to learn whether a current problem is known
-- **Statement:** When chirp is having a known problem, a user can tell that it is known and being handled,
-  rather than being left to wonder whether the fault is theirs. For a first release the minimum is an
-  honest in-product degraded indication during an incident (satisfied together with `REQ-OPS-083`); a
-  separate, independently-hosted status channel is **not** required at the first-release bar.
-- **Acceptance criteria:** During an induced incident, a user can observe from the product that there is
-  a current, known problem (for example, the degraded-state indication of `REQ-OPS-083`) rather than only
-  a generic per-action error; documentation records where users are expected to learn status. If a
-  distinct status channel is later provided, it reflects a real incident when one is active and "all
-  clear" otherwise.
-- **Release gating:** false — the honest in-app degraded state (`REQ-OPS-083`) is the gating minimum; a
-  dedicated status channel is a near-term addition, recorded not required.
-- **Traceability:** `REQ-PROD-030`; builds on `REQ-OPS-083`.
-- **Verification method:** manual_user_check
+##### REQ-OPS-088 — Status and incident communication carries no private or secret data
+- **statement**: Nothing published on the status surface, in an in-product outage notice, or in a
+  maintenance announcement contains private account data or secret material — no credential, session token,
+  verified-contact value (`REQ-DOM-035`), nor internal secret such as a connection string or a stack trace
+  that exposes them. Telling users about an outage never leaks the data the outage is around.
+- **acceptance_criteria**: Inspect the content published for a representative outage and a representative
+  maintenance notice; it describes product status in terms a user needs and contains no credential, session
+  token, verified-contact value, connection string, or raw internal error detail that discloses private or
+  secret data.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-035
 
-#### Minimal incident handling
+##### REQ-OPS-089 — Recovery is communicated when service returns
+- **statement**: When a communicated incident is resolved and the product is serving again, the status
+  surface or in-product notice reflects the recovery, so a user who saw the outage can tell that it is over
+  rather than being left unsure whether the problem persists.
+- **acceptance_criteria**: Communicate an outage, then resolve it and restore serving; the status surface
+  updates to show the product operating normally. A user who saw the outage notice can see that service has
+  recovered.
+- **verification_method**: manual_user_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-086 — Incident-response responsibility is defined and documented
-- **Statement:** The releasable product names who is responsible for responding when chirp is in trouble,
-  so an incident has an owner instead of falling to whoever happens to notice. The responsibility is
-  documented in the repository; the specific rota/tooling is out of scope.
-- **Acceptance criteria:** The repository documents who is responsible for incident response for chirp and
-  how they are reached (by role or named point of contact), such that a stranger reading the docs can say
-  who would handle an outage. The notification channel of `REQ-OPS-081` reaches this responsible party.
-- **Release gating:** true
-- **Traceability:** `REQ-PROD-033`, `REQ-PROD-034`; pairs with `REQ-OPS-081`.
-- **Verification method:** inspection
+##### REQ-OPS-090 — The product fails into its designed degraded states
+- **statement**: When a dependency the product needs is unavailable in production — in particular the
+  durable store (`REQ-DOM-115`) — the operated product presents the user the degraded and error experiences
+  designed by the experience area (`REQ-UX-*`, `REQ-PROD-033`, `REQ-PROD-034`): an explained error, a
+  preserved in-progress draft, a routed-to-sign-in on an expired session. This requirement is the
+  operational join to those states; it does not define them.
+- **acceptance_criteria**: In production, make the durable store unreachable while the serving process stays
+  up; a user exercising the core loop meets an explained degraded or error state, not a blank page or a
+  crashed process. The states a user sees are the ones the experience design specifies.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-033, REQ-PROD-034
 
-#### REQ-OPS-087 — Incidents are recorded durably
-- **Statement:** When an incident occurs, it is recorded in a durable place — at minimum what happened,
-  when it was detected, the user-facing impact, and when it was resolved — so there is a history and a
-  basis for preventing recurrence. A lightweight record (for example, a tracked issue in the repository's
-  board) satisfies this; a dedicated incident-management system is not required.
-- **Acceptance criteria:** A past (or drill) incident has a durable record containing detection time,
-  impact summary, and resolution; the record is reachable by the responsible party from the repository or
-  its board. The format is documented so the next incident is recorded the same way.
-- **Release gating:** true
-- **Traceability:** `REQ-PROD-032`, `REQ-PROD-033`.
-- **Verification method:** inspection
+##### REQ-OPS-091 — A partial failure is contained to the affected capability
+- **statement**: When one capability is degraded rather than the whole product — for example the durable
+  store is slow but reachable — the parts of the product that can still serve continue to do so, to the
+  extent the product's design allows, rather than a single fault turning into a total outage.
+- **acceptance_criteria**: Induce degradation in one capability (for example elevated store latency); the
+  product continues to serve the surfaces that do not depend on the degraded capability, and the impact a
+  user sees is scoped to the affected capability rather than a blanket failure.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040, REQ-DOM-115
 
-#### REQ-OPS-088 — Users are kept informed of a significant incident's impact and resolution
-- **Statement:** For an incident with meaningful user impact — notably one where user data was lost or the
-  product was unavailable for an extended period — users are informed of the impact and of its resolution
-  through a channel the product controls, rather than left to infer it.
-- **Acceptance criteria:** For a defined "significant incident" (impact threshold documented), there is a
-  recorded instance of users being informed of the impact and the resolution; the threshold for informing
-  users and the channel used are documented.
-- **Release gating:** false — a near-term commitment above the first-release gating minimum
-  (`REQ-OPS-083/085`); recorded, not required for the first release.
-- **Traceability:** `REQ-PROD-030`; extends `REQ-OPS-085`.
-- **Verification method:** manual_user_check
+##### REQ-OPS-092 — A stated, proportionate availability target
+- **statement**: The product states an availability target that defines what "reasonably available"
+  (`REQ-PROD-040`) means for it — a figure proportionate to a small hosted service, expressed over a stated
+  window (for example a monthly serving-availability target). The target is written down, not left implicit.
+- **acceptance_criteria**: Find the stated availability target; it gives a specific availability figure and
+  the window it is measured over, and it is proportionate to a small hosted product rather than an
+  enterprise commitment.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
-#### REQ-OPS-089 — Each incident yields a recurrence-prevention follow-up
-- **Statement:** After an incident, its cause and at least one concrete follow-up action to reduce the
-  chance of recurrence are captured and routed to the delivery backlog, so repeated failures get fixed
-  rather than re-lived.
-- **Acceptance criteria:** An incident record (`REQ-OPS-087`) carries, or links to, a cause note and at
-  least one follow-up action filed where the backlog lives, with enough detail that someone could act on
-  it; a stranger can trace from the incident to the follow-up.
-- **Release gating:** false — a maturity step beyond the first-release bar; tracked for the operability
-  backlog.
-- **Traceability:** `REQ-PROD-032`; builds on `REQ-OPS-087`.
-- **Verification method:** inspection
+##### REQ-OPS-093 — Availability is measured from the serving signal, not asserted
+- **statement**: The availability target is measured in production from the serving/availability signal
+  (`REQ-OPS-075`) over the stated window, so that whether the product met its target is a measured fact
+  rather than a claim. Unavailability is counted when the serving signal shows the product not serving its
+  core loop.
+- **acceptance_criteria**: Over a measurement window that includes at least one serving interruption,
+  compute availability from the serving signal; the result reflects the observed interruption and can be
+  compared against the stated target to say whether it was met.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
 
----
+##### REQ-OPS-094 — Announced maintenance is accounted for in availability
+- **statement**: Availability measurement distinguishes announced planned maintenance (`REQ-OPS-087`) from
+  unplanned outage, so that routine, pre-announced deploys and maintenance do not register as unplanned
+  unavailability against the target.
+- **acceptance_criteria**: Take the product down during an announced maintenance window and, separately,
+  during an unplanned incident; the availability accounting attributes the first to planned maintenance and
+  the second to unplanned unavailability, per the stated rule.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
 
-### Section register summary
-
-| REQ-OPS | Concern | Release gating | Verification | Traces to |
-|---|---|---|---|---|
-| 080 | Detect product-trouble on a product-health condition (not liveness) | true | operational_check | REQ-DOM-021, REQ-PROD-030 |
-| 081 | Notify a responsible human within a bounded time | true | operational_check | REQ-PROD-030, REQ-PROD-033 |
-| 082 | Alerts actionable; not noisy on a healthy product | false | inspection | REQ-PROD-030 |
-| 083 | Honest user-facing degraded/outage state, never broken | true | manual_user_check | REQ-PROD-014, 018, 019, 030 |
-| 084 | Fail honestly during degradation; never lose work silently | true | manual_user_check | REQ-PROD-006, 017, 020, 021, 031 |
-| 085 | Users can learn a current problem is known | false | manual_user_check | REQ-PROD-030 |
-| 086 | Incident-response responsibility defined & documented | true | inspection | REQ-PROD-033, 034 |
-| 087 | Incidents recorded durably | true | inspection | REQ-PROD-032, 033 |
-| 088 | Users informed of significant-incident impact/resolution | false | manual_user_check | REQ-PROD-030 |
-| 089 | Recurrence-prevention follow-up per incident | false | inspection | REQ-PROD-032 |
-
-**Gating summary:** five release-gating requirements form the first-release commitment — a product in
-trouble is **detected** on a real health condition (`080`), a **human is told** (`081`), users see an
-**honest failure** (`083`) that **never loses their work** (`084`), and an incident has a **named owner**
-(`086`) and is **recorded** (`087`). The non-gating five (`082`, `085`, `088`, `089`) are honest,
-recorded cuts: alert-noise tuning, a dedicated status channel, proactive user communications, and
-post-incident follow-up discipline — real maturity steps tracked for the operability backlog, not
-first-release blockers.
-
-**Baseline consistency:** every durability-dependent requirement here references the relevant `REQ-DOM-*`
-(chiefly `REQ-DOM-021` for the health signal, and `REQ-DOM-012/013` for the restart-outage context) and
-neither restates nor alters it. Detection depends on the observability area's signals
-(`REQ-OPS-060..079`) and is written to that seam without redefining them.
+##### REQ-OPS-095 — A stated time-to-restore-serving objective for incidents
+- **statement**: Incident response works to a stated objective for how quickly serving is restored after a
+  detected outage, consistent with the availability target (`REQ-OPS-092`). This is time-to-restore
+  serving; it is distinct from the data recovery-time objective owned by backups and recovery
+  (`REQ-OPS-020..039`), which concerns restoring lost data rather than resuming service.
+- **acceptance_criteria**: Find the stated time-to-restore-serving objective; it gives a target duration
+  from detection to restored serving and is consistent with the availability target. For a representative
+  resolved incident, the time from detection to restored serving is measurable against it.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
 
 ---
 
 ## existing_followups
 
-Three follow-ups are already open on the `Nousix-LLC/nswe-demo` board. Operational readiness touches each,
-so each is **placed where it belongs** — folded into the area it most affects (or recorded here as backlog)
-with a one-line rationale — rather than re-minted as a new `REQ-OPS-*` or duplicated. None is dropped; none
-is placed under more than one home. All three are open at the time of writing.
+Three open board follow-ups predate this design and are non-release-gating hardening or
+polish. They are folded here into the operational-readiness concern each belongs to and are
+**not** minted as new `REQ-OPS-*`; where an existing requirement already covers the substance,
+that requirement is named. None gates the release.
 
-| Issue | Title (as on the board) | Placed under | Gating | Rationale |
-|-------|-------------------------|--------------|--------|-----------|
-| **#23** | infra follow-up: harden & exercise the native k3s install path | `backups_and_recovery` | non-gating (hardening) | Deterministic recovery and deploy-rollback (`REQ-OPS-029`) depend on a sound, exercised install/delivery path; hardening that path strengthens the recovery guarantee rather than adding a new requirement. |
-| **#24** | argocd follow-up: least-privilege RBAC + supply-chain hardening before the first Application | `backups_and_recovery` | non-gating (hardening) | The GitOps rollback path (`REQ-OPS-029`) runs through the Argo CD `Application`; least-privilege RBAC and supply-chain hardening protect the integrity of the delivery/rollback mechanism the recovery story relies on. |
-| **#25** | containerize follow-ups: non-blocking polish | operability backlog (no gating area) | non-gating (polish) | Explicitly non-blocking polish with no operational-readiness bar attached; tracked for the operability backlog so it is not forgotten, and intentionally not gated on first release. |
+| Issue | Summary | Folded into | Covered in substance by | Release-gating |
+|-------|---------|-------------|--------------------------|----------------|
+| #23 | Exercise and harden the native install path | `observability` | `REQ-OPS-060`, `REQ-OPS-061`, `REQ-OPS-066`, `REQ-OPS-068`, `REQ-OPS-072`, `REQ-OPS-075` — exercising the install path is where the readiness signal, the structured logs, and the serving metrics are first confirmed wired and observable in a real deployment | No |
+| #24 | Least-privilege delivery RBAC + supply-chain hardening | `limits_and_quotas` | Adjacent to the operational-security posture: the operator/administrative audit trail (`REQ-OPS-077`, `REQ-OPS-079`) records privileged action, but least-privilege RBAC on the delivery/control plane is a distinct, privileged-actor access concern not fully covered by any release-gating `REQ-OPS-*`. It is control-plane access control, distinct in subject from the public, client-facing rate and volume limits (`REQ-OPS-040..048`), and remains issue #24 as hardening | No |
+| #25 | Containerize follow-ups (non-blocking polish) | `durable_data` | Relates to the operated-deploy posture — a running deployment loses no user data to restart, redeploy, or upgrade (`REQ-OPS-001`, `REQ-OPS-003`, `REQ-OPS-004`); the containerization items are non-blocking polish on the deploy artifact, not a new durability requirement | No |
 
-**Why these are placements, not requirements.** #23 and #24 harden the delivery/recovery path that
-`REQ-OPS-029` (roll a bad deploy back to the previously-known-good running state) and `REQ-OPS-028` (a
-recovery runbook) already require; the requirement is the testable bar, and these issues are the hardening
-work that makes meeting it durable. #25 is quality polish with no readiness consequence. Each remains a live
-board item; this section records *where each sits relative to the operational-readiness design*, consistent
-with the delivery backlog's own handling of the same issues.
+**Placement rationale.** #23 is folded into `observability` because its substance — proving the
+operational signals are wired in a real deployment — is exactly what the observability requirements
+assert. #24 is folded into `limits_and_quotas` as its operational-security neighbour: it is an
+access-and-limits matter, but it bounds privileged control-plane actors rather than public clients,
+so it sits beside the public limits without being restated as one. #25 is folded into `durable_data`
+against the operated-deploy posture it polishes. Each issue appears exactly once above, is covered by
+or adjacent to a named existing requirement, and is not duplicated as a new `REQ-OPS-*`.
+
 
 ---
 
 ## requirements_and_acceptance_criteria
 
-This is the consolidated register of every `REQ-OPS-*` across the five operational areas. The full
-statement, acceptance criteria, and cross-references for each requirement live in its area section above;
-this table is the single traceable index — id, concern, release-gating flag, what it builds on, and how it
-is verified — assembled from the area registers without altering them. Ids are unique and each sits within
-its area's allocated range (`durable_data` 001–019, `backups_and_recovery` 020–039, `limits_and_quotas`
-040–059, `observability` 060–079, `status_and_incident` 080–099).
+This is the consolidated `REQ-OPS-*` register: the verbatim union of the five concern sections' requirements, in id order. Each requirement is also stated in its concern section above; this register is the single flat index of the operational-readiness requirements and is followed by the OPS traceability table. Every requirement carries a `verification_method` from the vocabulary (`manual_user_check`, `automated_test`, `inspection`, `operational_check`), a `release_gating` flag, and `traces_to` the product/domain requirement it refines (empty only for an operational-internal requirement).
 
-| REQ-OPS | Concern | Release gating | Traces to | Verification |
-|---|---|---|---|---|
-| REQ-OPS-001 | Durable state on pod-independent storage | true | REQ-DOM-013/012/014, REQ-PROD-031 | inspection |
-| REQ-OPS-002 | Survives process restart | true | REQ-DOM-012, REQ-PROD-026/031 | operational_check |
-| REQ-OPS-003 | Survives redeploy / rolling update | true | REQ-DOM-012/016, REQ-PROD-026/031 | operational_check |
-| REQ-OPS-004 | Survives reschedule to another node | true | REQ-DOM-013/012, REQ-PROD-031 | operational_check |
-| REQ-OPS-005 | Safe under >1 replica, or single-writer enforced | true | REQ-DOM-016/014, REQ-PROD-031 | inspection |
-| REQ-OPS-006 | Confirmed write is durable before it is confirmed | true | REQ-DOM-012, REQ-PROD-026/017 | operational_check |
-| REQ-OPS-007 | Every kind of domain state is durable | true | REQ-DOM-005/006/004/011/022/012, REQ-PROD-006/026 | operational_check |
-| REQ-OPS-008 | Derived state correct across the durability boundary | true | REQ-DOM-015/004, REQ-PROD-020/021/026 | operational_check |
-| REQ-OPS-009 | User content retained for life of account | true | REQ-DOM-012, REQ-PROD-026 | operational_check |
-| REQ-OPS-010 | Time-bounded durable state has an enforced lifetime | true | REQ-DOM-006/005/010, REQ-PROD-005/006 | inspection |
-| REQ-OPS-011 | Deletion is durable and bounded | true | REQ-DOM-009, REQ-PROD-010/012 | operational_check |
-| REQ-OPS-012 | Capacity honours retention; exhaustion fails safe | true | REQ-DOM-012, REQ-PROD-026/017 | operational_check |
-| REQ-OPS-013 | Durability demonstrable by a repeatable drill | true | REQ-DOM-012, REQ-PROD-031/034 | operational_check |
-| REQ-OPS-020 | Durable store backed up on a defined, recent schedule | true | REQ-DOM-012/013, REQ-PROD-031/032 | operational_check |
-| REQ-OPS-021 | A backup is complete: captures the whole durable model | true | REQ-DOM-012/015/022 | operational_check |
-| REQ-OPS-022 | Recovery point objective (RPO) defined and met | true | REQ-PROD-031/032 | operational_check |
-| REQ-OPS-023 | Recovery time objective (RTO) defined and met | true | REQ-PROD-032/034 | operational_check |
-| REQ-OPS-024 | Restore is proven by a periodic restore drill | true | REQ-DOM-012/015, REQ-PROD-032 | operational_check |
-| REQ-OPS-025 | Backup success and freshness are monitored | true | REQ-DOM-021, REQ-PROD-032 | operational_check |
-| REQ-OPS-026 | Backups stored durably and separately from the primary | true | REQ-DOM-013, REQ-PROD-032 | inspection |
-| REQ-OPS-027 | Backups access-controlled; retention defined | false | REQ-PROD-029/032 | inspection |
-| REQ-OPS-028 | A documented recovery runbook exists | true | REQ-PROD-032/034 | inspection |
-| REQ-OPS-029 | A bad deploy can be rolled back to known-good | true | REQ-DOM-019, REQ-PROD-031/032 | operational_check |
-| REQ-OPS-030 | A deploy rollback does not destroy user data | true | REQ-DOM-012/013, REQ-PROD-031 | operational_check |
-| REQ-OPS-031 | Forward schema migrations are applied safely | true | REQ-DOM-022, REQ-PROD-026/034 | operational_check |
-| REQ-OPS-032 | A failed/bad schema migration has a recovery path | true | REQ-DOM-022, REQ-PROD-032 | operational_check |
-| REQ-OPS-033 | The recovery path works on the self-hostable surface | true | REQ-PROD-034/032 | operational_check |
-| REQ-OPS-040 | Per-caller request-rate limit on the public API | true | REQ-PROD-013/030/031, REQ-DOM-019, REQ-ID-* | operational_check |
-| REQ-OPS-041 | Rate limits scoped; writes + auth endpoints tighter | true | REQ-PROD-001/003/004/007, REQ-DOM-019, REQ-ID-* | automated_test |
-| REQ-OPS-042 | 429 breach response: well-formed, non-destructive, recoverable | true | REQ-DOM-017, REQ-PROD-006 | automated_test |
-| REQ-OPS-043 | Bounded, documented request payload size; rejected early | true | REQ-DOM-002, REQ-PROD-016/030/031 | automated_test |
-| REQ-OPS-044 | Every collection bounded by a max page size + default | true | REQ-PROD-018, REQ-DOM-004/010/018 | automated_test |
-| REQ-OPS-045 | Pagination params clamp; bad cursors fail safe | false | REQ-PROD-018, REQ-DOM-004 | automated_test |
-| REQ-OPS-046 | Per-account quota bounds runaway creation / storage growth | false | REQ-DOM-012/013, REQ-PROD-031, REQ-ID-* | automated_test |
-| REQ-OPS-047 | Limits configurable with documented defaults; `/healthz` + SPA exempt | true | REQ-DOM-019, REQ-PROD-034/030 | inspection |
-| REQ-OPS-060 | Health reports unhealthy when the product cannot serve users | true | REQ-DOM-021, REQ-PROD-030 | operational_check |
-| REQ-OPS-061 | Liveness and readiness are distinct signals | true | REQ-DOM-021, REQ-PROD-030 | operational_check |
-| REQ-OPS-062 | Readiness exercises its dependency, bounded, fails closed | true | REQ-DOM-021/014 | operational_check |
-| REQ-OPS-063 | Health recovers on its own when the dependency returns | true | REQ-DOM-021, REQ-PROD-031 | operational_check |
-| REQ-OPS-064 | Health endpoint cheap, safe, self-identifying | false | REQ-PROD-034 | inspection |
-| REQ-OPS-065 | Every request produces a readable log record | true | REQ-PROD-030/034 | operational_check |
-| REQ-OPS-066 | Logs structured, parseable, emitted for collection | true | REQ-PROD-034 | inspection |
-| REQ-OPS-067 | Server faults logged with context, never silently | true | REQ-PROD-030 | operational_check |
-| REQ-OPS-068 | A request can be followed by a correlation id | true | REQ-PROD-030 | inspection |
-| REQ-OPS-069 | Logs never expose secrets or personal data | true | REQ-DOM-005/006, REQ-PROD-029 | inspection |
-| REQ-OPS-070 | Lifecycle and fatal-startup events observable in logs | true | REQ-PROD-034, REQ-DOM-019 | operational_check |
-| REQ-OPS-071 | Quantitative request metrics exposed for collection | true | REQ-PROD-030/034 | operational_check |
-| REQ-OPS-072 | Degradation visible before users feel it | true | REQ-DOM-021/016, REQ-PROD-030 | operational_check |
-| REQ-OPS-073 | Metrics exposition separable from user surface, safe to scrape | false | REQ-PROD-029/034 | inspection |
-| REQ-OPS-074 | Product health defined as named, quantitative SLIs | true | REQ-PROD-030, REQ-DOM-021 | operational_check |
-| REQ-OPS-075 | Observability documented for whoever operates the product | true | REQ-PROD-034 | manual_user_check |
-| REQ-OPS-080 | Detect product-trouble on a product-health condition | true | REQ-DOM-021, REQ-PROD-030 | operational_check |
-| REQ-OPS-081 | Notify a responsible human within a bounded time | true | REQ-PROD-030/033 | operational_check |
-| REQ-OPS-082 | Alerts actionable; not noisy on a healthy product | false | REQ-PROD-030 | inspection |
-| REQ-OPS-083 | Honest user-facing degraded/outage state, never broken | true | REQ-PROD-014/018/019/030 | manual_user_check |
-| REQ-OPS-084 | Fail honestly during degradation; never lose work silently | true | REQ-PROD-006/017/020/021/031 | manual_user_check |
-| REQ-OPS-085 | Users can learn whether a current problem is known | false | REQ-PROD-030 | manual_user_check |
-| REQ-OPS-086 | Incident-response responsibility defined and documented | true | REQ-PROD-033/034 | inspection |
-| REQ-OPS-087 | Incidents recorded durably | true | REQ-PROD-032/033 | inspection |
-| REQ-OPS-088 | Users informed of significant-incident impact/resolution | false | REQ-PROD-030 | manual_user_check |
-| REQ-OPS-089 | Recurrence-prevention follow-up per incident | false | REQ-PROD-032 | inspection |
+#### REQ-OPS-001 — A running deployment loses no user data to restart, update, or redeploy
+- **statement**: An operated chirp deployment does not lose any user data — Accounts, Chirps, Follows, Likes, Sessions — to the normal operations of running the service: restarting the serving process, updating it, and redeploying it are routine operations after which all user data is present and unchanged. This is the operational standing of the domain model's survival requirement, held as a property of the operated service rather than of a single fresh start.
+- **acceptance_criteria**: On an operated deployment, create Accounts and post Chirps, Follows, and Likes; perform each of a process restart, a redeploy, and an update as an operator would; after each, every Account and its Chirps, Follows, and Likes are present and unchanged, with no manual intervention to recover them.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-100
 
-**Register totals.** 61 requirements across the five areas: **52 release-gating**, **9 non-gating** (honest,
-recorded cuts — `REQ-OPS-027`, `045`, `046`, `064`, `073`, `082`, `085`, `088`, `089`). The non-gating items
-are expected and designed-for, scoped out of the first-release gate deliberately rather than forgotten. Ids
-`REQ-OPS-014..019`, `034..039`, `048..059`, `076..079`, and `090..099` are unused, reserved as per-area
-amendment headroom.
+#### REQ-OPS-002 — Authoritative state is operated in a durable store distinct from the serving process
+- **statement**: The deployment runs the product's authoritative state in a durable store that is a separate, persistent component from the serving process, with its own lifecycle; the serving process holds no authoritative state that exists only in its memory. The in-memory backing of the `ChirpRepository` seam at `Nousix-LLC/nswe-demo @ c805525` does not meet this and is the blocker this posture closes.
+- **acceptance_criteria**: Inspect the deployment: the durable store is a component whose lifecycle is independent of the serving process (stopping or replacing the serving process does not stop or reset the store). Confirm `REQ-DOM-113/114` hold against the operated product. No deployment configuration keeps authoritative state solely in serving-process memory.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-113, REQ-DOM-114
 
-**Verification-method mix.** Every requirement names a method from the design's closed vocabulary
-(`manual_user_check` | `automated_test` | `inspection` | `operational_check`); durability, backup/restore,
-and health behaviours are predominantly `operational_check` (a property observed against the running
-product), limit mechanics are predominantly `automated_test`, and configuration/structural properties are
-`inspection`.
+#### REQ-OPS-003 — Replacing the serving process is a routine operation that touches no user data
+- **statement**: An operator can replace or roll the serving process to a fresh instance, with no shared process memory, as a normal operation; all user data remains intact because it lives in the durable store, not the process.
+- **acceptance_criteria**: On a populated deployment, replace the serving process with a fresh instance without touching the durable store; afterward all Accounts, Chirps, Follows, Likes, and active Sessions are intact, demonstrating the authoritative state did not live in the replaced process.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-113
 
-**Traceability to the release bar.** Every release-gating `REQ-OPS-*` here is a candidate the release bar
-(`BAR-*`) must cover and the delivery backlog must carry to an issue; this register is the operational-area
-input to that cross-document traceability matrix.
+#### REQ-OPS-004 — An operated upgrade preserves existing user data
+- **statement**: Performing an upgrade in production — including a redeploy that changes how the data is shaped — preserves the user data that existed before it: afterward the prior Accounts, Chirps, Follows, and Likes are all present and still satisfy their invariants. The migration mechanics are the code work's; the preservation property across an operated upgrade is the bar's.
+- **acceptance_criteria**: On a populated deployment, perform an upgrade that changes the data's shape; afterward the Accounts, Chirps, Follows, and Likes created before the upgrade are all present and their references still resolve. No data created before the upgrade is lost or corrupted by it.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-118
+
+#### REQ-OPS-005 — An acknowledged write survives an immediate restart in production
+- **statement**: In the operated product, any create or change the product has confirmed to a person — a posted Chirp, a Follow or unfollow, a Like or unlike, a profile edit, an account deletion — is durable at the moment it is acknowledged, so a restart or process replacement happening immediately after the success response does not lose it. Durability is a correctness property of the acknowledgement, not a tendency observed over time.
+- **acceptance_criteria**: On an operated deployment, perform a write and receive the product's success response; with no further action, restart or replace the serving process; the written state is present afterward. Repeated across each write type, no acknowledged write is lost by a restart in the window immediately following its acknowledgement.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-109
+
+#### REQ-OPS-006 — Domain invariants hold after an operational restart
+- **statement**: After the serving process is restarted or replaced in production, the domain model's invariants still hold against the durable data: every reference resolves, ids are unique and never reused, each Account's follower/following counts and each Chirp's like count equal their current edges, and any applied account deletion stays applied. A restart never introduces a dangling reference, a reused id, or a count that disagrees with its edges.
+- **acceptance_criteria**: On a populated deployment, record a sample of references, ids, and counts; restart the serving process; traverse Chirps, Replies, Follows, and Likes — every referenced Account and Chirp resolves, no recorded id has moved or been reused, and the counts equal the current edges (add and remove a Follow and a Like after the restart and confirm the counts track by exactly one each way).
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-107, REQ-DOM-110, REQ-DOM-111, REQ-DOM-112
+
+#### REQ-OPS-007 — Domain invariants hold after a restore from backup (the posture backups build on)
+- **statement**: After a restore from backup, the durable data satisfies the same invariants required after a restart (`REQ-OPS-006`): references resolve, ids are unchanged and never reused, counts equal their edges, and applied deletions remain applied. A restore that brings rows back but breaks these invariants has not recovered a correct product. This is the durability posture the backups-and-recovery section's restore-correctness requirements (`REQ-OPS-020..039`) are written against.
+- **acceptance_criteria**: On a store restored from a backup of a populated deployment, traverse Chirps, Replies, Follows, and Likes — every reference resolves, recorded ids are unchanged and unreused, counts equal their edges, and any account deleted before the backup is still deleted with no dangling reference. A failing invariant is reported as an unsuccessful restore, never silently accepted.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-110, REQ-DOM-116
+
+#### REQ-OPS-008 — An interrupted write never leaves half-applied state visible
+- **statement**: A restart, crash, or process replacement that happens while a write is in progress leaves the durable data in a consistent state: the operation is observable afterward as either fully applied or not applied, never as a half-applied change with a dangling reference or a count that disagrees with its edges. Account deletion in particular is all-or-nothing across an interruption.
+- **acceptance_criteria**: Interrupt the serving process during representative writes (posting a Chirp, following, deleting an account that has Chirps, Follows, and Likes); after recovery, each interrupted operation is observably either fully applied or fully absent, and no partially applied state (a Chirp without a resolvable author, a half-deleted Account with dangling references, a count out of step with its edges) is observable.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-110, REQ-DOM-112
+
+#### REQ-OPS-009 — Durability requires the store to be operated as a reachable, persistent component
+- **statement**: Because the serving process depends on the durable store to serve, durability in production requires the store to be run as a reachable, persistent component for the life of the deployment: a serving process that cannot reach its durable state cannot serve, and a deployment that does not keep its store reachable and persistent does not meet the durability posture. This section states the dependency as a durability requirement; the readiness *signal* that reports store reachability is the observability section's (`REQ-OPS-060..079`), building on `REQ-DOM-115` / `REQ-PROD-039`.
+- **acceptance_criteria**: Confirm the deployment runs the durable store as a persistent, reachable component independent of the serving process. With the store made unreachable to the serving process, the product does not serve user writes or reads from process memory as if durable (it does not silently fall back to a non-durable store). The readiness signal's behaviour under this condition is verified by the observability section.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039, REQ-DOM-115
+
+#### REQ-OPS-010 — Live user data is retained for the life of the account
+- **statement**: While an account exists, its user data — the Account and its profile, its Chirps, its Follows, and its Likes — is retained in full: the product does not silently expire, age out, or delete a live account's content as a side effect of operating the service. Any retention limit the product chooses to place on a live account's content is stated, not silent.
+- **acceptance_criteria**: Create an account with Chirps, Follows, and Likes; over a sustained operating period with ordinary restarts and redeploys, the account's content remains present and complete without the holder re-creating it. If any component of a live account's data is subject to an age-out, that limit is found stated in the product's retention posture (`REQ-OPS-016`) rather than observed as an unexplained loss.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037
+
+#### REQ-OPS-011 — Deleted-account data is removed within a stated, bounded window
+- **statement**: When an account is deleted, its data is removed or de-identified per the stated deletion outcome (`REQ-DOM-037`, `REQ-DOM-112`) within a stated, bounded retention window after the deletion is applied, rather than being retained indefinitely. The product states the window; after it elapses, the deleted account's data is not retained in the live durable store.
+- **acceptance_criteria**: Find the product's stated deleted-account retention window. Delete an account that has Chirps, Follows, and Likes; after the deletion is applied the stated outcome holds immediately (the account cannot sign in, no dangling reference remains per `REQ-DOM-112`), and after the stated window the deleted account's data is no longer present in the live durable store. The behaviour matches the stated window.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-037, REQ-DOM-112
+
+#### REQ-OPS-012 — Backups do not retain deleted-account data beyond a stated bound
+- **statement**: Deleted-account data does not persist indefinitely in backups: a stated maximum backup-retention bound limits how long a deleted account's data can remain recoverable in backups, after which the backups holding it have aged out. This section fixes that such a bound exists and is consistent with the deletion posture; the backup cadence, retention schedule, and ageing mechanics are the backups-and-recovery section's (`REQ-OPS-020..039`), which builds on this.
+- **acceptance_criteria**: Find the product's stated maximum backup-retention bound and confirm it is consistent with the deleted-account retention posture (`REQ-OPS-011`). Confirm that no backup older than that bound is retained, so deleted-account data cannot be recovered from backups indefinitely. The concrete cadence and schedule are verified against the backups-and-recovery requirements.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-037, REQ-PROD-038
+
+#### REQ-OPS-013 — Retention and export cover the same per-account set
+- **statement**: The data the product retains for a live account is the data it can hand that person back: while an account exists, its retained profile, full set of Chirps, and full set of followed Accounts are enumerable for the holder's own export (`REQ-DOM-117`). A person cannot be told their data is kept while being unable to obtain it, and export reflects the committed durable state at the time of the request.
+- **acceptance_criteria**: For a signed-in account with Chirps and Follows, the data the product retains (per `REQ-OPS-010`) and the data a self-service export yields (per `REQ-DOM-117`) are the same set — the account's profile, its complete Chirps, and its complete followed Accounts — matching the committed durable state. No retained category of a person's own data is absent from what they can export.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-117, REQ-PROD-019
+
+#### REQ-OPS-014 — Sessions are retained only for their bounded lifetime
+- **statement**: Active Sessions are retained durably so a signed-in person is not silently signed out by a restart or redeploy (`REQ-DOM-106`), but only until the Session ends (sign-out) or passes its lifetime (`REQ-DOM-030`, `REQ-DOM-031`); an ended or expired Session is not retained as usable and is never revived by a restart or a restore.
+- **acceptance_criteria**: Sign in to obtain a Session; restart or redeploy the service — a request carrying that Session's token is still accepted as the same account. Separately, end a Session (or let it pass its lifetime), then restart and restore from a backup taken while it was active — a request carrying that token is refused in both cases, not revived.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-106, REQ-DOM-030, REQ-DOM-031
+
+#### REQ-OPS-015 — Private identity data is retained durably, kept non-public, and removed with the account
+- **statement**: The account-associated Credential and Verified contact are retained durably as part of the Account for the life of the account so a person can still sign in and still recover after a restart (`REQ-DOM-102`), are never exposed in any public response, and are removed or de-identified with the account under the stated deletion outcome and within the deleted-account retention window (`REQ-OPS-011`). Their structure and handling are the identity/security design's (`REQ-ID-*`); this requirement is that they persist, stay non-public, and are not retained past the account.
+- **acceptance_criteria**: After a restart and a restore, a person can still sign in with their Credential and the recovery path still recognises their Verified contact, and neither value ever appears in any public response. After an account is deleted and the retention window elapses, the deleted account's Credential and Verified contact are no longer retained in the live durable store.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-102, REQ-DOM-037
+
+#### REQ-OPS-016 — The retention and deletion posture is stated where users and operators can find it
+- **statement**: The product states, in a place a user and an operator can find, what user data it keeps, for how long, and what account deletion removes and when — covering live-account retention (`REQ-OPS-010`), the deleted-account window (`REQ-OPS-011`), the backup bound (`REQ-OPS-012`), and session and private-identity-data handling (`REQ-OPS-014`, `REQ-OPS-015`). A releasable product does not leave its retention and deletion promise implicit.
+- **acceptance_criteria**: Locate the product's stated data-retention and deletion posture as a user/operator could. It names what is retained, the live-account retention, the deleted-account retention window, the backup-retention bound, and session/private-data handling, and these statements match the behaviour verified by `REQ-OPS-010..015`. A discrepancy between the stated posture and the observed behaviour is a defect.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-037
+
+#### REQ-OPS-020 — Durable user data is backed up on a stated, regular cadence
+- **statement**: An operated chirp deployment backs up its durable user data — Accounts, Chirps, Follows, Likes — on a stated, regular cadence, as a standing part of operating the service rather than as an occasional manual act. The product states what the cadence is; backups are produced on it without an operator having to remember to take them.
+- **acceptance_criteria**: Find the product's stated backup cadence. On an operated deployment with user data, observe over a period spanning several cadence intervals that a backup is produced each interval without manual intervention, and that each produced backup is recorded where an operator can see it was taken. Backups appear on the stated cadence, not ad hoc.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-116
+
+#### REQ-OPS-021 — Backups are retained for a stated, bounded period
+- **statement**: Backups are kept for a stated retention period that bounds how far back an operator can recover, and that period is bounded above so backups do not accumulate indefinitely. The retention period is consistent with the maximum backup-retention bound the durable-data section fixed for deleted-account data (`REQ-OPS-012`): a backup older than the stated period has aged out and is no longer retained.
+- **acceptance_criteria**: Find the product's stated backup-retention period and confirm it is consistent with the deleted-account backup bound (`REQ-OPS-012`). On an operated deployment, confirm that backups within the period are available to restore from and that backups older than the period are no longer retained. The oldest available backup is no older than the stated period.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-037
+
+#### REQ-OPS-022 — Each backup is an internally consistent point-in-time image
+- **statement**: A single backup captures the durable user data as of one point in time, consistent within itself: restoring it yields a state in which the model's invariants hold, not a smear of rows captured at different moments with references that no longer resolve. A backup taken while the product is serving does not record a Chirp without its author or a count out of step with its edges.
+- **acceptance_criteria**: Take a backup of a populated deployment while writes are occurring; restore it to a separate store and traverse Chirps, Replies, Follows, and Likes — every reference resolves, ids are unchanged and unreused, and counts equal their edges, with no partially captured write visible. A backup that restores to a state violating an invariant is treated as an unusable backup, not accepted.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-116, REQ-DOM-110
+
+#### REQ-OPS-023 — Backups are stored independently of the primary durable store
+- **statement**: Backups are held in a location whose loss is independent of the primary durable store, so that the failure a backup protects against — losing the store — does not also take the backups. A backup kept only alongside the data it backs up does not meet this posture.
+- **acceptance_criteria**: Inspect where backups are stored relative to the primary durable store; the two do not share a single point of failure such that losing the primary store also loses its backups. Confirm that, with the primary store made unavailable, a retained backup is still reachable to restore from.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
+
+#### REQ-OPS-024 — A stated recovery-point objective (tolerable data loss)
+- **statement**: The product states a recovery-point objective: the maximum amount of recent durable data, measured as a time window of work, that a recovery is permitted to lose in a disaster. The objective is set no tighter than the backup cadence (`REQ-OPS-020`) can actually achieve, so it is a target a recovery can meet rather than an aspiration.
+- **acceptance_criteria**: Find the product's stated recovery-point objective and confirm it is consistent with the backup cadence (a recovery-point objective of N cannot be met by a cadence coarser than N). The stated objective names a bounded quantity of tolerable data loss, not "none" without a mechanism that would achieve none.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
+
+#### REQ-OPS-025 — A stated recovery-time objective (tolerable downtime)
+- **statement**: The product states a recovery-time objective: the maximum time the product may be unavailable to users while an operator recovers it from backup after a disaster. The objective is a commitment the restore procedure is built and rehearsed to meet, bounding the downtime a person experiences in a recovery.
+- **acceptance_criteria**: Find the product's stated recovery-time objective. It names a bounded recovery duration and is consistent with the availability the product commits to (`REQ-PROD-040`). The objective is the one the restore drill (`REQ-OPS-031`) measures the restore against.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-PROD-040
+
+#### REQ-OPS-026 — A restore is a defined, operator-performable procedure
+- **statement**: Recovering the product from a backup is a defined procedure an operator can follow, not an improvisation invented during an incident: the steps to restore the durable store from a retained backup and return the product to service are written down and performable by an operator who did not design the system. The scripting and tooling are the code work's; that a defined, followable procedure exists is the bar's.
+- **acceptance_criteria**: Locate the product's stated restore procedure. An operator who did not build the system can follow it to restore a deployment from a retained backup and return it to service, without needing knowledge that is not in the procedure. The procedure names what is restored (Accounts, Chirps, Follows, Likes) and how the product is returned to serving.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-116
+
+#### REQ-OPS-027 — A restore brings back accounts, chirps, follows, and likes intact and consistent
+- **statement**: A restore from a retained backup returns the durable user data intact and consistent: the Accounts, Chirps, Follows, and Likes present at the backup's point in time are all present afterward, and they satisfy the same invariants a restart must satisfy (`REQ-OPS-007`) — references resolve, ids are unchanged and never reused, counts equal their edges, and any account deleted before the backup stays deleted with no dangling reference. A restore that brings rows back but breaks these invariants has not recovered a correct product.
+- **acceptance_criteria**: On a store restored from a backup of a populated deployment, every Account, Chirp, Follow, and Like present at the backup point is present; traverse Chirps, Replies, Follows, and Likes — every reference resolves, recorded ids are unchanged and unreused, counts equal their edges, and an account deleted before the backup is still deleted with no dangling reference. A failing invariant is reported as an unsuccessful restore, never silently accepted.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-116, REQ-DOM-110, REQ-DOM-111, REQ-DOM-107
+
+#### REQ-OPS-028 — An exercised restore meets the stated recovery-point and recovery-time objectives
+- **statement**: When the restore procedure is exercised, it recovers the product within the stated recovery-time objective (`REQ-OPS-025`) and loses no more than the stated recovery-point objective (`REQ-OPS-024`): the downtime and data loss a real recovery incurs are within the commitments the product has made, not merely asserted by them.
+- **acceptance_criteria**: Perform a timed restore from a backup on a representative deployment: measure the elapsed time from starting the restore to the product serving users again — it is within the stated recovery-time objective — and measure the data lost relative to the disaster point — it is within the stated recovery-point objective. A drill that exceeds either objective is a defect in the objective or the procedure, reported rather than ignored.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
+
+#### REQ-OPS-029 — A failed deploy can be rolled back to the last working version with no user-data loss
+- **statement**: A deploy that fails or ships a broken product can be rolled back to the last working version as a routine operation, and the rollback loses no user data: the Accounts, Chirps, Follows, and Likes present before the deploy are all present after the rollback. Rolling back is a recovery operation an operator can perform, not a reason to lose data.
+- **acceptance_criteria**: On a populated deployment, perform a deploy and then roll it back to the prior version as an operator would; afterward the product serves on the prior version and every Account, Chirp, Follow, and Like that existed before the deploy is present and unchanged. The rollback requires no manual reconstruction of user data.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-037, REQ-DOM-118
+
+#### REQ-OPS-030 — A data-damaging deploy can be recovered from by restore
+- **statement**: A deploy that damages durable data — corrupting it or losing part of it despite the preserve-existing-data requirement (`REQ-DOM-118`) — can be recovered from by restoring from a backup taken before the deploy, returning the product to a correct state consistent with `REQ-OPS-027`. The preserve-data property is the first line; a restore path for when it is breached is the second.
+- **acceptance_criteria**: Simulate a deploy that damages or loses durable data on a populated deployment; recover by restoring from a pre-deploy backup following the restore procedure (`REQ-OPS-026`); afterward the durable data is intact and consistent per `REQ-OPS-027`, recovered to the pre-deploy point within the stated objectives (`REQ-OPS-028`). The product does not depend on the damaging deploy being reversible in place.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-118, REQ-DOM-116
+
+#### REQ-OPS-031 — Backups are periodically proven restorable
+- **statement**: Backups are proven restorable on a recurring basis, not merely produced: a restore from a recent backup is exercised periodically against a store where its correctness can be checked, and the exercise verifies the restored data satisfies its invariants (`REQ-OPS-027`) and meets the stated objectives (`REQ-OPS-028`). A backup that has never been restored is not yet known to be a backup.
+- **acceptance_criteria**: Find the product's stated restore-drill cadence and the record of its most recent drills. Confirm a restore from a recent backup has been exercised within that cadence, that the drill checked the restored data's invariants and timing, and that a failed drill is recorded and acted on rather than passed over. The drill is recurring, not a one-time pre-release event.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038, REQ-DOM-116
+
+#### REQ-OPS-032 — A failed or missing backup is surfaced, not silent
+- **statement**: When a scheduled backup fails or does not run, that fact is surfaced to operators rather than passing silently, so a deployment cannot drift into having no recent usable backup without anyone knowing. This section requires that the failure is detectable and raised; the alerting signal that carries it to an operator is the observability section's (`REQ-OPS-060..079`), building on the same posture.
+- **acceptance_criteria**: Induce a backup failure or a missed scheduled backup on an operated deployment; the condition is surfaced to operators (a visible failure state or alert), not absorbed silently. Confirm that a run of successful backups and a failed backup are distinguishable to an operator. The signal's shape is verified against the observability requirements.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
+
+#### REQ-OPS-033 — The backup and recovery posture is stated where an operator can find it
+- **statement**: The product states, in a place an operator can find, its backup cadence and retention (`REQ-OPS-020`, `REQ-OPS-021`), its recovery-point and recovery-time objectives (`REQ-OPS-024`, `REQ-OPS-025`), and the restore and rollback procedures (`REQ-OPS-026`, `REQ-OPS-029`). A releasable product that can be operated does not leave its recovery procedure to be reconstructed under incident pressure.
+- **acceptance_criteria**: Locate the product's stated backup-and-recovery posture as an operator could. It names the cadence, the retention period, the recovery-point and recovery-time objectives, and the restore and rollback procedures, and these statements match the behaviour verified by `REQ-OPS-020..032`. A discrepancy between the stated posture and the observed behaviour is a defect.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-038
+
+#### REQ-OPS-040 — The public request rate is bounded per client
+- **statement**: The product bounds the rate of requests it will accept from a single client, so one client cannot drive the service past what it can serve for everyone else by issuing requests as fast as it can. The threshold, the client-identification basis, and the enforcement point are set operationally; the requirement is that a bound exists and is applied per client rather than only in aggregate.
+- **acceptance_criteria**: From a single client, issue requests far faster than a person using the product would; past a point the product stops serving the excess (it refuses or slows further requests) rather than accepting every request without limit, and other clients continue to be served normally meanwhile.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
+
+#### REQ-OPS-041 — State-creating actions are rate-limited more tightly than reads
+- **statement**: The actions that create state — posting a chirp, following an account, liking a chirp — are subject to their own, tighter rate limit than ordinary reads, so a single account cannot flood timelines or follow/like en masse at machine speed. The specific limits are operational; the requirement is that a write-rate bound exists on each state-creating action.
+- **acceptance_criteria**: Signed in, perform one state-creating action (for example posting) repeatedly, far faster than a person would; past a point the product refuses or throttles the further writes rather than accepting them without limit. Reading remains possible within its own limit while writes are being throttled.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
+
+#### REQ-OPS-042 — Created volume per account is bounded over a longer window
+- **statement**: Beyond the short-term write rate, the volume of content a single account can create over a longer rolling window is bounded, so an account cannot flood others by sustaining an at-the-limit rate indefinitely. This is the "volume" half of the product's rate-and-volume requirement, distinct from the burst limit of REQ-OPS-041. The window and the cap are operational; the requirement is that a sustained-volume bound exists per account.
+- **acceptance_criteria**: With one account, create content continuously at or just under the per-action rate limit for a sustained period; the product eventually bounds the account's further creation for that window rather than allowing unbounded accumulation, and resumes in a later window.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
+
+#### REQ-OPS-043 — Oversized request bodies are refused at the edge
+- **statement**: The product enforces a maximum request body size and refuses a request whose body exceeds it before the body is processed, so a client cannot consume unbounded memory or processing by sending an enormous payload. The cap is consistent with the already-fixed content bounds — a chirp body of 1–280 characters (REQ-DOM-012) and a handle of 1–15 characters (REQ-DOM-002) — and exists to stop payloads far larger than any valid request, not to re-enforce those per-field rules.
+- **acceptance_criteria**: Send a request whose body is far larger than any valid chirp or form submission (for example a multi-megabyte body to a write endpoint); the product refuses it with an error and does not attempt to process the oversized body. A normal, within-bounds request to the same endpoint succeeds.
+- **verification_method**: automated_test
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041, REQ-DOM-012, REQ-DOM-002
+
+#### REQ-OPS-044 — List reads are served only as bounded pages
+- **statement**: Every endpoint that returns a list enforces the server's maximum page size, so no client can force the product to assemble and return an unbounded result in one response. This is the operational enforcement of the domain requirement that timelines are read a bounded page at a time behind an opaque cursor (REQ-DOM-027, REQ-DOM-218); the operational requirement is that the cap holds on every list surface, not only the timeline.
+- **acceptance_criteria**: Request a list with no page size, and request one with a page size well above the server maximum; in both cases the response carries at most the server's maximum number of items, with a continuation cursor when more remain, rather than the full result set.
+- **verification_method**: automated_test
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041, REQ-DOM-218, REQ-DOM-027
+
+#### REQ-OPS-045 — Exceeding a limit refuses or throttles the excess and says so
+- **statement**: When any limit in this section is exceeded, the product rejects or throttles the excess rather than serving it without bound, and tells the caller with a typed, machine-readable error carrying a distinct category for being rate- or size-limited, consistent with the error contract (REQ-DOM-220). The caller can tell "you were limited" apart from other failures and can act on it (for example back off and retry later).
+- **acceptance_criteria**: Drive any one of the limits above past its threshold; the response is an error whose machine-readable category identifies it as a limit being hit — distinct from a validation error or a not-found — and the excess work is not performed. The error is the typed contract category, not an ad-hoc string.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041, REQ-DOM-220
+
+#### REQ-OPS-046 — The unauthenticated surface is limited too
+- **statement**: The request-rate limit applies to the unauthenticated surface — the landing page, sign-up, and sign-in — identified by client rather than by account, so a client cannot escape limiting simply by not signing in, and the pre-sign-in surface cannot be used as an unbounded overwhelm or credential-guessing vector. This bounds request volume on that surface; account-specific abuse handling and credential-attempt lockout belong to the identity design (REQ-ID-*) and are referenced, not owned here.
+- **acceptance_criteria**: Without signing in, issue requests to a public, unauthenticated endpoint far faster than a person would; past a point the product refuses or throttles the excess, the same as for an authenticated client.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-041
+
+#### REQ-OPS-047 — Under aggregate overload, the product sheds rather than collapses
+- **statement**: When total load exceeds what the product can serve — even from many within-limit clients at once — the product sheds or throttles the excess and keeps serving the traffic it can, rather than failing wholesale for everyone. This protects the product's reachability and reasonable availability (REQ-PROD-040) and is the aggregate counterpart to the per-client limits above. The capacity point and the shedding policy are operational.
+- **acceptance_criteria**: Apply aggregate load beyond the product's serving capacity; the product continues to serve a bounded share of requests (and reports the rest as limited or unavailable per REQ-OPS-045) rather than becoming unresponsive to all callers, and it recovers to normal service when the load subsides.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040, REQ-PROD-041
+
+#### REQ-OPS-048 — Limits sit above ordinary use
+- **statement**: The limits in this section are set above the rate and volume of ordinary legitimate use, so a person using the product normally — reading a timeline, posting through the day, following and liking as they browse — does not hit them. Limiting targets abuse and overload, not use; a limit that blocks a normal person is a worse product than a more generous one. The thresholds are operational, but the requirement that they clear ordinary use is a release requirement.
+- **acceptance_criteria**: As one person, use the product the way a normal user would over a normal session — browse, post several times, follow and like a reasonable number of accounts — without being rate- or volume-limited. Only usage well beyond what a person does by hand triggers a limit.
+- **verification_method**: manual_user_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-041
+
+#### REQ-OPS-060 — Readiness is a distinct signal meaning "serving users"
+- **statement**: The product exposes a readiness signal, distinct from liveness, whose meaning is that the
+  product can serve users — not merely that the process is running. An operator or orchestrator
+  can obtain readiness separately from liveness.
+- **acceptance_criteria**: With the product fully able to serve, the readiness signal reports ready. With
+  the product running but unable to serve its core loop, the readiness signal reports not-ready while the
+  liveness signal still reports alive; the two are separately observable and can disagree.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039, REQ-DOM-226
+
+#### REQ-OPS-061 — Readiness reflects durable-store reachability
+- **statement**: The readiness signal reports not-ready when the product's durable store is unreachable
+  from the serving process, and ready when the store is reachable and the product can serve. Readiness is
+  not satisfied by process liveness alone.
+- **acceptance_criteria**: Make the durable store unreachable to a running serving process; the readiness
+  signal reports not-ready. Restore reachability so the product can serve; the readiness signal reports
+  ready.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039, REQ-DOM-115
+
+#### REQ-OPS-062 — Liveness reports process health only, not dependency health
+- **statement**: The liveness signal reports whether the serving process itself is alive and able to make
+  progress; it does not report not-alive solely because a recoverable dependency (such as the durable
+  store) is temporarily unreachable. A dependency outage is reflected in readiness, not liveness, so an
+  orchestrator restarts a genuinely crashed process but does not kill one that is alive and waiting on its
+  store.
+- **acceptance_criteria**: With the durable store unreachable but the serving process otherwise healthy,
+  the liveness signal reports alive while the readiness signal reports not-ready. Liveness reports
+  not-alive only when the process itself cannot make progress.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-226
+
+#### REQ-OPS-063 — The health/readiness endpoint is unauthenticated and exposes no private data
+- **statement**: The health and readiness signal can be queried without an account or session, so an
+  operator or orchestrator can reach it, and its response discloses no private account data and no
+  internal secret — it conveys serving status, not the contents of the system.
+- **acceptance_criteria**: Query the health/readiness endpoint with no session; it responds with the
+  serving status. Inspect the response; it contains no credential, session token, verified-contact value,
+  or other private account data, and no secret such as a connection string.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-DOM-226, REQ-DOM-035
+
+#### REQ-OPS-064 — Readiness is machine-consumable
+- **statement**: The readiness signal is expressed so that an orchestrator or load balancer can
+  mechanically distinguish ready from not-ready without interpreting prose — a decidable ready/not-ready
+  outcome an automated caller can branch on.
+- **acceptance_criteria**: Inspect the readiness signal while ready and while not-ready; in each state the
+  signal carries a machine-distinguishable indication of the state (such that an automated caller routes
+  traffic only when ready) without requiring a human to read a message.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039
+
+#### REQ-OPS-065 — Readiness tracks current state and recovers without a restart
+- **statement**: The readiness signal reflects the product's current ability to serve, continuously: when
+  the condition that made it not-ready clears (for example the durable store becomes reachable again), the
+  signal returns to ready on its own, without restarting or redeploying the serving process.
+- **acceptance_criteria**: Drive readiness to not-ready by making the durable store unreachable, then
+  restore reachability without restarting the process; the readiness signal returns to ready on its own.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-039
+
+#### REQ-OPS-066 — Operational events are recorded in a structured, parseable form
+- **statement**: The product records its operational events as structured, machine-parseable records with
+  consistent fields (such as a timestamp, a severity, an event category, and an outcome), not as
+  free-form prose, so an operator can search and filter them rather than reading them line by line.
+- **acceptance_criteria**: Exercise the product and inspect its log output; operational events appear as
+  structured records with consistent, named fields that a log tool can parse and filter.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**:
+
+#### REQ-OPS-067 — Logs let one request be followed end to end
+- **statement**: Log records carry a correlation identifier that ties together the events of a single
+  request or user action, so an operator can follow one action through the product's logs from receipt to
+  outcome.
+- **acceptance_criteria**: Perform a single user action that touches more than one logged step; the log
+  records for that action share a correlation identifier by which they can be selected together and read in
+  order.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**:
+
+#### REQ-OPS-068 — Logs cover the events needed to explain operation and failure
+- **statement**: The log record covers the operational events an operator needs to answer "what is it
+  doing, and what went wrong": request handling and its outcome, errors and failures with a cause
+  category, process start and stop, changes in durable-store connectivity, and authentication outcomes
+  (success and failure) without the secret material involved.
+- **acceptance_criteria**: Provoke, in a running product, a handled request, an error, a process restart, a
+  loss and recovery of durable-store connectivity, and a failed and a successful sign-in; each is present
+  in the logs as a distinct, categorized event with enough context to tell what happened.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-069 — Logs never contain credentials or private account data
+- **statement**: Credentials, session tokens, verified-contact values, and any other private account data
+  (`REQ-DOM-035`) are never written to the product's logs, in any field, at any severity. Operational
+  visibility is never obtained at the cost of exposing private data in the logs.
+- **acceptance_criteria**: Exercise sign-up, sign-in, recovery, and session use so that private data flows
+  through the product, then inspect the logs produced; no credential, session token, verified-contact
+  value, or other private account field appears in any log record. References to an account in a log use a
+  non-secret identifier, not its private data.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-035
+
+#### REQ-OPS-070 — Severity is applied consistently
+- **statement**: Log records carry a severity that is applied consistently, so an operator can separate
+  normal operation from warnings and errors by filtering on severity rather than by reading every line.
+- **acceptance_criteria**: Inspect logs from a period that includes both normal operation and at least one
+  error; normal events and error events carry distinct severities consistent with their nature, and
+  filtering to error severity surfaces the error events.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**:
+
+#### REQ-OPS-071 — Errors are logged with enough context to investigate
+- **statement**: When the product logs an error it includes enough diagnostic context — what operation
+  failed, a cause category, and identifiers needed to locate the affected request or resource — that an
+  operator can investigate without reproducing the failure, subject always to the no-secrets/no-PII rule
+  (`REQ-OPS-069`).
+- **acceptance_criteria**: Provoke a representative failure; its log record names the failing operation and
+  a cause category and carries a correlation or resource identifier sufficient to investigate, and contains
+  no private account data or secret.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-DOM-035
+
+#### REQ-OPS-072 — The product exposes request-rate and error-rate metrics
+- **statement**: The product exposes serving metrics that report the rate of requests it is handling and
+  the rate that are failing, broken down enough to see which class of surface is affected (for example
+  reads versus writes, or by outcome category). Metric labels carry no private account data.
+- **acceptance_criteria**: Generate a known mix of successful and failing requests; the metrics reflect the
+  request rate and the error rate, distinguishable by surface class or outcome. Inspect the metric labels;
+  they contain no handle-linked private data, credential, or contact value.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040, REQ-DOM-035
+
+#### REQ-OPS-073 — Request latency is observable as a distribution
+- **statement**: The product exposes request-handling latency as a distribution (not only an average), so
+  that a product which is up but slow — tail latency degrading while the mean looks acceptable — is
+  visible.
+- **acceptance_criteria**: Drive traffic including some slow requests; the latency metric reflects the
+  spread of response times (for example percentiles or buckets), not a single averaged value, and the slow
+  requests are visible in the distribution.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-074 — A saturation/headroom signal is observable
+- **statement**: The product exposes a saturation or headroom signal — a measure of how close it is to its
+  serving capacity, such as in-flight work against available capacity — so that approaching overload is
+  detectable before it turns into errors or timeouts.
+- **acceptance_criteria**: Drive load toward the product's capacity; the saturation signal rises as
+  headroom shrinks, giving an observable indication of approaching overload ahead of widespread failures.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-075 — A serving/availability signal detects a degraded product
+- **statement**: The product exposes an availability or serving signal sufficient to detect that it is
+  degraded or not serving its core loop — the signal on which the status-and-incident posture
+  (`REQ-OPS-080..099`) builds incident detection. It makes "the product is not serving users" an
+  observable fact rather than an inference from complaints.
+- **acceptance_criteria**: Put the product into a degraded state in which the core loop does not work for
+  users; the serving/availability signal reflects the degradation. Return it to serving; the signal
+  reflects recovery. The signal is suitable to drive automated detection.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-076 — Durable-store interaction is observable
+- **statement**: Because serving now depends on the durable store, the product exposes the health of its
+  interaction with that store — the rate of store errors and the latency of store operations — so an
+  operator can tell a store problem from an application problem.
+- **acceptance_criteria**: Induce elevated store latency or store errors; the product's store-interaction
+  metrics reflect it, distinguishably from application-level request errors.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-DOM-115
+
+#### REQ-OPS-077 — Administrative actions are recorded in an audit trail
+- **statement**: Every action taken through the supported administrative surface (`REQ-PROD-028`) —
+  assisting a user's recovery, removing content, and disabling or actioning an account — is recorded in an
+  audit trail that captures the acting operator/administrator identity, the action taken, the target
+  account or content, and the time.
+- **acceptance_criteria**: Through the supported administrative surface, assist a user's recovery, remove a
+  named chirp, and action an account; each action produces an audit entry naming who acted, what they did,
+  which account or content was affected, and when. An administrative action that reaches accounts or
+  content leaves no untraced path.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-028
+
+#### REQ-OPS-078 — Audit records are durable and not silently editable
+- **statement**: Audit-trail entries are durable — they survive restart and redeploy like the rest of the
+  product's authoritative state — and are not silently editable or erasable through the product's ordinary
+  surfaces, so the trail remains trustworthy when it is reviewed after the fact.
+- **acceptance_criteria**: Produce audit entries, then restart or redeploy the product; the entries are
+  still present and unchanged. No ordinary product surface offers a way to alter or delete an existing
+  audit entry without trace.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-028
+
+#### REQ-OPS-079 — The audit trail carries no secrets or private data
+- **statement**: The audit trail records who acted, what they did, and on which account or content using
+  stable, non-secret identifiers, and never stores credentials, session tokens, or verified-contact values
+  (`REQ-DOM-035`). The same no-secrets/no-PII rule that binds the logs binds the audit trail.
+- **acceptance_criteria**: Inspect audit entries produced by representative administrative actions; each
+  names the actor, action, and target by non-secret identifier and contains no credential, session token,
+  or verified-contact value.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-035
+
+#### REQ-OPS-080 — A serving degradation is detected, not waited for
+- **statement**: The product's serving/availability signal (`REQ-OPS-075`) is watched in production so that
+  a degradation — the product not serving its core loop, or serving it with elevated errors — is detected
+  as an operational event and does not depend on a user reporting it. Detection reaches a responsible
+  operator (`REQ-OPS-083`).
+- **acceptance_criteria**: Put the product into a state where the core loop does not work for users; within
+  a bounded time the configured detection raises a notification to the responsible operator, without a user
+  having had to report the problem first. Return the product to serving; no further alert for that incident
+  is raised.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-081 — Detection is driven by the observability signals
+- **statement**: Incident detection is built on the observability signals — the serving/availability signal
+  (`REQ-OPS-075`), the request- and error-rate metrics (`REQ-OPS-072`), the saturation/headroom signal
+  (`REQ-OPS-074`), and the durable-store interaction health (`REQ-OPS-076`) — rather than on a person
+  watching a screen. The conditions that constitute an incident are expressed against those signals.
+- **acceptance_criteria**: Inspect what drives detection; each alerting condition names an observability
+  signal and a threshold or state on it. Induce an elevated error rate, approaching saturation, and a
+  store-interaction fault in turn; each is capable of being surfaced as a detected condition from its
+  signal.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-082 — Incidents carry a proportionate severity
+- **statement**: A detected incident is classified by a small severity scheme that at least distinguishes
+  "the product is not serving its core loop" (a major incident) from "the product is degraded or partially
+  impaired but still serving" (a minor incident), so that response and communication are proportionate to
+  what is actually broken. The scheme is kept to the scale of a small hosted product.
+- **acceptance_criteria**: Find the stated severity scheme; it defines at least a major and a minor level
+  with a criterion for each expressed against the serving signal. Classify a total-outage case and a
+  partial-degradation case; each maps to the intended level.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-083 — A responsible operator is identified for incident response
+- **statement**: There is a stated expectation of who is responsible for responding when an incident is
+  detected — a role, not a staffed rotation — so that a fired alert has an owner rather than reaching no
+  one. This is the operator of operator journey J9.
+- **acceptance_criteria**: Find the stated responsibility; it names the role accountable for acknowledging
+  and acting on a detected incident. A detected major incident has a defined responder; no detected incident
+  is left with no one responsible for it.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-084 — An incident has a defined response path
+- **statement**: A detected incident has a defined response expectation — acknowledge, investigate using the
+  observability signals and logs, communicate to users per the status requirements, and resolve — recorded
+  so the responder follows a known path rather than improvising. The detailed step-by-step runbooks are
+  deferred to later operational work; this requires that the response path exist and be written down.
+- **acceptance_criteria**: Find the recorded incident-response expectation; it covers acknowledgement,
+  investigation against the observability signals, user communication, and resolution. Walk a representative
+  incident through it; each step has a defined owner and outcome.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-085 — Users can learn that the product is down or degraded
+- **statement**: When the product is unavailable or degraded, a person has a way to learn that chirp itself
+  is affected — a status surface or an in-product notice — rather than being left to infer it from a
+  failed action or a spinner. The notice states, at least, that the product is experiencing a problem.
+- **acceptance_criteria**: With the product in an outage or degraded state, a user consulting the status
+  surface or in-product notice sees that chirp is affected and is not left only with an unexplained failure.
+  With the product serving normally, the surface shows normal operation.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-086 — The status surface does not depend on the failed product
+- **statement**: The surface users consult to learn of an outage is reachable when the product itself is
+  down — it does not depend on the serving path, the durable store, or the process that may be the thing
+  that has failed. A status page that goes down with the product conveys nothing at the moment it is needed.
+- **acceptance_criteria**: Take the serving product fully offline, including its durable store; the status
+  surface is still reachable and reports the product as unavailable. The surface's availability does not
+  require the product's serving path to be up.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-087 — Planned maintenance is announced in advance
+- **statement**: When the operator plans maintenance that will make the product unavailable or degraded,
+  users are given advance notice through the same status surface or in-product notice, stating the expected
+  window, so a planned interruption is distinguishable to a user from an unexpected outage.
+- **acceptance_criteria**: Schedule a maintenance window and publish the notice; before the window a user
+  consulting the status surface sees the planned maintenance and its expected timing. During the window the
+  interruption is presented as planned, not as an unexplained failure.
+- **verification_method**: manual_user_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-088 — Status and incident communication carries no private or secret data
+- **statement**: Nothing published on the status surface, in an in-product outage notice, or in a
+  maintenance announcement contains private account data or secret material — no credential, session token,
+  verified-contact value (`REQ-DOM-035`), nor internal secret such as a connection string or a stack trace
+  that exposes them. Telling users about an outage never leaks the data the outage is around.
+- **acceptance_criteria**: Inspect the content published for a representative outage and a representative
+  maintenance notice; it describes product status in terms a user needs and contains no credential, session
+  token, verified-contact value, connection string, or raw internal error detail that discloses private or
+  secret data.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-DOM-035
+
+#### REQ-OPS-089 — Recovery is communicated when service returns
+- **statement**: When a communicated incident is resolved and the product is serving again, the status
+  surface or in-product notice reflects the recovery, so a user who saw the outage can tell that it is over
+  rather than being left unsure whether the problem persists.
+- **acceptance_criteria**: Communicate an outage, then resolve it and restore serving; the status surface
+  updates to show the product operating normally. A user who saw the outage notice can see that service has
+  recovered.
+- **verification_method**: manual_user_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-090 — The product fails into its designed degraded states
+- **statement**: When a dependency the product needs is unavailable in production — in particular the
+  durable store (`REQ-DOM-115`) — the operated product presents the user the degraded and error experiences
+  designed by the experience area (`REQ-UX-*`, `REQ-PROD-033`, `REQ-PROD-034`): an explained error, a
+  preserved in-progress draft, a routed-to-sign-in on an expired session. This requirement is the
+  operational join to those states; it does not define them.
+- **acceptance_criteria**: In production, make the durable store unreachable while the serving process stays
+  up; a user exercising the core loop meets an explained degraded or error state, not a blank page or a
+  crashed process. The states a user sees are the ones the experience design specifies.
+- **verification_method**: manual_user_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-033, REQ-PROD-034
+
+#### REQ-OPS-091 — A partial failure is contained to the affected capability
+- **statement**: When one capability is degraded rather than the whole product — for example the durable
+  store is slow but reachable — the parts of the product that can still serve continue to do so, to the
+  extent the product's design allows, rather than a single fault turning into a total outage.
+- **acceptance_criteria**: Induce degradation in one capability (for example elevated store latency); the
+  product continues to serve the surfaces that do not depend on the degraded capability, and the impact a
+  user sees is scoped to the affected capability rather than a blanket failure.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040, REQ-DOM-115
+
+#### REQ-OPS-092 — A stated, proportionate availability target
+- **statement**: The product states an availability target that defines what "reasonably available"
+  (`REQ-PROD-040`) means for it — a figure proportionate to a small hosted service, expressed over a stated
+  window (for example a monthly serving-availability target). The target is written down, not left implicit.
+- **acceptance_criteria**: Find the stated availability target; it gives a specific availability figure and
+  the window it is measured over, and it is proportionate to a small hosted product rather than an
+  enterprise commitment.
+- **verification_method**: inspection
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-093 — Availability is measured from the serving signal, not asserted
+- **statement**: The availability target is measured in production from the serving/availability signal
+  (`REQ-OPS-075`) over the stated window, so that whether the product met its target is a measured fact
+  rather than a claim. Unavailability is counted when the serving signal shows the product not serving its
+  core loop.
+- **acceptance_criteria**: Over a measurement window that includes at least one serving interruption,
+  compute availability from the serving signal; the result reflects the observed interruption and can be
+  compared against the stated target to say whether it was met.
+- **verification_method**: operational_check
+- **release_gating**: true
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-094 — Announced maintenance is accounted for in availability
+- **statement**: Availability measurement distinguishes announced planned maintenance (`REQ-OPS-087`) from
+  unplanned outage, so that routine, pre-announced deploys and maintenance do not register as unplanned
+  unavailability against the target.
+- **acceptance_criteria**: Take the product down during an announced maintenance window and, separately,
+  during an unplanned incident; the availability accounting attributes the first to planned maintenance and
+  the second to unplanned unavailability, per the stated rule.
+- **verification_method**: inspection
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+#### REQ-OPS-095 — A stated time-to-restore-serving objective for incidents
+- **statement**: Incident response works to a stated objective for how quickly serving is restored after a
+  detected outage, consistent with the availability target (`REQ-OPS-092`). This is time-to-restore
+  serving; it is distinct from the data recovery-time objective owned by backups and recovery
+  (`REQ-OPS-020..039`), which concerns restoring lost data rather than resuming service.
+- **acceptance_criteria**: Find the stated time-to-restore-serving objective; it gives a target duration
+  from detection to restored serving and is consistent with the availability target. For a representative
+  resolved incident, the time from detection to restored serving is measurable against it.
+- **verification_method**: operational_check
+- **release_gating**: false
+- **traces_to**: REQ-PROD-040
+
+### OPS traceability table
+
+`REQ-OPS-*` → the product/domain requirements it refines, with its release-gating flag. An empty `traces_to` marks an operational-internal requirement that refines no single product/domain requirement.
+
+| REQ-OPS | release_gating | traces_to |
+|---------|----------------|-----------|
+| REQ-OPS-001 | true | REQ-PROD-037, REQ-DOM-100 |
+| REQ-OPS-002 | true | REQ-PROD-037, REQ-DOM-113, REQ-DOM-114 |
+| REQ-OPS-003 | true | REQ-PROD-037, REQ-DOM-113 |
+| REQ-OPS-004 | true | REQ-PROD-037, REQ-DOM-118 |
+| REQ-OPS-005 | true | REQ-PROD-037, REQ-DOM-109 |
+| REQ-OPS-006 | true | REQ-DOM-107, REQ-DOM-110, REQ-DOM-111, REQ-DOM-112 |
+| REQ-OPS-007 | true | REQ-DOM-110, REQ-DOM-116 |
+| REQ-OPS-008 | true | REQ-DOM-110, REQ-DOM-112 |
+| REQ-OPS-009 | true | REQ-PROD-039, REQ-DOM-115 |
+| REQ-OPS-010 | true | REQ-PROD-037 |
+| REQ-OPS-011 | true | REQ-DOM-037, REQ-DOM-112 |
+| REQ-OPS-012 | true | REQ-DOM-037, REQ-PROD-038 |
+| REQ-OPS-013 | true | REQ-DOM-117, REQ-PROD-019 |
+| REQ-OPS-014 | true | REQ-DOM-106, REQ-DOM-030, REQ-DOM-031 |
+| REQ-OPS-015 | true | REQ-DOM-102, REQ-DOM-037 |
+| REQ-OPS-016 | true | REQ-PROD-037, REQ-DOM-037 |
+| REQ-OPS-020 | true | REQ-PROD-038, REQ-DOM-116 |
+| REQ-OPS-021 | true | REQ-PROD-038, REQ-DOM-037 |
+| REQ-OPS-022 | true | REQ-DOM-116, REQ-DOM-110 |
+| REQ-OPS-023 | true | REQ-PROD-038 |
+| REQ-OPS-024 | true | REQ-PROD-038 |
+| REQ-OPS-025 | true | REQ-PROD-038, REQ-PROD-040 |
+| REQ-OPS-026 | true | REQ-PROD-038, REQ-DOM-116 |
+| REQ-OPS-027 | true | REQ-DOM-116, REQ-DOM-110, REQ-DOM-111, REQ-DOM-107 |
+| REQ-OPS-028 | true | REQ-PROD-038 |
+| REQ-OPS-029 | true | REQ-PROD-037, REQ-DOM-118 |
+| REQ-OPS-030 | true | REQ-DOM-118, REQ-DOM-116 |
+| REQ-OPS-031 | true | REQ-PROD-038, REQ-DOM-116 |
+| REQ-OPS-032 | true | REQ-PROD-038 |
+| REQ-OPS-033 | true | REQ-PROD-038 |
+| REQ-OPS-040 | true | REQ-PROD-041 |
+| REQ-OPS-041 | true | REQ-PROD-041 |
+| REQ-OPS-042 | true | REQ-PROD-041 |
+| REQ-OPS-043 | true | REQ-PROD-041, REQ-DOM-012, REQ-DOM-002 |
+| REQ-OPS-044 | true | REQ-PROD-041, REQ-DOM-218, REQ-DOM-027 |
+| REQ-OPS-045 | true | REQ-PROD-041, REQ-DOM-220 |
+| REQ-OPS-046 | true | REQ-PROD-041 |
+| REQ-OPS-047 | false | REQ-PROD-040, REQ-PROD-041 |
+| REQ-OPS-048 | false | REQ-PROD-041 |
+| REQ-OPS-060 | true | REQ-PROD-039, REQ-DOM-226 |
+| REQ-OPS-061 | true | REQ-PROD-039, REQ-DOM-115 |
+| REQ-OPS-062 | true | REQ-DOM-226 |
+| REQ-OPS-063 | true | REQ-DOM-226, REQ-DOM-035 |
+| REQ-OPS-064 | true | REQ-PROD-039 |
+| REQ-OPS-065 | true | REQ-PROD-039 |
+| REQ-OPS-066 | true | — |
+| REQ-OPS-067 | false | — |
+| REQ-OPS-068 | true | REQ-PROD-040 |
+| REQ-OPS-069 | true | REQ-DOM-035 |
+| REQ-OPS-070 | false | — |
+| REQ-OPS-071 | false | REQ-DOM-035 |
+| REQ-OPS-072 | true | REQ-PROD-040, REQ-DOM-035 |
+| REQ-OPS-073 | false | REQ-PROD-040 |
+| REQ-OPS-074 | false | REQ-PROD-040 |
+| REQ-OPS-075 | true | REQ-PROD-040 |
+| REQ-OPS-076 | false | REQ-DOM-115 |
+| REQ-OPS-077 | true | REQ-PROD-028 |
+| REQ-OPS-078 | false | REQ-PROD-028 |
+| REQ-OPS-079 | true | REQ-DOM-035 |
+| REQ-OPS-080 | true | REQ-PROD-040 |
+| REQ-OPS-081 | true | REQ-PROD-040 |
+| REQ-OPS-082 | false | REQ-PROD-040 |
+| REQ-OPS-083 | true | REQ-PROD-040 |
+| REQ-OPS-084 | false | REQ-PROD-040 |
+| REQ-OPS-085 | true | REQ-PROD-040 |
+| REQ-OPS-086 | true | REQ-PROD-040 |
+| REQ-OPS-087 | false | REQ-PROD-040 |
+| REQ-OPS-088 | true | REQ-DOM-035 |
+| REQ-OPS-089 | false | REQ-PROD-040 |
+| REQ-OPS-090 | true | REQ-PROD-033, REQ-PROD-034 |
+| REQ-OPS-091 | false | REQ-PROD-040, REQ-DOM-115 |
+| REQ-OPS-092 | true | REQ-PROD-040 |
+| REQ-OPS-093 | true | REQ-PROD-040 |
+| REQ-OPS-094 | false | REQ-PROD-040 |
+| REQ-OPS-095 | false | REQ-PROD-040 |

@@ -43,7 +43,8 @@ describes **the work to make it true**. They are connected by the shared id sche
 - Each requirement (`REQ-<AREA>-NNN`) states a condition from the user's or operator's side with testable
   acceptance criteria and a `release_gating` flag.
 - Each release‑bar criterion (`BAR-NNN`) is a concrete, checkable release condition that references the
-  `REQ-*` it enforces and names how to verify it.
+  `REQ-*` it enforces and names how to verify it, and carries the stage (`usable_early` or `releasable`)
+  at which it must hold.
 - Each **backlog issue** carries acceptance criteria that cite the `REQ-*`/`BAR-*` it satisfies and the
   design section it traces to, and sits under exactly one **epic** — where one epic is a single coherent,
   landable code goal. The epics are ordered to reach a usable product early (the `usable_early` stage of
