@@ -3,9 +3,9 @@
 //! Everything the server does to durable state goes through [`ChirpRepository`]. The trait is the
 //! single boundary between the transport/service layers and the store, which is what lets the demo
 //! run entirely in memory today and swap in a real database later without touching a handler. The
-//! default implementation is [`InMemoryRepository`] (see the [`in_memory`] module); a SQLite/`sqlx`
-//! backing could be added as a second implementor of this same trait, but is explicitly optional
-//! and is never required for `cargo test`.
+//! default implementation is [`InMemoryRepository`] (see the [`in_memory`] module); the
+//! `postgres` feature provides [`PostgresRepository`](crate::repository::postgres::PostgresRepository)
+//! as a second implementor backed by a real database, and is never required for `cargo test`.
 //!
 //! # Why a trait, and why `async`
 //!
@@ -38,17 +38,95 @@
 //! for a known handle and [`resolve_token`](ChirpRepository::resolve_token) maps a presented token
 //! back to its [`UserId`]. Token storage lives behind the trait so the
 //! api-layer's auth extractor can resolve a bearer token without owning any session state.
+//!
+//! # Release-bar additions (issue #66, REQ-DOM-018)
+//!
+//! The release bar requires the seam to carry more than today's operations. Those capabilities are
+//! added here **additively** — the methods above are unchanged — as new `async fn`s expressed in
+//! the same [`chirp_types`] surface and returning the same [`ServerError`] contract, so the trait
+//! stays object-safe and the transport layer is untouched. Each entry of the contract's
+//! `capability_set.release_bar_additions` maps to one or more methods:
+//!
+//! | Capability (`capability_set`) | Method(s) |
+//! |-------------------------------|-----------|
+//! | `credential_set_verify` | [`set_credential`](ChirpRepository::set_credential), [`verify_credential`](ChirpRepository::verify_credential) |
+//! | `session_invalidation` | [`invalidate_session`](ChirpRepository::invalidate_session) |
+//! | `account_recovery` | [`begin_account_recovery`](ChirpRepository::begin_account_recovery), [`complete_account_recovery`](ChirpRepository::complete_account_recovery) |
+//! | `profile_update` | [`update_profile`](ChirpRepository::update_profile) |
+//! | `account_deletion_cascade` | [`delete_account`](ChirpRepository::delete_account) |
+//! | `data_export` | [`export_user_data`](ChirpRepository::export_user_data) |
+//! | `follower_following_listing` | [`list_followers`](ChirpRepository::list_followers), [`list_following`](ChirpRepository::list_following) |
+//! | `chirp_removal` | [`remove_chirp`](ChirpRepository::remove_chirp) |
+//! | `account_suspension` | [`set_account_suspension`](ChirpRepository::set_account_suspension) |
+//! | `store_health` | [`store_health`](ChirpRepository::store_health) |
+//!
+//! These signatures are fully implemented in both [`InMemoryRepository`] and
+//! [`PostgresRepository`](crate::repository::postgres::PostgresRepository). The store-free test
+//! suite exercises the in-memory path; the durable path is exercised in integration tests.
+//!
+//! # Transient-state lifetime and cleanup (REQ-OPS-010, #67 / BAR-022)
+//!
+//! Three durable-state classes are **intentionally transient**: sessions, account-recovery tokens,
+//! and materialised data-export artefacts. Each carries a bounded, documented lifetime stamped in
+//! an `expires_at` column, and expired rows are removed by one uniform sweep,
+//! [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state). This is the
+//! store-side half of the `retention_and_capacity_honoured` guarantee: transient state does not
+//! live forever, an expired row is never served (it is treated as absent on read), and a sweep
+//! reclaims it — while **user content** (users, chirps, follows, likes) is retained for the life of
+//! the account and is **never** touched by the sweep. The authoritative lifetime *values* (e.g. how
+//! long a session is valid) are owned by EPIC-IDENTITY (`REQ-ID-*`); this seam only **enforces** a
+//! bounded lifetime with a documented durable default and sweeps what has expired — it does not
+//! choose the security policy. *When* the sweep runs (a scheduled job, an operational cron) is an
+//! operational concern owned by deployment, not by this store seam.
+//!
+//! # Life-of-account content retention (REQ-OPS-010, #67 / BAR-022)
+//!
+//! The opposite-polarity guarantee to the transient-state sweep above, and a first-class store
+//! invariant in its own right: **user content is retained for the life of the account, with no
+//! silent expiry.** The content classes — users, chirps, follows, and likes — carry **no
+//! `expires_at` column** and are reachable by **no** lifetime, expiry, or sweep path.
+//! [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state) deletes only
+//! from the three transient tables and never references a content table, so running it — on any
+//! schedule, any number of times — never removes live content.
+//!
+//! Content leaves the durable store on exactly one path: an explicit, caller-initiated
+//! [`delete_account`](ChirpRepository::delete_account) (the `account_deletion_cascade` capability),
+//! which hard-removes the account and cascades its whole content graph atomically. The remaining
+//! content mutations retract only what the caller explicitly asked for, never anything by the
+//! passage of time — [`unfollow`](ChirpRepository::unfollow) / [`unlike`](ChirpRepository::unlike)
+//! remove the one named edge, and [`remove_chirp`](ChirpRepository::remove_chirp) is a *soft*
+//! moderation removal that **retains the row** (the chirp is no longer served, not deleted). There
+//! is therefore no mechanism by which content ages out of the store on its own: absent an explicit
+//! account deletion, an account's content persists for the account's lifetime. This is the
+//! `content_retained_life_of_account` identity, upheld by every implementor of [`ChirpRepository`]
+//! and asserted by the `content_retained_life_of_account` test in each backing.
 
 pub mod in_memory;
 
+/// The serialized shape of a user's data export (the `data_export` capability), shared by both
+/// backings so they produce identical export documents. Crate-internal: the export is an opaque
+/// string on the seam, not a `chirp-types` wire type.
+mod export;
+
+/// The durable PostgreSQL backing (compiling scaffold), behind the optional `postgres` feature.
+///
+/// Gated so the default build and the store-free test suite pull in neither `sqlx` nor a database;
+/// production builds enable `--features postgres` and select it at the composition root when a
+/// connection string is configured. See the [`postgres`] module and ADR-0001.
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 pub use in_memory::InMemoryRepository;
+
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresRepository;
 
 use async_trait::async_trait;
 use chirp_types::api::{
     AuthResponse, CreateChirpRequest, CreateUserRequest, FollowResponse, LikeResponse,
     LoginRequest, Page, SessionToken, TimelineQuery,
 };
-use chirp_types::domain::{Chirp, User};
+use chirp_types::domain::{Chirp, User, Username};
 use chirp_types::ids::{ChirpId, UserId};
 
 use crate::error::ServerError;
@@ -59,6 +137,34 @@ pub const DEFAULT_TIMELINE_LIMIT: u32 = 20;
 /// The hard ceiling on a timeline page size. A requested limit above this is clamped down to it, so
 /// a client cannot force an unbounded page.
 pub const MAX_TIMELINE_LIMIT: u32 = 100;
+
+/// The per-class tally returned by
+/// [`sweep_expired_transient_state`](ChirpRepository::sweep_expired_transient_state): how many
+/// expired rows of each transient durable-state class the sweep removed.
+///
+/// A field counts rows whose enforced lifetime had elapsed (`expires_at <= now`) and that the sweep
+/// therefore reclaimed. Zero is the normal steady state; a non-zero count is reclaimed transient
+/// state, never lost user content (the sweep touches only these three classes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TransientSweep {
+    /// Expired `sessions` rows removed. An expired session already fails to resolve
+    /// (`resolve_token` treats it as absent); the sweep reclaims the row.
+    pub sessions: u64,
+    /// Expired `recovery_tokens` rows removed. An expired recovery challenge is already rejected by
+    /// `complete_account_recovery`; the sweep reclaims the row.
+    pub recovery_tokens: u64,
+    /// Expired `export_artifacts` rows removed — materialised data-export documents past their
+    /// documented retention window.
+    pub export_artifacts: u64,
+}
+
+impl TransientSweep {
+    /// The total number of expired transient rows removed across all three classes.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.sessions + self.recovery_tokens + self.export_artifacts
+    }
+}
 
 /// Abstracts all durable state for the chirp server behind one replaceable boundary.
 ///
@@ -72,6 +178,10 @@ pub const MAX_TIMELINE_LIMIT: u32 = 100;
 /// * **At most one like per `(user, chirp)`** — [`like`](Self::like) / [`unlike`](Self::unlike) are
 ///   idempotent.
 /// * **Timelines are reverse-chronological** — newest chirp first.
+/// * **User content is retained for the life of the account** — users, chirps, follows, and likes
+///   carry no expiry and are removed by no lifetime/sweep/expiry path; content leaves the store only
+///   by an explicit [`delete_account`](Self::delete_account) cascade (the
+///   `content_retained_life_of_account` identity; see the [module docs](self)).
 ///
 /// The trait is object-safe (`Arc<dyn ChirpRepository>`) and `Send + Sync` so it can be shared as
 /// axum application state across concurrent requests.
@@ -184,4 +294,200 @@ pub trait ChirpRepository: Send + Sync {
     ///
     /// [`NotFound`](ServerError::NotFound) if the chirp (or the user) does not exist.
     async fn unlike(&self, user: UserId, chirp: ChirpId) -> Result<LikeResponse, ServerError>;
+
+    // ---- Release-bar additions (issue #66, REQ-DOM-018 / §4.2) -----------------------------------
+    // Added additively; everything above is unchanged. Each method below realizes an entry of the
+    // contract's `capability_set.release_bar_additions`. The durable behaviour is implemented
+    // downstream; see the module docs for the capability→method map.
+
+    /// Sets (or replaces) the durable credential (e.g. a password) for `user`.
+    ///
+    /// Part of the `credential_set_verify` capability: credentialed sign-in replaces the demo's
+    /// handle-only login. The credential protocol and at-rest representation are owned downstream
+    /// (identity & trust, `REQ-ID-*`); this method fixes only the seam.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist; [`Internal`](ServerError::Internal)
+    /// if the durable store cannot record the credential.
+    async fn set_credential(&self, user: UserId, secret: &str) -> Result<(), ServerError>;
+
+    /// Verifies a presented `secret` for the account identified by `username`, returning the
+    /// authenticated [`UserId`] on success.
+    ///
+    /// Part of the `credential_set_verify` capability.
+    ///
+    /// # Errors
+    ///
+    /// [`Unauthorized`](ServerError::Unauthorized) if the handle is unknown or the secret does not
+    /// match the stored credential.
+    async fn verify_credential(
+        &self,
+        username: &Username,
+        secret: &str,
+    ) -> Result<UserId, ServerError>;
+
+    /// Invalidates a durable session (deliberate sign-out), so the token no longer
+    /// [`resolve_token`](ChirpRepository::resolve_token)s.
+    ///
+    /// Realizes the `session_invalidation` capability. Idempotent: invalidating an already-invalid
+    /// token succeeds.
+    ///
+    /// # Errors
+    ///
+    /// [`Internal`](ServerError::Internal) if the durable store cannot record the invalidation.
+    async fn invalidate_session(&self, token: &SessionToken) -> Result<(), ServerError>;
+
+    /// Begins account recovery for the account identified by `username` (issues/delivers a recovery
+    /// challenge).
+    ///
+    /// Part of the `account_recovery` capability. The challenge mechanism (token issuance, delivery,
+    /// lifetime) is owned downstream (identity & trust, `REQ-ID-*`).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no account has that handle.
+    async fn begin_account_recovery(&self, username: &Username) -> Result<(), ServerError>;
+
+    /// Completes account recovery: validates `recovery_token` for `username` and sets `new_secret`
+    /// as the account's credential.
+    ///
+    /// Part of the `account_recovery` capability.
+    ///
+    /// # Errors
+    ///
+    /// [`Unauthorized`](ServerError::Unauthorized) if the recovery token is unknown, expired, or does
+    /// not match the account.
+    async fn complete_account_recovery(
+        &self,
+        username: &Username,
+        recovery_token: &str,
+        new_secret: &str,
+    ) -> Result<(), ServerError>;
+
+    /// Updates the mutable profile fields (`display_name`, `bio`) of `user` and returns the updated
+    /// profile. The handle and id are immutable identity and are never changed here (`REQ-DOM-008`).
+    ///
+    /// Realizes the `profile_update` capability.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist.
+    async fn update_profile(
+        &self,
+        user: UserId,
+        display_name: String,
+        bio: Option<String>,
+    ) -> Result<User, ServerError>;
+
+    /// Deletes `user` and cascades removal of their chirps, follow edges, likes, sessions, and the
+    /// denormalized counts on the accounts they touched — atomically.
+    ///
+    /// Realizes the `account_deletion_cascade` capability. The multi-write atomicity guarantee is a
+    /// durable-store concern (`REQ-DOM-015`); this method fixes the seam.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist.
+    async fn delete_account(&self, user: UserId) -> Result<(), ServerError>;
+
+    /// Exports all of `user`'s data as a single serialized export document.
+    ///
+    /// Realizes the `data_export` capability. The concrete export-document shape is a wire-contract
+    /// concern settled downstream (`REQ-DOM-010` / `REQ-DOM-017`); the seam returns the materialized
+    /// artifact as an opaque serialized string so no new `chirp-types` DTO is introduced here.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist; [`Internal`](ServerError::Internal)
+    /// if the export cannot be materialized.
+    async fn export_user_data(&self, user: UserId) -> Result<String, ServerError>;
+
+    /// Returns one page of the accounts following `user`, newest-first, using the same opaque-cursor
+    /// paging as [`timeline`](ChirpRepository::timeline).
+    ///
+    /// Part of the `follower_following_listing` capability.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist.
+    async fn list_followers(
+        &self,
+        user: UserId,
+        query: TimelineQuery,
+    ) -> Result<Page<User>, ServerError>;
+
+    /// Returns one page of the accounts `user` follows, newest-first, using the same opaque-cursor
+    /// paging as [`timeline`](ChirpRepository::timeline).
+    ///
+    /// Part of the `follower_following_listing` capability.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `user` does not exist.
+    async fn list_following(
+        &self,
+        user: UserId,
+        query: TimelineQuery,
+    ) -> Result<Page<User>, ServerError>;
+
+    /// Removes `chirp` on behalf of `actor` — the chirp's author removing their own post, or a
+    /// moderator acting on abuse.
+    ///
+    /// Realizes the `chirp_removal` capability. The authorization boundary (author vs. moderator) is
+    /// fixed in the model (`REQ-DOM-020`) and enforced downstream (`REQ-ID-*`).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if the chirp does not exist;
+    /// [`Forbidden`](ServerError::Forbidden) if `actor` is not permitted to remove it.
+    async fn remove_chirp(&self, actor: UserId, chirp: ChirpId) -> Result<(), ServerError>;
+
+    /// Sets (`suspended = true`) or clears (`suspended = false`) the moderation suspension state of
+    /// `target`, on behalf of moderator `actor`.
+    ///
+    /// Realizes the `account_suspension` capability — a moderation action reserved to an
+    /// operator/moderator role (`REQ-DOM-011`, `REQ-DOM-020`).
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if `target` does not exist;
+    /// [`Forbidden`](ServerError::Forbidden) if `actor` is not a moderator.
+    async fn set_account_suspension(
+        &self,
+        actor: UserId,
+        target: UserId,
+        suspended: bool,
+    ) -> Result<(), ServerError>;
+
+    /// Reports durable-store health: `Ok(())` when the backing store is reachable and able to serve,
+    /// an error otherwise.
+    ///
+    /// Realizes the `store_health` capability, backing the product's store-reachability health signal
+    /// (`REQ-DOM-021`).
+    ///
+    /// # Errors
+    ///
+    /// [`Internal`](ServerError::Internal) if the backing store is unreachable or unhealthy.
+    async fn store_health(&self) -> Result<(), ServerError>;
+
+    /// Removes every expired row of transient durable state — sessions, account-recovery tokens,
+    /// and materialised export artefacts — returning the per-class count reclaimed.
+    ///
+    /// This is the cleanup half of the transient-lifetime contract (see the [module docs](self)).
+    /// "Expired" is `expires_at <= now`; a row carrying no expiry (a session whose `expires_at` is
+    /// unset) is **never** swept, and **user content** (users, chirps, follows, likes) is never
+    /// touched — the sweep reclaims only transient state whose documented lifetime has elapsed, so
+    /// the life-of-account retention guarantee is upheld. The sweep is a confirmed-write operation:
+    /// it composes with the store's transaction mechanism without weakening atomicity or durability
+    /// (`confirmed_write_durable`, `multiwrite_atomic`) and inherits the capacity-fail-safe write
+    /// path, so a store out of capacity is reported as a failed action rather than a partial or
+    /// falsely-confirmed cleanup. Idempotent in effect: running it twice in a row reclaims nothing
+    /// the second time (the first run already removed the expired rows).
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`](ServerError::Unavailable) if the store is out of capacity;
+    /// [`Internal`](ServerError::Internal) if the cleanup cannot be durably committed.
+    async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError>;
 }

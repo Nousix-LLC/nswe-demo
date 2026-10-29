@@ -616,3 +616,199 @@ mod pagination {
         assert!(page.next_cursor.is_none());
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Readiness probe — `GET /readyz` invokes the repository's store-health capability and maps the
+// result to the readiness convention (200 ready / 503 not-ready), distinct from the state-free
+// `/healthz` liveness probe. The mapping is backing-agnostic — it depends only on the `store_health`
+// trait method, so it behaves identically for every `ChirpRepository` implementor (the in-memory
+// default and the durable PostgreSQL backing alike). These tests assert BOTH arms through the real
+// transport stack: the healthy arm over the default in-memory store, and the unhealthy arm over a
+// focused test double whose `store_health` errors.
+// ---------------------------------------------------------------------------------------------
+mod readiness {
+    use super::*;
+
+    use async_trait::async_trait;
+    use chirp_server::repository::TransientSweep;
+    use chirp_server::{ChirpRepository, ServerError};
+    use chirp_types::api::{SessionToken, TimelineQuery};
+    use chirp_types::domain::Username;
+    use chirp_types::ids::UserId;
+
+    #[tokio::test]
+    async fn readyz_reports_ready_when_the_store_is_healthy() {
+        // The default in-memory store is always reachable, so `store_health` is `Ok` → 200 ready.
+        let app = TestApp::new();
+        let resp = app.get("/readyz", None).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["service"], "chirp-server");
+        assert!(body["version"].is_string(), "version is reported");
+    }
+
+    #[tokio::test]
+    async fn readyz_reports_not_ready_when_the_store_is_unhealthy() {
+        // Over a backing whose `store_health` errors, the probe maps `Err(_)` → 503 not-ready
+        // (NOT the 500 that the error would render as through the `ServerError` response path), and
+        // leaks no underlying error detail onto the wire.
+        let router = build_router(AppState::new(Arc::new(UnhealthyStore)));
+        let request = Request::builder()
+            .method("GET")
+            .uri("/readyz")
+            .body(Body::empty())
+            .expect("request builds");
+        let response: Response<Body> = router
+            .oneshot(request)
+            .await
+            .expect("router is infallible for a well-formed request");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body collects")
+            .to_bytes()
+            .to_vec();
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("readiness body is JSON");
+        assert_eq!(body["status"], "not_ready");
+        assert_eq!(body["service"], "chirp-server");
+    }
+
+    /// A [`ChirpRepository`] test double whose durable store is unhealthy: `store_health` returns an
+    /// error and every other method is unreachable in these tests (the readiness probe calls only
+    /// `store_health`). It exists solely to drive the `Err(_)` → 503 arm of `GET /readyz`,
+    /// independent of any concrete backing.
+    struct UnhealthyStore;
+
+    #[async_trait]
+    impl ChirpRepository for UnhealthyStore {
+        async fn store_health(&self) -> Result<(), ServerError> {
+            Err(ServerError::Internal(
+                "test double: durable store is unhealthy".to_owned(),
+            ))
+        }
+
+        // --- Unreachable in the readiness tests: the probe calls only `store_health`. ------------
+        async fn create_user(&self, _request: CreateUserRequest) -> Result<User, ServerError> {
+            unimplemented!()
+        }
+        async fn get_user(&self, _id: UserId) -> Result<User, ServerError> {
+            unimplemented!()
+        }
+        async fn login(&self, _request: LoginRequest) -> Result<AuthResponse, ServerError> {
+            unimplemented!()
+        }
+        async fn resolve_token(&self, _token: &SessionToken) -> Result<UserId, ServerError> {
+            unimplemented!()
+        }
+        async fn create_chirp(
+            &self,
+            _author: UserId,
+            _request: CreateChirpRequest,
+        ) -> Result<Chirp, ServerError> {
+            unimplemented!()
+        }
+        async fn timeline(
+            &self,
+            _viewer: UserId,
+            _query: TimelineQuery,
+        ) -> Result<Page<Chirp>, ServerError> {
+            unimplemented!()
+        }
+        async fn follow(
+            &self,
+            _follower: UserId,
+            _followee: UserId,
+        ) -> Result<FollowResponse, ServerError> {
+            unimplemented!()
+        }
+        async fn unfollow(
+            &self,
+            _follower: UserId,
+            _followee: UserId,
+        ) -> Result<FollowResponse, ServerError> {
+            unimplemented!()
+        }
+        async fn like(&self, _user: UserId, _chirp: ChirpId) -> Result<LikeResponse, ServerError> {
+            unimplemented!()
+        }
+        async fn unlike(
+            &self,
+            _user: UserId,
+            _chirp: ChirpId,
+        ) -> Result<LikeResponse, ServerError> {
+            unimplemented!()
+        }
+        async fn set_credential(&self, _user: UserId, _secret: &str) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn verify_credential(
+            &self,
+            _username: &Username,
+            _secret: &str,
+        ) -> Result<UserId, ServerError> {
+            unimplemented!()
+        }
+        async fn invalidate_session(&self, _token: &SessionToken) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn begin_account_recovery(&self, _username: &Username) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn complete_account_recovery(
+            &self,
+            _username: &Username,
+            _recovery_token: &str,
+            _new_secret: &str,
+        ) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn update_profile(
+            &self,
+            _user: UserId,
+            _display_name: String,
+            _bio: Option<String>,
+        ) -> Result<User, ServerError> {
+            unimplemented!()
+        }
+        async fn delete_account(&self, _user: UserId) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn export_user_data(&self, _user: UserId) -> Result<String, ServerError> {
+            unimplemented!()
+        }
+        async fn list_followers(
+            &self,
+            _user: UserId,
+            _query: TimelineQuery,
+        ) -> Result<Page<User>, ServerError> {
+            unimplemented!()
+        }
+        async fn list_following(
+            &self,
+            _user: UserId,
+            _query: TimelineQuery,
+        ) -> Result<Page<User>, ServerError> {
+            unimplemented!()
+        }
+        async fn remove_chirp(&self, _actor: UserId, _chirp: ChirpId) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn set_account_suspension(
+            &self,
+            _actor: UserId,
+            _target: UserId,
+            _suspended: bool,
+        ) -> Result<(), ServerError> {
+            unimplemented!()
+        }
+        async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError> {
+            unimplemented!()
+        }
+    }
+}
