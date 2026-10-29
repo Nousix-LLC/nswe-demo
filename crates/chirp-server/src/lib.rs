@@ -13,14 +13,14 @@
 //!     ▼
 //! persistence (ChirpRepository trait)             ← this module tree
 //!     │
-//!     ▼
-//! InMemoryRepository (default backing, no DB)
+//!     ├── InMemoryRepository (default backing, no DB)
+//!     └── PostgresRepository (--features postgres, durable backing)
 //! ```
 //!
-//! Persistence is abstracted behind the [`ChirpRepository`] trait so
-//! the server runs entirely in memory for the demo (the default [`InMemoryRepository`]) and could
-//! adopt a real database later by adding another implementor — without changing a single handler.
-//! The transport layer holds the repository as `Arc<dyn ChirpRepository>` shared state.
+//! Persistence is abstracted behind the [`ChirpRepository`] trait so the server can run entirely
+//! in memory (the default [`InMemoryRepository`]) or against a real PostgreSQL database
+//! ([`repository::postgres::PostgresRepository`] via the `postgres` feature) — without changing
+//! a single handler. The transport layer holds the repository as `Arc<dyn ChirpRepository>` shared state.
 //!
 //! # What this crate exposes
 //!

@@ -7,14 +7,12 @@
 //!
 //! # Ownership of the error seam
 //!
-//! This module owns the **enum definition** and its translation into the wire types
-//! [`ApiError`] / [`ErrorCode`] — both of
-//! which are *imported from `chirp-types`, never re-declared*. It deliberately does **not** own the
-//! `axum::response::IntoResponse` implementation or any HTTP-status mapping: that is the api-layer
-//! spoke's responsibility (it depends on `axum`; this layer stays HTTP-free). The bridge this module
-//! provides for that spoke is [`ServerError::code`] (the machine-readable category) and
-//! [`ServerError::into_api_error`] (the ready-to-serialize body); the api-layer maps
-//! [`ErrorCode`] → `axum::http::StatusCode` in its `IntoResponse`.
+//! This module owns the **enum definition**, its `axum::response::IntoResponse` implementation,
+//! and the wire-type translation into [`ApiError`] / [`ErrorCode`] — both of which are
+//! *imported from `chirp-types`, never re-declared*. The `IntoResponse` impl maps each variant
+//! to the correct HTTP status directly; the helpers [`ServerError::code`] (the machine-readable
+//! category) and [`ServerError::into_api_error`] (the ready-to-serialize body) are available for
+//! callers that need the structured form rather than a full [`axum::response::Response`].
 //!
 //! # The error-mapping contract
 //!

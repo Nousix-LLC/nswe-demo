@@ -4,7 +4,7 @@
 //! an **opaque serialized string** — the seam deliberately introduces no new `chirp-types` DTO
 //! (see the trait method's docs). This module is the **single source of truth** for what that
 //! string contains and how it is ordered, so the two backings (the durable
-//! [`PostgresRepository`](crate::repository::postgres::PostgresRepository) and the retained
+//! `PostgresRepository` and the retained
 //! [`InMemoryRepository`](crate::repository::InMemoryRepository)) produce byte-identical exports
 //! from the same data rather than each re-deriving the shape. It composes against the canonical
 //! `chirp-types` surface and re-declares none of it.

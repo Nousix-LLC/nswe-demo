@@ -1,4 +1,4 @@
-//! The durable PostgreSQL backing for [`ChirpRepository`] — compiling scaffold (EPIC-PERSIST, #66).
+//! The durable PostgreSQL backing for [`ChirpRepository`].
 //!
 //! This module is the second implementor of the persistence seam, alongside the default
 //! [`InMemoryRepository`](crate::repository::InMemoryRepository). It is the config-selected
@@ -6,23 +6,16 @@
 //! a PostgreSQL database reached over the network with the async [`sqlx`] driver, so the store is
 //! pod-independent (a `chirp-server` restart, redeploy, or reschedule never touches the data).
 //!
-//! # Scaffold boundary
+//! # Implementation
 //!
-//! This is the **foundation scaffold**, not the durable implementation. What it stands up:
+//! [`PostgresRepository`] is the fully-implemented durable backing. It provides:
 //!
 //! * a connection pool constructed from a connection string ([`PostgresRepository::connect`]);
 //! * a **versioned, inspectable schema** driven by [`sqlx`]'s embedded, forward-only migration
 //!   runner (the `migrations/` directory, applied at startup) with a readable
 //!   [schema-version surface](PostgresRepository::schema_version);
-//! * a truthful [`store_health`](PostgresRepository::store_health) that round-trips the live pool.
-//!
-//! What it deliberately does **not** do: the durable method **bodies**. Every
-//! [`ChirpRepository`] write/read below is a skeleton stub that returns
-//! [`ServerError::Internal`] — error-contract-consistent, so an operation whose durable behaviour is
-//! not yet built reports a **failed** action and NEVER falsely confirms success (the
-//! `confirmed_write_durable` identity). The real DDL, migration content, and method bodies are the
-//! downstream EPIC-PERSIST `SUBTASK_durable_impl` work; this scaffold only makes them compile
-//! against a live, migratable store.
+//! * a truthful [`store_health`](PostgresRepository::store_health) that round-trips the live pool;
+//! * all [`ChirpRepository`] capability methods with durable, invariant-preserving bodies.
 //!
 //! The whole module is gated behind the optional `postgres` cargo feature, so the default
 //! workspace build and `cargo test` pull in neither [`sqlx`] nor a database.
@@ -126,9 +119,9 @@ impl PostgresRepository {
 
 /// The default upper bound on pooled connections to the durable primary.
 ///
-/// A conservative default for the scaffold; connection-pool sizing is an operational concern the
-/// downstream operational-readiness work tunes (it may be made configurable alongside
-/// `DATABASE_URL`).
+/// A conservative default for most deployments; connection-pool sizing is an operational concern
+/// that may be tuned by making this value configurable alongside `DATABASE_URL` if the application
+/// requires more concurrent database connections.
 const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
 /// Current wall-clock time as epoch-milliseconds, for stamping a newly created durable entity.
@@ -1577,7 +1570,7 @@ impl ChirpRepository for PostgresRepository {
 
     /// Truthful durable-store health: round-trips the live connection pool with a trivial query.
     ///
-    /// Unlike the other scaffold methods this is **not** a stub — store reachability is exactly what
+    /// Store reachability is exactly what
     /// the `store_health` capability (REQ-DOM-021) reports, and it is meaningful for the durable
     /// backing from day one. `Ok(())` means the primary answered; an error means it did not.
     ///
@@ -2261,10 +2254,9 @@ impl PostgresRepository {
 
 /// The `chirp-types` <-> durable-row mapping and the domain-boundary validation entry points.
 ///
-/// Authored once by `SUBTASK_mapping_validation`; every later `SUBTASK_durable_impl` capability
-/// method reuses these entry points rather than re-deriving the conversion or re-implementing the
-/// boundary validation. See the module-level comment above for the three faces of the pattern and
-/// how it expresses each entity invariant at the durable boundary.
+/// Every capability method reuses these entry points rather than re-deriving the conversion or
+/// re-implementing the boundary validation. See the module-level comment above for the three faces
+/// of the pattern and how it expresses each entity invariant at the durable boundary.
 pub mod mapping {
     use chirp_types::domain::{Chirp, ChirpText, Follow, Like, User, Username};
     use chirp_types::ids::{ChirpId, Timestamp, UserId};

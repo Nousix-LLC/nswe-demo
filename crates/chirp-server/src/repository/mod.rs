@@ -3,9 +3,9 @@
 //! Everything the server does to durable state goes through [`ChirpRepository`]. The trait is the
 //! single boundary between the transport/service layers and the store, which is what lets the demo
 //! run entirely in memory today and swap in a real database later without touching a handler. The
-//! default implementation is [`InMemoryRepository`] (see the [`in_memory`] module); a SQLite/`sqlx`
-//! backing could be added as a second implementor of this same trait, but is explicitly optional
-//! and is never required for `cargo test`.
+//! default implementation is [`InMemoryRepository`] (see the [`in_memory`] module); the
+//! `postgres` feature provides [`PostgresRepository`](crate::repository::postgres::PostgresRepository)
+//! as a second implementor backed by a real database, and is never required for `cargo test`.
 //!
 //! # Why a trait, and why `async`
 //!
@@ -60,10 +60,9 @@
 //! | `account_suspension` | [`set_account_suspension`](ChirpRepository::set_account_suspension) |
 //! | `store_health` | [`store_health`](ChirpRepository::store_health) |
 //!
-//! These signatures fix the *surface*; the durable behaviour behind them is implemented downstream
-//! (the EPIC-PERSIST durable implementation). The retained [`InMemoryRepository`] satisfies them
-//! with error-contract-consistent placeholders (it never falsely confirms an unimplemented durable
-//! operation), so the store-free test suite keeps compiling and passing.
+//! These signatures are fully implemented in both [`InMemoryRepository`] and
+//! [`PostgresRepository`](crate::repository::postgres::PostgresRepository). The store-free test
+//! suite exercises the in-memory path; the durable path is exercised in integration tests.
 //!
 //! # Transient-state lifetime and cleanup (REQ-OPS-010, #67 / BAR-022)
 //!

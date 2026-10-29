@@ -2,9 +2,9 @@
 //!
 //! [`InMemoryRepository`] keeps the entire application state in process behind a single
 //! [`std::sync::Mutex`], so the server boots and the whole test suite runs with **no database and
-//! no external infrastructure**. It is the demo's default backing; a persistent store (SQLite via
-//! `sqlx`, etc.) would be a second implementor of [`ChirpRepository`], never a replacement that the
-//! tests require.
+//! no external infrastructure**. It is the demo's default backing; the `postgres` feature selects
+//! [`PostgresRepository`](crate::repository::postgres::PostgresRepository) as a second implementor
+//! without replacing it in tests.
 //!
 //! # Concurrency model
 //!
@@ -784,7 +784,7 @@ impl ChirpRepository for InMemoryRepository {
 
     /// Materializes a user's full data export, mirroring the durable backing: the user's profile,
     /// their authored **non-removed** chirps, their follow graph, and the chirps they like —
-    /// serialized through the shared [`ExportDocument`](super::export::ExportDocument) so the two
+    /// serialized through the shared `ExportDocument` so the two
     /// backings produce byte-identical exports.
     ///
     /// Read under a single lock, so the export is a consistent snapshot (the in-memory analogue of
@@ -924,7 +924,7 @@ impl ChirpRepository for InMemoryRepository {
     }
 
     /// The in-memory store is in-process and always reachable, so it is genuinely healthy — this is
-    /// a truthful trivially-correct result, not a placeholder that masks unimplemented behaviour.
+    /// a truthful trivially-correct result.
     async fn store_health(&self) -> Result<(), ServerError> {
         Ok(())
     }
