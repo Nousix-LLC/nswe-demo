@@ -1,0 +1,87 @@
+# id_and_traceability_schema.yaml — the shared traceability scheme for the Ferric 1.0 design.
+# READ-ONLY for descendants. This is the schema requirements, bar criteria, and backlog items all conform to,
+# so they trace to one another. It mirrors the repo's existing design/ scheme (REQ-* / BAR-* / verification),
+# adapted from a consumer product to a framework/library.
+
+# ---------------------------------------------------------------------------
+# Requirement ids
+# ---------------------------------------------------------------------------
+requirement_id:
+  pattern: "REQ-<AREA>-<NNN>"            # e.g. REQ-SSR-001, zero-padded 3-digit, monotonically assigned per area
+  areas:                                 # the disjoint namespace partition (identity I1)
+    FW:    { owner: SUBTASK_scope_and_requirements,   covers: "framework scope, users, what-you-build, 1.0-vs-MVP line, cross-cutting + out-of-1.0 items" }
+    SSR:   { owner: SUBTASK_ssr_hydration,            covers: "server-side rendering + hydration" }
+    API:   { owner: SUBTASK_authoring_model,          covers: "view! macro, props/children/slots, composition, context, component model" }
+    ASYNC: { owner: SUBTASK_async_forms_events,       covers: "async resources/suspense, forms/two-way binding, full DOM event coverage" }
+    RT:    { owner: SUBTASK_router_and_http,          covers: "router: route params, nested routes, links, navigation" }
+    HTTP:  { owner: SUBTASK_router_and_http,          covers: "HTTP/JSON client" }
+    DX:    { owner: SUBTASK_docs_and_dx,              covers: "guide, tutorial, API docs, examples, cargo-generate starter, developer experience" }
+    REL:   { owner: SUBTASK_release_and_distribution, covers: "crates.io publishing, semver, changelog, versioning/compatibility policy" }
+    PERF:  { owner: SUBTASK_performance_and_benchmark,covers: "js-framework-benchmark entry, speed/memory/bundle-size, honest comparison" }
+
+requirement_fields:
+  id:            "REQ-<AREA>-<NNN>"
+  statement:     "What must be true, stated from a framework user's (app author's) side. What, not how."
+  rationale:     "Why a credible 1.0 of a Rust/WASM UI framework needs this; peer evidence where relevant (cite by name)."
+  acceptance_criteria: "One or more checkable conditions a stranger could verify (see verification_method)."
+  stage:         "one of the stage vocabulary below"
+  release_gating: "true | false  (false => a recorded non-1.0 item; see stage=post_one_oh)"
+  references:    "optional read-only cross-references to REQ-* in other areas"
+
+# ---------------------------------------------------------------------------
+# Stage vocabulary (the MVP-vs-1.0 line)
+# ---------------------------------------------------------------------------
+stage:
+  usable_early: "The floor at which Ferric first lets an app author build a real (non-toy) app with it. Not a demo."
+  one_oh:       "The full 1.0 bar: everything a credible 1.0 of a framework of this kind provides. SSR+hydration lives here as the must-have."
+  post_one_oh:  "Recorded non-1.0 item: a deliberate deferral (scoped CSS/styling, devtools, hot reload, desktop/mobile). release_gating=false; referenced by NO BAR."
+
+# ---------------------------------------------------------------------------
+# Release-bar criteria
+# ---------------------------------------------------------------------------
+bar_id:
+  pattern: "BAR-FERRIC-<NNN>"
+  owner: SUBTASK_release_bar
+bar_fields:
+  id:          "BAR-FERRIC-<NNN>"
+  statement:   "The concrete release condition, checkable against the framework by someone who was not in the room."
+  references:  "the REQ-* ids this criterion enforces (identity I2: each must exist)"
+  verification_method: "one value from the vocabulary below"
+  stage:       "usable_early | one_oh"
+  must_have:   "true only for the SSR+hydration gating criterion(s) (identity I4); else absent/false"
+
+# verification methods appropriate to a FRAMEWORK/library (not a deployed product)
+verification_method:
+  automated_test:    "A Rust test passes: native `cargo test`, a headless `wasm-bindgen-test`, or a `trybuild` macro-diagnostics test."
+  example_build:     "A stated example or the cargo-generate starter scaffolds and builds/runs to the described behavior."
+  doc_inspection:    "A reviewer confirms the guide/tutorial/API-doc/changelog/semver/policy statement exists and is accurate."
+  benchmark_run:     "The js-framework-benchmark entry runs and produces the stated speed/memory/bundle-size numbers."
+  publishability:    "`cargo publish --dry-run` / `cargo package` succeeds with the stated semver + changelog (publishable to crates.io)."
+
+# ---------------------------------------------------------------------------
+# Backlog: epic + work-item schema (owner: SUBTASK_release_plan)
+# ---------------------------------------------------------------------------
+epic:
+  fields:
+    id_or_title: "A coherent capability a single code DAG can build, review, and land as one change."
+    parent:      "epic #1 (the Ferric epic) — all epics sit under it"
+    design_refs: "the design-doc area(s) this epic realizes (identity I6)"
+    depends_on:  "other epics that must land first (dependency order)"
+    stage:       "usable_early | one_oh  (reach a usable framework early, the full bar after)"
+    supersedes:  "board issue numbers this epic folds in (e.g. #5, #6) — extend/supersede, never duplicate (identity I7)"
+work_item:
+  fields:
+    title:               "what the framework needs, not how to build it"
+    epic:                "the parent epic"
+    acceptance_criteria: "cite the REQ-*/BAR-FERRIC-* it satisfies and the design section it traces to (identity I6)"
+    depends_on:          "other work-items/epics"
+
+# ---------------------------------------------------------------------------
+# Trace rules (identities I2, I3, I6) — the synthesis gate asserts these
+# ---------------------------------------------------------------------------
+trace_rules:
+  - "No BAR-FERRIC-* may reference a REQ-* id that no spoke defined."
+  - "Every REQ-* with stage=one_oh and release_gating=true is referenced by >=1 BAR-FERRIC-*."
+  - "Every BAR-FERRIC-* with stage=one_oh is covered by >=1 backlog work-item."
+  - "Every epic names the design area(s) it realizes and sits under epic #1."
+  - "No out-of-1.0 (post_one_oh) item is enforced by any BAR-FERRIC-*."
