@@ -381,6 +381,7 @@ dependencies = [
 name = "ferric"
 version = "0.1.0"
 dependencies = [
+ "ferric-macros",
  "js-sys",
  "wasm-bindgen",
  "wasm-bindgen-test",
