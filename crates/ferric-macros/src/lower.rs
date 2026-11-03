@@ -6,7 +6,7 @@
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
 
-use crate::parser::{AttrValue, ChildItem, Element, ForList, HtmlAttr, ViewNode, ViewRoot};
+use crate::parser::{AttrValue, ChildItem, Element, ForList, HtmlAttr, SlotFillNode, ViewNode, ViewRoot};
 
 /// Lower a parsed `view!` root into a `VNode` expression.
 pub(crate) fn lower_root(root: &ViewRoot) -> TokenStream2 {
@@ -27,6 +27,17 @@ fn lower_node(node: &ViewNode) -> TokenStream2 {
         }
         ViewNode::Element(el) => lower_element(el),
         ViewNode::For(fl) => lower_for_as_expr(fl),
+        ViewNode::SlotFill(sf) => {
+            // A slot fill appearing as a root node is an error (it must appear
+            // inside a component element).
+            let span = sf.span;
+            let name = &sf.name;
+            quote_spanned! { span =>
+                compile_error!(
+                    concat!("`<slot:", #name, ">` must be a child of a component element")
+                )
+            }
+        }
     }
 }
 
@@ -199,7 +210,96 @@ fn lower_child_push(item: &ChildItem) -> TokenStream2 {
                 let for_ts = lower_for_as_vec(fl);
                 quote! { __ferric_el = __ferric_el.children(#for_ts); }
             }
+            ViewNode::SlotFill(sf) => {
+                // A slot fill inside a plain HTML element is an error.
+                let span = sf.span;
+                let name = &sf.name;
+                quote_spanned! { span =>
+                    compile_error!(
+                        concat!("`<slot:", #name, ">` is only valid inside a component element")
+                    );
+                }
+            }
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Children / slot helpers for component lowering
+// ---------------------------------------------------------------------------
+
+/// Lower a `ChildItem` to a statement that pushes/extends a local
+/// `Vec<VNode>` variable named `__ferric_v`.  Used when building the
+/// `Rc<dyn Fn() -> Vec<VNode>>` thunks passed to component prop setters.
+fn lower_child_push_to_vec(item: &ChildItem) -> TokenStream2 {
+    match item {
+        ChildItem::Single(node) => lower_node_push_to_vec(node),
+    }
+}
+
+fn lower_node_push_to_vec(node: &ViewNode) -> TokenStream2 {
+    match node {
+        ViewNode::Text(lit) => {
+            let s = lit.value();
+            quote! { __ferric_v.push(::ferric::vdom::text(#s)); }
+        }
+        ViewNode::Interp { expr, span } => lower_interp_push_to_vec(expr, *span),
+        ViewNode::Element(sub_el) => {
+            let sub_ts = lower_element(sub_el);
+            quote! { __ferric_v.push(#sub_ts); }
+        }
+        ViewNode::For(fl) => {
+            let for_ts = lower_for_as_vec(fl);
+            quote! { __ferric_v.extend(#for_ts); }
+        }
+        ViewNode::SlotFill(sf) => {
+            let span = sf.span;
+            let name = &sf.name;
+            quote_spanned! { span =>
+                compile_error!(
+                    concat!("`<slot:", #name, ">` cannot be nested inside another slot")
+                );
+            }
+        }
+    }
+}
+
+/// Lowers `{expr}` inside a children/slot thunk to push/extend statements on
+/// `__ferric_v`.  Handles `VNode`, `Vec<VNode>`, `String`, and `&str`.
+fn lower_interp_push_to_vec(expr: &syn::Expr, span: Span) -> TokenStream2 {
+    quote_spanned! { span =>
+        {
+            #[allow(dead_code)]
+            enum __FerricSlotChildren {
+                One(::ferric::VNode),
+                Many(::std::vec::Vec<::ferric::VNode>),
+            }
+            impl ::std::convert::From<::ferric::VNode> for __FerricSlotChildren {
+                fn from(v: ::ferric::VNode) -> Self { Self::One(v) }
+            }
+            impl ::std::convert::From<::ferric::VElement> for __FerricSlotChildren {
+                fn from(e: ::ferric::VElement) -> Self {
+                    Self::One(::ferric::VNode::Element(e))
+                }
+            }
+            impl ::std::convert::From<::std::vec::Vec<::ferric::VNode>> for __FerricSlotChildren {
+                fn from(v: ::std::vec::Vec<::ferric::VNode>) -> Self { Self::Many(v) }
+            }
+            impl ::std::convert::From<::std::string::String> for __FerricSlotChildren {
+                fn from(s: ::std::string::String) -> Self {
+                    Self::One(::ferric::vdom::text(s))
+                }
+            }
+            impl<'__ferric_a> ::std::convert::From<&'__ferric_a str> for __FerricSlotChildren {
+                fn from(s: &'__ferric_a str) -> Self {
+                    Self::One(::ferric::vdom::text(s))
+                }
+            }
+            match __FerricSlotChildren::from(#expr) {
+                __FerricSlotChildren::One(n) => __ferric_v.push(n),
+                __FerricSlotChildren::Many(ns) => __ferric_v.extend(ns),
+            }
+        }
     }
 }
 
@@ -259,42 +359,84 @@ fn lower_for_as_expr(fl: &ForList) -> TokenStream2 {
 // Component invocation
 // ---------------------------------------------------------------------------
 
-/// Lowers a component invocation `<MyComp prop={v}/>`.
+/// Lowers a component invocation `<MyComp prop={v}…>children</MyComp>`.
 ///
-/// Emits a function-call expression `MyComp(…)` so that the ordinary Rust
-/// "cannot find function `MyComp` in this scope" error fires when the component
-/// is not in scope (§2.9 diagnostic row).  Prop expressions are consumed to
-/// avoid unused-expression warnings.
+/// Uses the generated `MyCompProps` builder:
+/// ```rust,ignore
+/// let __ferric_comp = MyCompProps::new()
+///     .prop(v)
+///     .children(Rc::new(move || { … }))
+///     .build();
+/// Component::render(&__ferric_comp)
+/// ```
+///
+/// If `MyCompProps` is not in scope the ordinary Rust "cannot find struct
+/// `MyCompProps` in this scope" error fires, pointing at the tag (§2.9).
 fn lower_component(el: &Element) -> TokenStream2 {
-    let comp_ident = format_ident!("{}", el.tag, span = el.open_span);
+    let props_ident = format_ident!("{}Props", el.tag, span = el.open_span);
 
-    let prop_drains: Vec<TokenStream2> = el
-        .attrs
-        .iter()
-        .map(|a| {
-            let val_span = a.value_span;
-            match &a.value {
-                AttrValue::Lit(s) => quote_spanned! { val_span => let _ = #s; },
-                AttrValue::Expr(e) => quote_spanned! { val_span => let _ = #e; },
-            }
-        })
-        .collect();
+    // --- prop setter calls from attributes ---
+    let mut builder_calls: Vec<TokenStream2> = Vec::new();
 
-    let event_drains: Vec<TokenStream2> = el
-        .events
-        .iter()
-        .map(|ev| {
-            let h = &ev.handler;
-            let hs = ev.handler_span;
-            quote_spanned! { hs => let _ = #h; }
-        })
-        .collect();
+    for attr in &el.attrs {
+        let prop_name = format_ident!("{}", attr.name, span = attr.value_span);
+        let val_span = attr.value_span;
+        let call = match &attr.value {
+            AttrValue::Lit(s) => quote_spanned! { val_span => .#prop_name(#s) },
+            AttrValue::Expr(e) => quote_spanned! { val_span => .#prop_name(#e) },
+        };
+        builder_calls.push(call);
+    }
+
+    // Events are not valid on components; ignore them (they would only cause a
+    // type error when attempting to call `.on(…)` on a Props builder).
+
+    // --- Separate children: slot fills vs regular ---
+    let mut regular_child_items: Vec<&ChildItem> = Vec::new();
+    let mut slot_fills: Vec<&SlotFillNode> = Vec::new();
+
+    for child in &el.children {
+        match child {
+            ChildItem::Single(ViewNode::SlotFill(sf)) => slot_fills.push(sf),
+            other => regular_child_items.push(other),
+        }
+    }
+
+    // --- build children thunk if there are regular children ---
+    if !regular_child_items.is_empty() {
+        let child_stmts: Vec<TokenStream2> =
+            regular_child_items.iter().map(|c| lower_child_push_to_vec(c)).collect();
+        builder_calls.push(quote! {
+            .children(::std::rc::Rc::new(move || {
+                let mut __ferric_v: ::std::vec::Vec<::ferric::VNode> =
+                    ::std::vec::Vec::new();
+                #(#child_stmts)*
+                __ferric_v
+            }))
+        });
+    }
+
+    // --- build slot thunks ---
+    for sf in slot_fills {
+        let slot_name = format_ident!("{}", sf.name, span = sf.span);
+        let slot_stmts: Vec<TokenStream2> =
+            sf.children.iter().map(lower_child_push_to_vec).collect();
+        builder_calls.push(quote! {
+            .#slot_name(::std::rc::Rc::new(move || {
+                let mut __ferric_v: ::std::vec::Vec<::ferric::VNode> =
+                    ::std::vec::Vec::new();
+                #(#slot_stmts)*
+                __ferric_v
+            }))
+        });
+    }
 
     quote! {
         {
-            #(#prop_drains)*
-            #(#event_drains)*
-            #comp_ident()
+            let __ferric_comp = #props_ident::new()
+                #(#builder_calls)*
+                .build();
+            ::ferric::component::Component::render(&__ferric_comp)
         }
     }
 }

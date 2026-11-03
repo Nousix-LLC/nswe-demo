@@ -405,6 +405,7 @@ dependencies = [
 name = "ferric-macros"
 version = "0.1.0"
 dependencies = [
+ "ferric",
  "proc-macro2",
  "quote",
  "syn 2.0.119",

@@ -18,7 +18,7 @@
 //! so failures are readable without a debugger.
 
 use ferric::vdom::{text, EventKind, VElement, VNode};
-use ferric_macros::view;
+use ferric_macros::{component, view};
 
 // ─── Structural equality helpers ─────────────────────────────────────────────
 
@@ -275,17 +275,20 @@ fn test_on_input_handler() {
 
 /// Row 10: `<Capitalized … />` → component model invocation yielding a `VNode`.
 ///
-/// The `view!` macro lowers a capitalised tag to a plain function call, so the
-/// component function must be in scope and return a `VNode`.
+/// `view!` lowers a capitalised tag to `NameProps::new()…build()` and
+/// `Component::render`, so a `#[component]`-annotated function must be in scope.
+/// An unrecognised type (`GreetingProps` missing) produces a Rust compile error.
 #[test]
-#[allow(non_snake_case)]
 fn test_component_invocation() {
+    use ferric::component::Component;
+
+    #[component]
     fn Greeting() -> VNode {
         VElement::new("span").child(text("Hello")).into()
     }
 
     let result: VNode = view! { <Greeting /> };
-    let expected: VNode = Greeting();
+    let expected: VNode = GreetingProps::new().build().render();
     assert!(
         vnode_eq(&result, &expected),
         "component invocation mismatch\n  got:  {:?}\n  want: {:?}",

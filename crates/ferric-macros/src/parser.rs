@@ -29,6 +29,8 @@ pub(crate) enum ViewNode {
     Interp { expr: Expr, span: Span },
     /// A keyed list: `<For each={…} key={…} let:item>body</For>`.
     For(ForList),
+    /// A named slot fill: `<slot:name>…</slot:name>` inside a component element.
+    SlotFill(SlotFillNode),
 }
 
 /// A parsed HTML element or component invocation.
@@ -84,6 +86,16 @@ pub(crate) struct ForList {
     pub body: Box<ViewNode>,
 }
 
+/// A `<slot:name>…</slot:name>` named slot fill inside a component element.
+pub(crate) struct SlotFillNode {
+    /// Span of the opening `<` for diagnostics.
+    pub span: Span,
+    /// Slot name (the identifier after `:`).
+    pub name: String,
+    /// Children inside the slot fill.
+    pub children: Vec<ChildItem>,
+}
+
 // ---------------------------------------------------------------------------
 // Parse impl
 // ---------------------------------------------------------------------------
@@ -130,6 +142,11 @@ fn parse_element(input: ParseStream) -> Result<ViewNode> {
 
     if tag == "For" {
         return parse_for_body(input, open_span);
+    }
+
+    // `<slot:name>…</slot:name>` — a named slot fill inside a component element.
+    if tag == "slot" && input.peek(Token![:]) {
+        return parse_slot_fill(input, open_span);
     }
 
     let is_component = tag.chars().next().is_some_and(|c| c.is_uppercase());
@@ -322,6 +339,73 @@ fn parse_children(
     }
 
     Ok(children)
+}
+
+// ---------------------------------------------------------------------------
+// <slot:name> fill parser
+// ---------------------------------------------------------------------------
+
+/// Parse `<slot:name>…</slot:name>` (the `<` and `slot` ident have already been
+/// consumed by `parse_element`).
+fn parse_slot_fill(input: ParseStream, open_span: Span) -> Result<ViewNode> {
+    // We already consumed `<slot`; next is `:name>…</slot:name>`.
+    let _colon: Token![:] = input.parse()?;
+    let name_ident: Ident = input.parse()?;
+    let name = name_ident.to_string();
+    let _gt: Token![>] = input.parse()?;
+
+    // Parse children until `</slot:name>`.
+    let mut children: Vec<ChildItem> = Vec::new();
+    loop {
+        // Check for `</slot:name>` closing tag.
+        if input.peek(Token![<]) && input.peek2(Token![/]) {
+            // Fork to inspect without consuming.
+            let ahead = input.fork();
+            let _: Token![<] = ahead.parse()?;
+            let _: Token![/] = ahead.parse()?;
+            if ahead
+                .parse::<Ident>()
+                .ok()
+                .map(|id| id == "slot")
+                .unwrap_or(false)
+                && ahead.peek(Token![:])
+            {
+                // Consume the closing tag from `input`.
+                let _lt: Token![<] = input.parse()?;
+                let _sl: Token![/] = input.parse()?;
+                let _slot_id: Ident = input.parse()?; // "slot"
+                let _colon2: Token![:] = input.parse()?;
+                let close_name: Ident = input.parse()?;
+                let _gt2: Token![>] = input.parse()?;
+                if close_name != name_ident {
+                    return Err(syn::Error::new(
+                        close_name.span(),
+                        format!(
+                            "closing `</slot:{}>` does not match open `<slot:{name}>`",
+                            close_name
+                        ),
+                    ));
+                }
+                break;
+            }
+        }
+
+        if input.is_empty() {
+            return Err(syn::Error::new(
+                open_span,
+                format!("unclosed `<slot:{name}>`"),
+            ));
+        }
+
+        let node = parse_node(input)?;
+        children.push(ChildItem::Single(node));
+    }
+
+    Ok(ViewNode::SlotFill(SlotFillNode {
+        span: open_span,
+        name,
+        children,
+    }))
 }
 
 fn parse_for_body(input: ParseStream, span: Span) -> Result<ViewNode> {

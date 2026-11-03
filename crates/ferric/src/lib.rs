@@ -36,9 +36,9 @@ pub use crate::vdom::{EventKind, VElement, VNode};
 /// and [`mount`](crate::dom::mount). This set is the `public_api_surface` identity the synthesis
 /// gate asserts; additions are additive-only.
 pub mod prelude {
-    pub use crate::component::Component;
+    pub use crate::component::{Children, Component, Slot, SlotFn};
     pub use crate::dom::mount;
     pub use crate::signal::{batch, create_effect, create_memo, create_signal, Memo, Signal};
     pub use crate::vdom::{EventKind, VElement, VNode};
-    pub use ferric_macros::view;
+    pub use ferric_macros::{component, view};
 }
