@@ -34,9 +34,9 @@
 //! graph (signals, computed values, batching, and subscriber cleanup) is exercised by the
 //! `#[cfg(test)]` suite below with ordinary `cargo test`.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -163,6 +163,9 @@ struct Node {
     owner: Option<NodeId>,
     /// Memo staleness: `true` means the cached value must be recomputed before the next read.
     dirty: bool,
+    /// Type-keyed context values provided into this scope.  Released automatically when the node
+    /// is removed from the arena by `dispose`, on the same path that unsubscribes effects/memos.
+    context: HashMap<TypeId, Box<dyn Any>>,
 }
 
 impl Node {
@@ -176,6 +179,7 @@ impl Node {
             children: Vec::new(),
             owner: None,
             dirty: false,
+            context: HashMap::new(),
         }
     }
 
@@ -699,6 +703,72 @@ pub fn batch<R>(f: impl FnOnce() -> R) -> R {
 }
 
 // =====================================================================================
+// Public API — context (dependency injection)
+// =====================================================================================
+
+/// Provide a value of type `T` into the current reactive owner scope, making it available to any
+/// descendant component that calls [`use_context::<T>()`](use_context) or
+/// [`expect_context::<T>()`](expect_context).
+///
+/// The value is keyed by `TypeId::of::<T>()` and stored on the current owner scope node.  When
+/// that scope is disposed, its context entries are released with it on the same disposal path that
+/// already unsubscribes effects and memos — no second lifetime rule.
+///
+/// If there is no active owner scope this call is a no-op; the value is silently discarded.
+pub fn provide_context<T: Clone + 'static>(value: T) {
+    with_rt(|rt| {
+        if let Some(&owner) = rt.owner_stack.last() {
+            if let Some(node) = rt.arena.get_mut(owner) {
+                node.context.insert(TypeId::of::<T>(), Box::new(value));
+            }
+        }
+    });
+}
+
+/// Look up a value of type `T` provided by the nearest-ancestor scope.  Returns `None` if no
+/// ancestor called [`provide_context::<T>(..)`](provide_context).
+///
+/// Walks the owner parent chain (innermost first), returning the first match found.  Context
+/// lookup is **not** a reactive dependency: calling this function does not subscribe the calling
+/// effect or memo to any change notification.
+pub fn use_context<T: Clone + 'static>() -> Option<T> {
+    let type_id = TypeId::of::<T>();
+    with_rt(|rt| {
+        let mut current = rt.owner_stack.last().copied();
+        while let Some(id) = current {
+            match rt.arena.get(id) {
+                Some(node) => {
+                    if let Some(boxed) = node.context.get(&type_id) {
+                        // The key guarantees the type matches; downcast is infallible here.
+                        if let Some(typed) = boxed.downcast_ref::<T>() {
+                            return Some(typed.clone());
+                        }
+                    }
+                    current = node.owner;
+                }
+                None => break,
+            }
+        }
+        None
+    })
+}
+
+/// Look up a value of type `T` provided by the nearest-ancestor scope.  Panics with a message
+/// that names the missing type if no ancestor called [`provide_context::<T>(..)`](provide_context).
+///
+/// Use this when the absence of a provider is a programming error (the value is required by
+/// contract to exist).
+pub fn expect_context<T: Clone + 'static>() -> T {
+    use_context::<T>().unwrap_or_else(|| {
+        let name = std::any::type_name::<T>();
+        panic!(
+            "no context of type `{name}` was found; an ancestor component must call \
+             `provide_context::<{name}>(..)` before this component is rendered"
+        )
+    })
+}
+
+// =====================================================================================
 // Tests — native, no browser required
 // =====================================================================================
 
@@ -990,5 +1060,88 @@ mod tests {
         }
         // The stale handle resolves to no live node.
         assert!(with_rt(|rt| rt.arena.get(first_id).is_none()));
+    }
+
+    // ---- context API tests ----
+
+    #[test]
+    fn context_provide_and_read_simple_value() {
+        let scope = ReactiveScope::new();
+        scope.run(|| {
+            provide_context(42u32);
+            provide_context("hello".to_string());
+            assert_eq!(use_context::<u32>(), Some(42));
+            assert_eq!(use_context::<String>(), Some("hello".to_string()));
+        });
+    }
+
+    #[test]
+    fn context_provide_signal_and_read_live_value() {
+        let sig = create_signal(10i32);
+        let scope = ReactiveScope::new();
+        scope.run(|| {
+            provide_context(sig);
+            let found: Signal<i32> = use_context::<Signal<i32>>().expect("signal context present");
+            assert_eq!(found.get(), 10);
+            sig.set(99);
+            assert_eq!(found.get(), 99, "signal value is live through context handle");
+        });
+    }
+
+    #[test]
+    fn use_context_returns_none_when_no_provider() {
+        // No scope, no provider — must return None, not panic.
+        assert_eq!(use_context::<u128>(), None);
+        // Inside a scope that never called provide_context for this type.
+        let scope = ReactiveScope::new();
+        scope.run(|| {
+            assert_eq!(use_context::<u128>(), None);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "no context of type")]
+    fn expect_context_panics_with_named_type() {
+        // No provider active; expect_context must panic and name the type.
+        expect_context::<u128>();
+    }
+
+    #[test]
+    fn context_nearest_ancestor_shadowing() {
+        let outer = ReactiveScope::new();
+        outer.run(|| {
+            provide_context(1u32);
+            // Inner scope shadows the outer value with its own.
+            let inner = ReactiveScope::new();
+            inner.run(|| {
+                provide_context(2u32);
+                assert_eq!(use_context::<u32>(), Some(2), "inner value shadows outer");
+            });
+            // After inner scope's run, only outer is on the owner stack again.
+            assert_eq!(use_context::<u32>(), Some(1), "outer value visible after inner run ends");
+        });
+    }
+
+    #[test]
+    fn context_scoped_cleanup() {
+        let baseline = live_node_count();
+        {
+            let scope = ReactiveScope::new();
+            scope.run(|| {
+                provide_context(999u32);
+                // Context is accessible while the scope owns the owner stack.
+                assert_eq!(use_context::<u32>(), Some(999));
+            });
+            // Scope node is in the arena; context data is stored on it.
+            assert!(live_node_count() > baseline);
+            // Drop scope: dispose removes the node and its context HashMap from the arena.
+            drop(scope);
+        }
+        // The scope node (and its context entries) have been reclaimed.
+        assert_eq!(
+            live_node_count(),
+            baseline,
+            "context released with its owning scope"
+        );
     }
 }

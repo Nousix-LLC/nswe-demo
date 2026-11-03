@@ -38,7 +38,10 @@ pub use crate::vdom::{EventKind, VElement, VNode};
 pub mod prelude {
     pub use crate::component::{Children, Component, Slot, SlotFn};
     pub use crate::dom::mount;
-    pub use crate::signal::{batch, create_effect, create_memo, create_signal, Memo, Signal};
+    pub use crate::signal::{
+        batch, create_effect, create_memo, create_signal, expect_context, provide_context,
+        use_context, Memo, Signal,
+    };
     pub use crate::vdom::{EventKind, VElement, VNode};
     pub use ferric_macros::{component, view};
 }
