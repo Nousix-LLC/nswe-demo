@@ -42,6 +42,11 @@ chirp-types = { path = "../chirp-types" }
 # ecosystem-standard `async-trait` is used to box the returned futures. The boxing cost is
 # irrelevant for this workload and preserves the documented async-DB alternative without a
 # trait rewrite.
+# Salted argon2id KDF and constant-time verify for credential storage. The "std" feature
+# enables the OsRng-backed SaltString::generate and the PHC-string codec; no allocator feature
+# flag needed because chirp-server is always a std binary.
+argon2 = { version = "0.5", features = ["std"] }
+
 async-trait = "0.1"
 
 # Typed error enum derivation (`ServerError`): `#[error(...)]` Display + `#[from]` conversion from

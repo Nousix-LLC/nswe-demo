@@ -131,6 +131,42 @@ use chirp_types::ids::{ChirpId, UserId};
 
 use crate::error::ServerError;
 
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+
+/// Hashes `secret` with argon2id (default parameters, random salt) and returns the PHC-string
+/// representation suitable for storage in the `credentials.secret` column.
+///
+/// This is the single write-path for credential storage: both `set_credential` and
+/// `complete_account_recovery` in every backing call this helper so the algorithm, parameters,
+/// and format are fixed in one place.
+///
+/// Errors as `ServerError::Internal` — a failure here is a system fault (OS entropy source
+/// unavailable or library bug), not a user error.
+fn hash_password(secret: &str) -> Result<String, ServerError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(secret.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| ServerError::Internal(format!("failed to hash credential: {e}")))
+}
+
+/// Verifies `secret` against a stored PHC-format argon2id hash using the constant-time
+/// `verify_password` routine from the `password_hash` crate — safe against timing side-channel
+/// attacks that a plain `==` comparison would expose.
+///
+/// Returns `Ok(true)` on a valid match, `Ok(false)` on a mismatch, and `Err(ServerError::Internal)`
+/// only when `stored` is not a valid PHC string (indicates data corruption, not a user error).
+fn verify_password(secret: &str, stored: &str) -> Result<bool, ServerError> {
+    let parsed = PasswordHash::new(stored)
+        .map_err(|e| ServerError::Internal(format!("corrupt stored credential: {e}")))?;
+    Ok(Argon2::default()
+        .verify_password(secret.as_bytes(), &parsed)
+        .is_ok())
+}
+
 /// The default maximum number of chirps a timeline page returns when the request omits a limit.
 pub const DEFAULT_TIMELINE_LIMIT: u32 = 20;
 
