@@ -1,0 +1,13 @@
+error[E0599]: no method named `footer` found for struct `CardProps<__TitleState, __ChildrenState>` in the current scope
+  --> tests/compile_fail_component/05_fill_undeclared_slot.rs:25:13
+   |
+10 |   #[component]
+   |   ------------ method `footer` not found for this struct
+...
+23 |       let _ = view! {
+   |  _____________-
+24 | |         <Card title={"hello".to_string()}>
+25 | |             <slot:footer>"© 2026"</slot:footer>
+   | |            -^ method not found in `CardProps<__CardPropTitleSet>`
+   | |____________|
+   |

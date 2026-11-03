@@ -1,0 +1,13 @@
+error[E0599]: no method named `color` found for struct `GreetingProps<__NameState>` in the current scope
+  --> tests/compile_fail_component/03_unknown_prop.rs:19:10
+   |
+ 9 |   #[component]
+   |   ------------ method `color` not found for this struct
+...
+17 |       let _ = GreetingProps::new()
+   |  _____________-
+18 | |         .name("hi".to_string())
+19 | |         .color("red".to_string())
+   | |         -^^^^^ method not found in `GreetingProps<__GreetingPropNameSet>`
+   | |_________|
+   |

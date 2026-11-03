@@ -18,6 +18,8 @@ quote = "1"
 syn = { version = "2", features = ["full"] }
 
 [dev-dependencies]
-# Integration tests (tests/lowering.rs) need the ferric VNode/VElement/EventKind
-# types to assert structural equality against the view! macro's output.
+# Integration tests (tests/lowering.rs and tests/component.rs) need the ferric
+# VNode/VElement/EventKind/Children/Slot types.
 ferric = { path = "../ferric" }
+# Compile-fail fixture runner for diagnostic quality tests (BAR-FERRIC-010).
+trybuild = { version = "1", features = ["diff"] }

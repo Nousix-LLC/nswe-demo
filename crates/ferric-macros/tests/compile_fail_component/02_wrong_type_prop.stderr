@@ -1,0 +1,19 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail_component/02_wrong_type_prop.rs:16:39
+   |
+16 |     let _ = GreetingProps::new().name(42i32).build();
+   |                                  ---- ^^^^^ expected `String`, found `i32`
+   |                                  |
+   |                                  arguments to this method are incorrect
+   |
+note: method defined here
+  --> tests/compile_fail_component/02_wrong_type_prop.rs:10:13
+   |
+ 9 | #[component]
+   | ------------
+10 | fn Greeting(name: String) -> VNode {
+   |             ^^^^
+help: try using a conversion method
+   |
+16 |     let _ = GreetingProps::new().name(42i32.to_string()).build();
+   |                                            ++++++++++++

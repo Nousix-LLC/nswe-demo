@@ -1,0 +1,15 @@
+error[E0599]: no method named `children` found for struct `LabelProps<__TextState>` in the current scope
+  --> tests/compile_fail_component/04_children_in_no_children_component.rs:18:13
+   |
+10 |   #[component]
+   |   ------------ method `children` not found for this struct
+...
+18 |       let _ = view! {
+   |  _____________^
+19 | |         <Label text={"hi".to_string()}>
+20 | |             <span>"extra"</span>
+21 | |         </Label>
+22 | |     };
+   | |_____^ method not found in `LabelProps<__LabelPropTextSet>`
+   |
+   = note: this error originates in the macro `view` (in Nightly builds, run with -Z macro-backtrace for more info)
