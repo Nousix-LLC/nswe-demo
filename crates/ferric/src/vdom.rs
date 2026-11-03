@@ -864,4 +864,29 @@ mod tests {
             VNode::Text(_) => panic!("expected element"),
         }
     }
+
+    // BAR-FERRIC-002: a partial attribute change in a subtree produces a single SetAttr patch, not
+    // a wholesale Replace of the whole subtree.
+    #[test]
+    fn partial_attr_change_in_subtree_produces_single_setattr() {
+        // A tree with a nested element; only one attribute on the inner element changes; the
+        // surrounding structure (parent tag, sibling text) stays identical.
+        let old: VNode = el("div")
+            .child(el("span").attr("class", "a").child(text("hello")))
+            .into();
+        let new: VNode = el("div")
+            .child(el("span").attr("class", "b").child(text("hello")))
+            .into();
+        let patches = assert_roundtrip(&old, &new);
+        assert_eq!(patches.len(), 1, "expected exactly one patch, got {patches:?}");
+        assert!(
+            matches!(&patches[0], Patch::SetAttr { name, value, .. }
+                if name == "class" && value == "b"),
+            "expected a single SetAttr for the changed attribute, got {patches:?}"
+        );
+        assert!(
+            !patches.iter().any(|p| matches!(p, Patch::Replace { .. })),
+            "partial attribute change must not produce a Replace patch"
+        );
+    }
 }
