@@ -24,11 +24,8 @@
 # immune to this race: `chirp-server sweep` calls PostgresRepository::connect() which applies
 # migrations before executing the sweep, so it is safe to run before or after the server pod.
 #
-# NOTE: The image digest below is the current production image. It will be updated to the digest
-# produced by CI after this PR is merged and the main-push image job publishes the new build.
-# Until then, ArgoCD will apply this manifest but the sweep job will not run correctly (the old
-# binary does not implement the sweep subcommand). The image digest update is the final step after
-# the post-merge CI run completes.
+# Image digest: febeb151 build (PR #183 merge commit), published by CI run 41710206505.
+# The sweep subcommand is present in this build; the CronJob is fully operational.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -79,8 +76,8 @@ spec:
               # Same digest-pinned chirp-server image the Deployment uses (10-deployment.yaml),
               # built --features postgres. The sweep subcommand calls
               # ChirpRepository::sweep_expired_transient_state() — the single Rust seam (REQ-DOM-014).
-              # NOTE: update this digest after the post-merge CI run publishes the new image.
-              image: ghcr.io/nousix-llc/chirp-server@sha256:adaa4c26c94d2bffab0342d3dc279eb2d8b42e835494c59385c4b731e246fd41
+              # Digest: febeb151 build (PR #183 merge), CI run 41710206505.
+              image: ghcr.io/nousix-llc/chirp-server@sha256:2c5eafbe4e4009652ec0f0bc3d6aeac594904debcd3776b9dacb6b78ed98e06c
               imagePullPolicy: IfNotPresent
               command: ["/usr/local/bin/chirp-server"]
               args: ["sweep"]
