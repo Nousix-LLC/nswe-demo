@@ -94,14 +94,14 @@ spec:
                 # libpq connection parameters. The host/port are the frozen headless-Service DNS from
                 # the operational contract; the database/user/password come from the SAME out-of-band
                 # Secret chirp-db-credentials the server and StatefulSet use (never committed, not
-                # Argo CD-managed). sslmode matches the in-cluster server connection (TLS in transit
-                # is a documented hardening follow-up, owned with the Secret model, not this task).
+                # Argo CD-managed). PGSSLMODE is set to require: TLS is now enforced for all DB
+                # connections, closing the plaintext-DB-password-in-transit finding (#120).
                 - name: PGHOST
                   value: chirp-postgres.chirp.svc.cluster.local
                 - name: PGPORT
                   value: "5432"
                 - name: PGSSLMODE
-                  value: disable
+                  value: require
                 - name: PGCONNECT_TIMEOUT
                   value: "10"
                 - name: PGDATABASE

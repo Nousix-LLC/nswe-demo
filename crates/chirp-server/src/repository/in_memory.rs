@@ -66,10 +66,9 @@ struct Store {
     /// expiry). Mirrors the durable `sessions` table (`token` primary key, `user_id`, `expires_at`):
     /// an expired session is not resolved and is reclaimed by the sweep.
     tokens: HashMap<String, Session>,
-    /// Durable credential per user: user id → the at-rest secret representation. One per user,
-    /// mirroring the `credentials` table's `user_id` primary key. The secret's exact format and the
-    /// verification protocol are owned by identity & trust (`REQ-ID-*`); this backing only holds the
-    /// slot and compares what it was given, so the in-memory and durable backings agree.
+    /// Credential per user: user id → the argon2id PHC hash string. One per user, mirroring the
+    /// `credentials` table's `user_id` primary key. The stored value is always an argon2id hash;
+    /// constant-time `verify_password` is used for comparison, matching the durable backing.
     credentials: HashMap<UserId, String>,
     /// Outstanding account-recovery challenges: the opaque recovery token → the account it recovers
     /// and when the challenge expires. Mirrors the durable `recovery_tokens` table (token primary
@@ -530,14 +529,15 @@ impl ChirpRepository for InMemoryRepository {
     ///
     /// The user must exist ([`NotFound`](ServerError::NotFound) otherwise, matching the durable
     /// backing's `credentials.user_id` foreign key); setting an existing credential replaces it. The
-    /// secret is stored verbatim as the at-rest representation — the credential protocol is owned
-    /// downstream (`REQ-ID-*`); this backing only holds the slot.
+    /// secret is hashed with argon2id (PHC string format) before storage, so only the hash is held.
     async fn set_credential(&self, user: UserId, secret: &str) -> Result<(), ServerError> {
+        // Hash before acquiring the lock: keep the CPU-intensive KDF out of the critical section.
+        let hash = super::hash_password(secret)?;
         let mut store = self.lock()?;
         if !store.users.contains_key(&user) {
             return Err(ServerError::NotFound(format!("user {user}")));
         }
-        store.credentials.insert(user, secret.to_owned());
+        store.credentials.insert(user, hash);
         Ok(())
     }
 
@@ -561,7 +561,7 @@ impl ChirpRepository for InMemoryRepository {
             .credentials
             .get(&id)
             .ok_or_else(|| ServerError::Unauthorized("invalid username or secret".to_owned()))?;
-        if stored == secret {
+        if super::verify_password(secret, stored)? {
             Ok(id)
         } else {
             Err(ServerError::Unauthorized(
@@ -641,8 +641,14 @@ impl ChirpRepository for InMemoryRepository {
         }
 
         // Consume the single-use challenge and reset the credential (same effect as set_credential).
+        // Hash the new secret before releasing the lock so we can compute it outside the critical
+        // section; drop and re-acquire after hashing.
         store.recovery_tokens.remove(recovery_token);
-        store.credentials.insert(user, new_secret.to_owned());
+        let user_copy = user;
+        drop(store);
+        let new_hash = super::hash_password(new_secret)?;
+        let mut store = self.lock()?;
+        store.credentials.insert(user_copy, new_hash);
         Ok(())
     }
 

@@ -823,9 +823,9 @@ impl ChirpRepository for PostgresRepository {
     /// [`NotFound`](ServerError::NotFound) decision and the credential write are one atomic unit (the
     /// `credentials.user_id` foreign key is the in-store backstop). A present credential is replaced
     /// via `ON CONFLICT (user_id)` — the primary key makes "one credential per user" a store
-    /// invariant. The `secret` is persisted verbatim as the at-rest representation: its format and
-    /// the verification protocol are owned downstream (identity & trust, `REQ-ID-*`); this method
-    /// fixes only the durable slot and never logs the secret.
+    /// invariant. A present credential is replaced atomically. The `secret` is hashed with
+    /// argon2id (PHC string format) before storage — only the hash is persisted, so the plaintext
+    /// never reaches the database. The method never logs the secret.
     ///
     /// # Errors
     ///
@@ -833,7 +833,9 @@ impl ChirpRepository for PostgresRepository {
     /// [`Internal`](ServerError::Internal) if the existence check or the write cannot be durably
     /// committed — an undurable write is reported as failed, never falsely confirmed.
     async fn set_credential(&self, user: UserId, secret: &str) -> Result<(), ServerError> {
-        let secret = secret.to_owned();
+        // Hash outside the transaction closure: the CPU-intensive KDF must not hold a pooled
+        // connection during computation; compute the PHC string first, then open the transaction.
+        let hash = super::hash_password(secret)?;
         let updated_at = mapping::timestamp_to_column(now_millis());
         self.with_transaction(move |conn| {
             Box::pin(async move {
@@ -864,7 +866,7 @@ impl ChirpRepository for PostgresRepository {
                      SET secret = EXCLUDED.secret, updated_at = EXCLUDED.updated_at",
                 )
                 .bind(user_column)
-                .bind(&secret)
+                .bind(&hash)
                 .bind(updated_at)
                 .execute(&mut *conn)
                 .await
@@ -888,9 +890,9 @@ impl ChirpRepository for PostgresRepository {
     /// carries no injection surface. Verification fails [`Unauthorized`](ServerError::Unauthorized)
     /// **indistinguishably** whether the handle is unknown, has no stored credential, or the secret
     /// does not match — the store never discloses which held, so an attacker cannot enumerate
-    /// accounts. The secret comparison is a direct equality against the stored at-rest
-    /// representation; the credential/verification protocol (hashing, timing properties) is owned
-    /// downstream (`REQ-ID-*`), not decided here.
+    /// accounts. Verification uses constant-time argon2id `verify_password` against the stored
+    /// PHC hash, preventing timing side-channel attacks that a plain `==` would expose. A corrupt
+    /// stored hash surfaces as `Internal`, not `Unauthorized`.
     ///
     /// # Errors
     ///
@@ -916,11 +918,19 @@ impl ChirpRepository for PostgresRepository {
         })?;
 
         match row {
-            // A stored credential exists and the presented secret matches it: lift the id back
-            // through the boundary mapping (a corrupt id column surfaces as Internal).
-            Some((user_id, stored)) if stored == secret => mapping::column_to_user_id(user_id),
-            // Unknown handle, no credential, or a mismatch — all reported identically.
-            _ => Err(ServerError::Unauthorized(
+            // A stored credential exists; use constant-time argon2id verify to check the secret.
+            // A corrupt stored hash surfaces as Internal; a mismatch is Unauthorized.
+            Some((user_id, stored)) => {
+                if super::verify_password(secret, &stored)? {
+                    mapping::column_to_user_id(user_id)
+                } else {
+                    Err(ServerError::Unauthorized(
+                        "invalid username or secret".to_owned(),
+                    ))
+                }
+            }
+            // Unknown handle or no credential — reported identically to a mismatch.
+            None => Err(ServerError::Unauthorized(
                 "invalid username or secret".to_owned(),
             )),
         }
@@ -1043,8 +1053,8 @@ impl ChirpRepository for PostgresRepository {
     /// upsert** as [`set_credential`](ChirpRepository::set_credential) (`INSERT … ON CONFLICT
     /// (user_id) DO UPDATE`), so a credential set via recovery is indistinguishable from one set
     /// directly and [`verify_credential`](ChirpRepository::verify_credential) authenticates it. The
-    /// secret is persisted verbatim as the at-rest representation; its format and the credential
-    /// protocol are owned downstream (`REQ-ID-*`) and the secret is never logged.
+    /// new secret is hashed with argon2id before storage (matching `set_credential`), so the
+    /// plaintext is never at rest. The secret is never logged.
     ///
     /// # Errors
     ///
@@ -1059,7 +1069,8 @@ impl ChirpRepository for PostgresRepository {
     ) -> Result<(), ServerError> {
         let username = username.clone();
         let recovery_token = recovery_token.to_owned();
-        let new_secret = new_secret.to_owned();
+        // Hash before the transaction closure so the CPU-intensive KDF does not hold a connection.
+        let new_hash = super::hash_password(new_secret)?;
         let now = mapping::timestamp_to_column(now_millis());
         self.with_transaction(move |conn| {
             Box::pin(async move {
@@ -1111,7 +1122,7 @@ impl ChirpRepository for PostgresRepository {
                      SET secret = EXCLUDED.secret, updated_at = EXCLUDED.updated_at",
                 )
                 .bind(user_id_col)
-                .bind(&new_secret)
+                .bind(&new_hash)
                 .bind(now)
                 .execute(&mut *conn)
                 .await
