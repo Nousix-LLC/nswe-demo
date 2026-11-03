@@ -1,34 +1,34 @@
 # Scheduled sweep of expired transient durable state (REQ-OPS-010 / BAR-022).
 #
-# The server code already MODELS transient-state expiry — sessions, recovery_tokens, and
-# export_artifacts carry an `expires_at` (migration 0002_domain_schema.sql), expired sessions are
-# treated as absent at serve time, and `ChirpRepository::sweep_expired_transient_state()` reclaims
-# the expired rows (crates/chirp-server/src/repository/postgres.rs). What the code does NOT do is
-# INVOKE that sweep on a schedule: `main.rs` is a thin serve loop with no background task. This
-# CronJob is that schedule.
+# Invokes `chirp-server sweep` — the binary's sweep subcommand — rather than duplicating the
+# DELETE predicates as raw SQL (REQ-DOM-014: all durable state crosses the one seam). The
+# subcommand calls ChirpRepository::sweep_expired_transient_state() and exits 0; it applies
+# migrations on connect, so it is safe to schedule independently of the server pod start order.
 #
-# Mechanism choice (CronJob, not an in-process timer) — rationale:
-#   * It touches NO server code. The held expiry/sweep code (durable-impl commit 45a5ace) stays
-#     exactly as verified for #65/#66; this task schedules it, it does not reimplement it.
-#   * It needs NO chirp-server image rebuild. The durable image digest is produced by main's CI
-#     after merge and is owned by the image/wiring tasks; an in-process timer would only run inside
-#     a rebuilt-and-re-pinned image, entangling this retention work with that unresolved
-#     publish-on-main sequencing. A CronJob is independent of the chirp-server image entirely.
-#   * It is GitOps-delivered like every other manifest here: committed, reconciled by Argo CD. The
-#     `batch/CronJob` kind is already (additively) whitelisted in deploy/argocd/appproject.yaml.
-#   * It invokes the sweep's exact durable EFFECT. The three statements below are verbatim the
-#     DELETEs in sweep_expired_transient_state() (postgres.rs ~L1622-1649); `expires_at` is BIGINT
-#     epoch-milliseconds UTC (migration 0002, matching chirp_types::ids::Timestamp), so `now` is
-#     computed as (extract(epoch from now())*1000)::bigint. Under --single-transaction, now() is
-#     fixed at transaction start, so all three DELETEs share one instant — mirroring the code, which
-#     computes `now` once before its transaction. The policy for WHICH rows expire lives in the
-#     schema and the lifetime constants; this job only triggers reclamation on a cadence.
+# The original psql-based implementation duplicated the three DELETE predicates from
+# sweep_expired_transient_state() (postgres.rs) as raw SQL, creating a second source of truth
+# for the sweep logic (issue #117). This manifest fixes that by delegating entirely to the Rust
+# seam — the CronJob now carries no domain knowledge about which tables or predicates constitute
+# a sweep.
 #
 # Schedule rationale: expiry is already honoured at read time (an expired session resolves as
 # absent; an expired recovery token is rejected), so this sweep is storage RECLAMATION, not a
 # correctness gate. The shortest window is the 24h recovery token; hourly keeps expired rows from
 # lingering more than ~1h past expiry at negligible cost (three index-supported DELETEs —
 # sessions_expires_at_idx / recovery_tokens_expires_at_idx exist in migration 0002).
+#
+# Root cause of 2026-11-03 failures (chirp-transient-sweep-29895480 — 0/1 completions):
+# The CronJob ran 2 minutes before the chirp-server pod (re)started. At that point the
+# durable migrations had not yet been applied, so psql reported "relation sessions does not
+# exist". This was a start-order race, not a connectivity failure. The new implementation is
+# immune to this race: `chirp-server sweep` calls PostgresRepository::connect() which applies
+# migrations before executing the sweep, so it is safe to run before or after the server pod.
+#
+# NOTE: The image digest below is the current production image. It will be updated to the digest
+# produced by CI after this PR is merged and the main-push image job publishes the new build.
+# Until then, ArgoCD will apply this manifest but the sweep job will not run correctly (the old
+# binary does not implement the sweep subcommand). The image digest update is the final step after
+# the post-merge CI run completes.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -63,6 +63,9 @@ spec:
           # This job calls only the database; it never touches the Kubernetes API.
           automountServiceAccountToken: false
           terminationGracePeriodSeconds: 10
+          # The chirp-server image is private; the same pull secret the server Deployment uses.
+          imagePullSecrets:
+            - name: ghcr-pull
           # restricted-PSA-compliant (the chirp namespace enforces `restricted`): run as a nonroot
           # uid, drop all caps, seccomp RuntimeDefault, no privilege escalation, read-only root fs.
           securityContext:
@@ -73,54 +76,26 @@ spec:
               type: RuntimeDefault
           containers:
             - name: sweep
-              # Same digest-pinned image the Postgres StatefulSet uses (provisioning_notes.md): a
-              # version-matched psql client, already present in-cluster, pinned by immutable digest
-              # (never a movable tag).
-              image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+              # Same digest-pinned chirp-server image the Deployment uses (10-deployment.yaml),
+              # built --features postgres. The sweep subcommand calls
+              # ChirpRepository::sweep_expired_transient_state() — the single Rust seam (REQ-DOM-014).
+              # NOTE: update this digest after the post-merge CI run publishes the new image.
+              image: ghcr.io/nousix-llc/chirp-server@sha256:adaa4c26c94d2bffab0342d3dc279eb2d8b42e835494c59385c4b731e246fd41
               imagePullPolicy: IfNotPresent
-              command: ["psql"]
-              args:
-                - "--no-psqlrc"
-                - "-v"
-                - "ON_ERROR_STOP=1"
-                - "--single-transaction"
-                - "-c"
-                - "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= (extract(epoch from now())*1000)::bigint;"
-                - "-c"
-                - "DELETE FROM recovery_tokens WHERE expires_at <= (extract(epoch from now())*1000)::bigint;"
-                - "-c"
-                - "DELETE FROM export_artifacts WHERE expires_at <= (extract(epoch from now())*1000)::bigint;"
+              command: ["/usr/local/bin/chirp-server"]
+              args: ["sweep"]
               env:
-                # libpq connection parameters. The host/port are the frozen headless-Service DNS from
-                # the operational contract; the database/user/password come from the SAME out-of-band
-                # Secret chirp-db-credentials the server and StatefulSet use (never committed, not
-                # Argo CD-managed). PGSSLMODE is set to require: TLS is now enforced for all DB
-                # connections, closing the plaintext-DB-password-in-transit finding (#120).
-                - name: PGHOST
-                  value: chirp-postgres.chirp.svc.cluster.local
-                - name: PGPORT
-                  value: "5432"
-                - name: PGSSLMODE
-                  value: require
-                - name: PGCONNECT_TIMEOUT
-                  value: "10"
-                - name: PGDATABASE
+                # The single connection string consumed by PostgresRepository::connect().
+                # CHIRP_DATABASE_URL takes precedence over DATABASE_URL in the server crate.
+                # Sourced from the same out-of-band Secret the chirp-server Deployment uses —
+                # never committed to git. The URL must include sslmode=require (enforced by
+                # the operator when populating the secret — consistent with #120 which closed
+                # the plaintext-DB-password-in-transit finding).
+                - name: CHIRP_DATABASE_URL
                   valueFrom:
                     secretKeyRef:
                       name: chirp-db-credentials
-                      key: POSTGRES_DB
-                - name: PGUSER
-                  valueFrom:
-                    secretKeyRef:
-                      name: chirp-db-credentials
-                      key: POSTGRES_USER
-                - name: PGPASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: chirp-db-credentials
-                      key: POSTGRES_PASSWORD
-                - name: HOME
-                  value: /tmp     # psql scratch under the read-only root fs
+                      key: CHIRP_DATABASE_URL
               resources:
                 requests:
                   cpu: 10m

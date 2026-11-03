@@ -1,31 +1,38 @@
 //! `chirp-server` binary entrypoint.
 //!
-//! Boots the axum server over the default in-memory repository — no database or any external
-//! infrastructure required. The binary is a thin shell: it installs tracing, constructs the shared
-//! [`AppState`] and the [`build_router`] composition root (the same entry point the integration
-//! tests use), binds a TCP listener, and serves with graceful shutdown on Ctrl-C.
+//! Installs tracing, then dispatches on the optional first argument:
+//!
+//! * **No argument (default)** — serve mode: constructs [`AppState`], builds the axum router via
+//!   [`build_router`], binds a TCP listener, and serves with graceful shutdown on SIGINT/SIGTERM.
+//!   Selects the durable PostgreSQL backing when the binary is built with `--features postgres`
+//!   *and* `CHIRP_DATABASE_URL` / `DATABASE_URL` is set (the production path); otherwise the
+//!   in-memory [`InMemoryRepository`].
+//!
+//! * **`sweep`** — sweep mode (requires `--features postgres` and a configured database URL):
+//!   connects to PostgreSQL (applying migrations on first connect, exactly as the serve path does),
+//!   calls [`ChirpRepository::sweep_expired_transient_state`], logs the per-class reclaimed counts,
+//!   and exits 0. This is the scheduled reclamation path for expired transient durable state —
+//!   sessions, recovery tokens, export artefacts (REQ-OPS-010 / BAR-022). It calls the single Rust
+//!   seam rather than duplicating the DELETE predicates (REQ-DOM-014 compliance).
 //!
 //! # Running
 //!
 //! ```text
+//! # serve (default)
 //! cargo run -p chirp-server
+//!
+//! # sweep (requires the postgres feature and a database URL)
+//! CHIRP_DATABASE_URL=postgres://... cargo run -p chirp-server --features postgres -- sweep
 //! ```
 //!
 //! # Configuration (environment)
 //!
-//! * `CHIRP_BIND_ADDR` — the `host:port` to bind (default `127.0.0.1:3000`).
-//! * `CHIRP_STATIC_DIR` — the static-asset root for the SPA fallback (default: the crate-local
-//!   `static/` directory; it currently holds a placeholder page until the SPA bundle lands in #9).
-//! * `RUST_LOG` — the `tracing-subscriber` env-filter (default
-//!   `info,chirp_server=debug,tower_http=info`).
-//! * `CHIRP_DATABASE_URL` / `DATABASE_URL` — the PostgreSQL connection string that selects the
-//!   **durable** backing (ADR-0001). The selection is **config-driven, not a code edit**: when the
-//!   binary is built with `--features postgres` *and* a non-empty connection string is set (the
-//!   production path), the server constructs the durable `PostgresRepository`, applies migrations,
-//!   and serves against it; when the string is absent/empty, or the binary was built without the
-//!   `postgres` feature (the test/local default), it constructs the in-memory
-//!   [`InMemoryRepository`] and needs no database. `CHIRP_DATABASE_URL` takes precedence over
-//!   `DATABASE_URL` when both are set.
+//! * `CHIRP_BIND_ADDR` — host:port to bind (default `127.0.0.1:3000`); serve mode only.
+//! * `CHIRP_STATIC_DIR` — static-asset root for the SPA fallback; serve mode only.
+//! * `RUST_LOG` — tracing env-filter (default `info,chirp_server=debug,tower_http=info`).
+//! * `CHIRP_DATABASE_URL` / `DATABASE_URL` — PostgreSQL connection string (ADR-0001). Required for
+//!   `sweep`; optional for serve (falls back to in-memory when absent). `CHIRP_DATABASE_URL` takes
+//!   precedence over `DATABASE_URL` when both are set.
 
 use std::sync::Arc;
 
@@ -35,6 +42,62 @@ use chirp_server::{build_router, AppState, InMemoryRepository};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
+    let subcommand = std::env::args().nth(1);
+    match subcommand.as_deref() {
+        Some("sweep") => run_sweep().await,
+        None => run_serve().await,
+        Some(cmd) => {
+            Err(format!("unknown subcommand '{cmd}'; use 'sweep' or omit to serve").into())
+        }
+    }
+}
+
+/// Connects to PostgreSQL and runs the transient-state sweep (the `sweep` subcommand).
+///
+/// Calls [`chirp_server::ChirpRepository::sweep_expired_transient_state`] — the single Rust seam —
+/// rather than duplicating the DELETE predicates (REQ-DOM-014). Applies migrations on connect so
+/// the sweep path, like the serve path, never requires a pre-migrated schema.
+///
+/// # Errors
+///
+/// Returns an error if `CHIRP_DATABASE_URL` / `DATABASE_URL` is absent, if the connection pool
+/// cannot be established, if migrations fail, or if the sweep itself fails.
+#[cfg(feature = "postgres")]
+async fn run_sweep() -> Result<(), Box<dyn std::error::Error>> {
+    use chirp_server::ChirpRepository;
+
+    let database_url = durable_database_url()
+        .ok_or("chirp-server sweep: CHIRP_DATABASE_URL or DATABASE_URL must be set")?;
+    tracing::info!("sweep: connecting to PostgreSQL and applying migrations");
+    let repo = chirp_server::PostgresRepository::connect(&database_url).await?;
+    tracing::info!("sweep: calling sweep_expired_transient_state");
+    let result = repo.sweep_expired_transient_state().await?;
+    tracing::info!(
+        sessions = result.sessions,
+        recovery_tokens = result.recovery_tokens,
+        export_artifacts = result.export_artifacts,
+        total = result.total(),
+        "sweep: complete"
+    );
+    Ok(())
+}
+
+/// Stub used when the binary is built without `--features postgres`.
+///
+/// The `sweep` subcommand requires a durable store; the in-memory backing cannot satisfy the
+/// transient-sweep contract. Returning an error here makes a misconfigured binary fail loudly
+/// rather than silently running a no-op.
+#[cfg(not(feature = "postgres"))]
+async fn run_sweep() -> Result<(), Box<dyn std::error::Error>> {
+    Err(
+        "chirp-server sweep: this binary was built without the 'postgres' feature; \
+         rebuild with '--features postgres' to enable the sweep subcommand"
+            .into(),
+    )
+}
+
+/// Starts the axum HTTP server (the default mode when no subcommand is given).
+async fn run_serve() -> Result<(), Box<dyn std::error::Error>> {
     // Config-driven backend selection (ADR-0001): durable PostgreSQL when configured and compiled
     // in, in-memory otherwise. No code edit is required to switch between them.
     let state = build_app_state().await?;

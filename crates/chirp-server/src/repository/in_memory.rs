@@ -2207,6 +2207,36 @@ mod tests {
         );
     }
 
+    /// `login` always stamps a bounded (non-`None`) `expires_at` on the issued session.
+    ///
+    /// The sweep's `expires_at IS NOT NULL AND expires_at <= $1` predicate relies on this invariant:
+    /// a session with `None` (unbounded) expiry is intentionally skipped by the sweep and would
+    /// accumulate without bound if the login path ever wrote one. This test asserts that the active
+    /// login path never writes an unbounded session, against the in-memory backing (which mirrors the
+    /// durable path's behaviour — both stamp `SESSION_LIFETIME_MILLIS` on every new session).
+    #[tokio::test]
+    async fn login_always_stamps_a_bounded_session_expiry() {
+        let repo = InMemoryRepository::new();
+        let user = seed_user(&repo, "alice").await;
+        let auth = repo
+            .login(LoginRequest {
+                username: user.username.clone(),
+            })
+            .await
+            .expect("login succeeds");
+
+        let store = repo.lock().expect("store lock");
+        let session = store
+            .tokens
+            .get(&auth.token.0)
+            .expect("login must insert a session into the store");
+        assert!(
+            session.expires_at.is_some(),
+            "login must stamp a bounded expires_at (Some); a None expiry would make the \
+             session invisible to the sweep and permanently accumulate"
+        );
+    }
+
     /// The life-of-account content-retention identity (`content_retained_life_of_account`), store-free:
     /// user content persists across any number of transient sweeps and leaves the store ONLY by an
     /// explicit `delete_account` cascade — no lifetime/expiry/sweep path removes live content.
