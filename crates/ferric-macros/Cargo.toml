@@ -16,3 +16,8 @@ workspace = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+# Integration tests (tests/lowering.rs) need the ferric VNode/VElement/EventKind
+# types to assert structural equality against the view! macro's output.
+ferric = { path = "../ferric" }
