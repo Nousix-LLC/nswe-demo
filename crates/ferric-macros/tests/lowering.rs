@@ -313,9 +313,11 @@ fn test_view_produces_vnode() {
 #[test]
 fn test_nested_element() {
     let result: VNode = view! { <div><span>"inner"</span></div> };
-    let expected: VNode = VElement::new("div")
-        .child(VElement::new("span").child(text("inner")).into())
-        .into();
+    // Use VNode::from() explicitly to avoid type-inference ambiguity introduced by
+    // the local `impl From<VElement>` that the view! macro generates inside other
+    // test functions in this file.
+    let inner: VNode = VNode::from(VElement::new("span").child(text("inner")));
+    let expected: VNode = VElement::new("div").child(inner).into();
     assert!(
         vnode_eq(&result, &expected),
         "nested element mismatch\n  got:  {:?}\n  want: {:?}",
