@@ -58,12 +58,10 @@ spec:
         - name: ghcr-pull
       containers:
         - name: chirp-server
-          # Durable chirp-server image (built --features postgres). Pin by immutable digest only,
-          # never a movable tag. The durable digest is produced by main's CI after this change
-          # merges; until then this is a syntactically valid placeholder digest, so a pre-merge
-          # rollout is visibly not-ready rather than silently serving the non-durable in-memory
-          # image. Replace with the real digest from main's image build as the post-merge follow-up.
-          image: ghcr.io/nousix-llc/chirp-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # Durable chirp-server image (built --features postgres). Pinned by immutable digest;
+          # never a movable tag. Digest produced by main's CI for commit 0d5917dc (post-merge
+          # image build, run 41687555341). Closes #180; unblocks #64 closure.
+          image: ghcr.io/nousix-llc/chirp-server@sha256:adaa4c26c94d2bffab0342d3dc279eb2d8b42e835494c59385c4b731e246fd41
           imagePullPolicy: IfNotPresent   # digest is immutable; no need to always re-pull
           env:
             # Selects the durable PostgreSQL backend. CHIRP_DATABASE_URL takes precedence over
