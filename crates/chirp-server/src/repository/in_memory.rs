@@ -3,7 +3,7 @@
 //! [`InMemoryRepository`] keeps the entire application state in process behind a single
 //! [`std::sync::Mutex`], so the server boots and the whole test suite runs with **no database and
 //! no external infrastructure**. It is the demo's default backing; the `postgres` feature selects
-//! [`PostgresRepository`](crate::repository::postgres::PostgresRepository) as a second implementor
+//! `PostgresRepository` as a second implementor
 //! without replacing it in tests.
 //!
 //! # Concurrency model

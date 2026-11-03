@@ -19,7 +19,7 @@
 //!
 //! Persistence is abstracted behind the [`ChirpRepository`] trait so the server can run entirely
 //! in memory (the default [`InMemoryRepository`]) or against a real PostgreSQL database
-//! ([`repository::postgres::PostgresRepository`] via the `postgres` feature) — without changing
+//! (`PostgresRepository` via the `postgres` feature) — without changing
 //! a single handler. The transport layer holds the repository as `Arc<dyn ChirpRepository>` shared state.
 //!
 //! # What this crate exposes

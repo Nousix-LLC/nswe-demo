@@ -4,8 +4,8 @@
 //! single boundary between the transport/service layers and the store, which is what lets the demo
 //! run entirely in memory today and swap in a real database later without touching a handler. The
 //! default implementation is [`InMemoryRepository`] (see the [`in_memory`] module); the
-//! `postgres` feature provides [`PostgresRepository`](crate::repository::postgres::PostgresRepository)
-//! as a second implementor backed by a real database, and is never required for `cargo test`.
+//! `postgres` feature provides `PostgresRepository` as a second implementor backed by a real
+//! database, and is never required for `cargo test`.
 //!
 //! # Why a trait, and why `async`
 //!
@@ -61,7 +61,7 @@
 //! | `store_health` | [`store_health`](ChirpRepository::store_health) |
 //!
 //! These signatures are fully implemented in both [`InMemoryRepository`] and
-//! [`PostgresRepository`](crate::repository::postgres::PostgresRepository). The store-free test
+//! `PostgresRepository`. The store-free test
 //! suite exercises the in-memory path; the durable path is exercised in integration tests.
 //!
 //! # Transient-state lifetime and cleanup (REQ-OPS-010, #67 / BAR-022)
