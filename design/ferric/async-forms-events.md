@@ -813,8 +813,25 @@ exactly that shape for Ferric, composed additively on the payload seam.
 | REQ-ASYNC-040..043 | Forms and two-way input binding | 4 | usable_early | true |
 | **Total** | | **25** | | **true** |
 
-Sub-identities J1–J7 all pass (verified by `SUBTASK_afe_synthesis`; see `SYNTHESIS.md` for the
-verdict record).
+Sub-identity verification (inline):
+
+- **One continuous register (J1, J6).** The three capability ranges are disjoint and non-overlapping; this
+  document is the single assembled `async-forms-events.md`, carrying all three ranges in ascending id order with
+  no fragment left unplaced or double-placed.
+- **Covers `REQ-FW-006` (J2).** Each of the three `REQ-FW-006` clauses is covered by at least one `REQ-ASYNC-*`,
+  as the table above shows.
+- **The event-payload seam is defined once (J3).** The payload-carrying handler form lives only in
+  `REQ-ASYNC-020` (with its reads in `022`, its control in `023`, its re-bind guarantee in `024`). Section C
+  references those ids read-only and defines no second handler form.
+- **Additive over frozen surfaces (J4).** Every requirement that touches `EventKind`, `EventHandler = Rc<dyn
+  Fn()>`, `VElement::on`, `Patch::SetEvents`, `Signal`/`create_signal`, the reactive core, or `dom::mount`
+  extends it; no frozen item is redefined or removed, and a baseline-written app still compiles.
+- **SSR and HTTP by reference only (J5).** `REQ-ASYNC-012`/`013` reference `REQ-SSR-*` read-only and
+  `REQ-ASYNC-014` references `REQ-HTTP-*` read-only; no id outside `REQ-ASYNC-*` is minted here.
+- **Conforms to the parent schema (J7).** Every requirement carries the schema's `requirement_fields` (id,
+  statement, rationale, acceptance_criteria, stage, release_gating, references); stages are `usable_early` or
+  `one_oh`; verification methods are `example_build`, `automated_test`, or `doc_inspection`. This concern adds no
+  vocabulary and redefines none.
 
 Unused headroom (reserved per `../contracts/_MANIFEST.yaml`): REQ-ASYNC-017..019,
 REQ-ASYNC-025..039, REQ-ASYNC-044..059.

@@ -1,23 +1,25 @@
 # Ferric 1.0 — Release Plan
 
-This document is the authoritative release plan for Ferric 1.0: eight epics under board issue #1, each a coherent, landable capability with acceptance criteria tracing to the design. The epics fold in the existing router (#5) and HTTP/JSON-client (#6) issues and are ordered so the usable-early floor lands before the full 1.0 bar.
+This document is the authoritative release plan for Ferric 1.0: eight epics (#129–#136) filed under the NSWE Delivery project, each a coherent, landable capability with acceptance criteria tracing to the design. The plan extends the existing router (#5) and HTTP/JSON-client (#6) issues and is ordered so the usable-early floor lands before the full 1.0 bar.
 
 ---
 
 ## Epic Landscape
 
-Eight epics sit under issue #1. Four are `usable_early` (together they constitute a working client-side framework); four are `one_oh` (required for the 1.0 release bar, with SSR and Hydration as the must-have).
+Eight epics (#129–#136) are filed under the NSWE Delivery project. Four are `usable_early` (together they constitute a working client-side framework); four are `one_oh` (required for the 1.0 release bar, with SSR and Hydration as the must-have).
 
-| Epic | Design area(s) | BAR-FERRIC | Stage | Depends on | Issue fold |
-|---|---|---|---|---|---|
-| Authoring Model | authoring-model; scope-and-requirements | BAR-001, BAR-002, BAR-007–011 | usable_early | — | — |
-| Async, Forms, and Events | async-forms-events; scope-and-requirements | BAR-012, BAR-013, BAR-014 | usable_early | Authoring Model | — |
-| Client-side Router | router-and-http Part 1; scope-and-requirements | BAR-015, BAR-016 | usable_early | Authoring Model | extends #5 |
-| HTTP/JSON Client | router-and-http Part 2; scope-and-requirements | BAR-017, BAR-018 | usable_early | Authoring Model | extends #6 |
-| SSR and Hydration | ssr-hydration; scope-and-requirements | BAR-003, BAR-004 (must-have), BAR-005, BAR-006 | one_oh | Authoring Model, Async/Forms/Events | — |
-| Docs and DX | docs-and-dx; scope-and-requirements | BAR-019, BAR-020, BAR-021, BAR-022 | one_oh | all usable_early + SSR | — |
-| Performance and Benchmark | performance-and-benchmark; scope-and-requirements | BAR-026, BAR-027, BAR-028 | one_oh | Authoring Model, Async/Forms/Events, SSR | — |
-| Release and Distribution | release-and-distribution; scope-and-requirements | BAR-023, BAR-024, BAR-025, BAR-029 | one_oh | Docs and DX, Performance and Benchmark | — |
+| Issue | Epic | Design area(s) | BAR-FERRIC | Stage | Depends on | Issue fold |
+|---|---|---|---|---|---|---|
+| #129 | Authoring Model | authoring-model; scope-and-requirements | BAR-001, BAR-002, BAR-007–011 | usable_early | — | — |
+| #130 | Async, Forms, and Events | async-forms-events; scope-and-requirements | BAR-012, BAR-013, BAR-014 | usable_early | #129 | — |
+| #131 | Client-side Router | router-and-http Part 1; scope-and-requirements | BAR-015, BAR-016 | usable_early / one_oh | #129 | extends #5 |
+| #132 | HTTP/JSON Client | router-and-http Part 2; scope-and-requirements | BAR-017, BAR-018 | usable_early / one_oh | #129 | extends #6 |
+| #133 | SSR and Hydration | ssr-hydration; scope-and-requirements | BAR-003, BAR-004 (must-have), BAR-005, BAR-006 | one_oh | #129, #130 | — |
+| #134 | Docs and DX | docs-and-dx; scope-and-requirements | BAR-019, BAR-020, BAR-021, BAR-022 | one_oh | all usable_early + #133 | — |
+| #135 | Performance and Benchmark | performance-and-benchmark; scope-and-requirements | BAR-026, BAR-027, BAR-028 | one_oh | #129, #130, #133 | — |
+| #136 | Release and Distribution | release-and-distribution; scope-and-requirements | BAR-023, BAR-024, BAR-025, BAR-029 | one_oh | #134, #135 | — |
+
+**Note on mixed staging:** The Client-side Router epic (#131) and HTTP/JSON Client epic (#132) are labeled `usable_early / one_oh` because each contains one `one_oh` work item (Active-route awareness → BAR-FERRIC-016 for #131; PATCH+timeout+footprint → BAR-FERRIC-018 for #132). The remaining work items within each epic are `usable_early`. Individual work items carry their own stage labels below.
 
 ---
 
@@ -50,16 +52,16 @@ Authoring Model
 
 Neither issue is re-opened or superseded; both are extended by a new epic that adds capabilities over the frozen prelude surface each issue shipped.
 
-**Issue #5 (ferric-router scaffold)** shipped `crates/ferric-router` with a flat route table, path parameters, History-API push navigation, a reactive outlet, an in-app link, and a frozen `prelude` surface. That surface is carried forward unchanged. The Client-side Router epic adds, additively: nested routes with a nested outlet, replace navigation, active-route awareness for links (`REQ-RT-007`, `BAR-016`), and per-level fallback handling. Issue #5 is closed (done); the epic extends its scope without reopening or superseding it.
+**Issue #5 (ferric-router scaffold)** shipped `crates/ferric-router` with a flat route table, path parameters, History-API push navigation, a reactive outlet, an in-app link, and a frozen `prelude` surface. That surface is carried forward unchanged. The Client-side Router epic (#131) adds, additively: nested routes with a nested outlet, replace navigation, active-route awareness for links (`REQ-RT-007`, `BAR-016`), and per-level fallback handling. Issue #5 is closed (done); epic #131 extends its scope without reopening or superseding it.
 
-**Issue #6 (ferric-http scaffold)** shipped `crates/ferric-http` with typed GET/POST/PUT/DELETE, serde, error handling, and a frozen `prelude` surface. That surface is carried forward unchanged. The HTTP/JSON Client epic adds, additively: PATCH support, configurable timeout, and a lean-dependency-footprint requirement (`REQ-HTTP-*` additions, `BAR-018`). Issue #6 is closed (done); the epic extends its scope without reopening or superseding it.
+**Issue #6 (ferric-http scaffold)** shipped `crates/ferric-http` with typed GET/POST/PUT/DELETE, serde, error handling, and a frozen `prelude` surface. That surface is carried forward unchanged. The HTTP/JSON Client epic (#132) adds, additively: PATCH support, configurable timeout, and a lean-dependency-footprint requirement (`REQ-HTTP-*` additions, `BAR-018`). Issue #6 is closed (done); epic #132 extends its scope without reopening or superseding it.
 
-### Fold table (for SUBTASK_file_backlog)
+### Fold table
 
-| Issue | Current status | Action |
-|---|---|---|
-| #5 — ferric-router scaffold | Closed | Add a comment on #5 pointing to the Client-side Router epic; note that the epic extends #5 |
-| #6 — ferric-http scaffold | Closed | Add a comment on #6 pointing to the HTTP/JSON Client epic; note that the epic extends #6 |
+| Issue | Filed epic | Current status | Action |
+|---|---|---|---|
+| #5 — ferric-router scaffold | #131 (Client-side Router) | Closed | Add a comment on #5 pointing to epic #131; note that #131 extends #5 |
+| #6 — ferric-http scaffold | #132 (HTTP/JSON Client) | Closed | Add a comment on #6 pointing to epic #132; note that #132 extends #6 |
 
 ---
 

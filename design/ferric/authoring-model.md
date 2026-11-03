@@ -1104,6 +1104,20 @@ Owned by `SUBTASK_view_macro`. Ids zero-padded, monotonic within band (IA1).
   the documented rule. *(automated_test, doc_inspection)*
 - *Stage:* usable_early · *Refs:* REQ-FW-005.
 
+**REQ-API-029b — A non-closure value on an `on:<name>=` binding is diagnosed at the value span.**
+- *Statement:* When the value supplied to an `on:<name>=` attribute is not a `Fn()` closure (e.g., an integer
+  literal, a string, or a function pointer rather than a closure), the `view!` macro emits a compile-time
+  diagnostic at the value's span, naming the event and stating that a `Fn()` closure is expected. A `trybuild`
+  fixture covers this case in the diagnostics suite.
+- *Rationale:* The §2.6 diagnostics table names this diagnostic as expected: "`on:click` expects a handler
+  closure". Without a specific requirement, the case falls between REQ-API-025 (wrong-typed attribute/text
+  values) and REQ-API-028 (umbrella trybuild bar). Naming it explicitly ensures it has a committed `stderr`
+  fixture.
+- *Acceptance:* A `trybuild` fixture supplies a non-closure value to an `on:click` binding and the committed
+  `stderr` contains a diagnostic at the value span naming the event and the closure expectation; `cargo test`
+  runs the fixture and it matches its committed `stderr`. *(automated_test)*
+- *Stage:* usable_early · *Release gating:* true · *Refs:* REQ-FW-014, REQ-API-028.
+
 ---
 
 ### Band B — the component model (REQ-API-030 … 059)

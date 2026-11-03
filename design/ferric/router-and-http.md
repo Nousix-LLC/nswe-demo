@@ -790,6 +790,25 @@ Because #6 is closed, the release plan should record the fold as follows (the pl
 
 ---
 
+## How the two parts realize `REQ-FW-007`
+
+`REQ-FW-007` asks for client routing with route parameters, nested routes, and in-app links, plus a
+typed JSON request/response that treats a non-2xx status as an error. The combined registers cover it:
+
+| `REQ-FW-007` surface | Covered by |
+|---|---|
+| Client routing with route parameters | `REQ-RT-001` (route table + path params), `REQ-RT-002` (reactive outlet) |
+| Nested routes | `REQ-RT-005` (nested routes + nested outlet), `REQ-RT-006` (per-level fallback) |
+| In-app links / navigation | `REQ-RT-004` (client-side links), `REQ-RT-003` (push/replace/back-forward) |
+| Typed JSON request/response | `REQ-HTTP-004` (typed request body), `REQ-HTTP-005`/`006` (typed round-trip, owned response) |
+| Non-2xx status as an error | `REQ-HTTP-008` (non-2xx is `Error::Status`), `REQ-HTTP-005` (safe path errors on non-2xx) |
+
+Both capabilities sit on the `usable_early` floor for their core and add their 1.0 work additively
+over the frozen `ferric-router` (#5) and `ferric-http` (#6) surfaces, each board issue folded in
+rather than duplicated.
+
+---
+
 ## Metadata
 
 - **Composed by:** `SUBTASK_synthesis` from `SUBTASK_router/router.md` (owns `REQ-RT-*`) and
@@ -800,7 +819,25 @@ Because #6 is closed, the release plan should record the fold as follows (the pl
 - **Conforms to:** `../contracts/id_and_traceability_schema.yaml` (REQ fields, stage vocabulary,
   `verification_method`, `release_gating`); `contracts/_MANIFEST.yaml` (ownership, `doc_layout`,
   identities SI1–SI6).
-- **Identities asserted (SI1–SI6):** all PASS — see `SYNTHESIS.md` at this workspace for verdicts.
+- **Identities asserted (SI1–SI6):**
+  - **SI1 — disjoint sub-registers — PASS.** `REQ-RT-*` ids are minted only in Part 1; `REQ-HTTP-*`
+    ids only in Part 2. Every foreign-register mention in either part is read-only.
+  - **SI2 — additive over frozen surfaces — PASS.** Router: a dedicated relationship-to-frozen section
+    carries forward all frozen `ferric-router` signatures unchanged and flags each 1.0 addition
+    additive. HTTP: the frozen `ferric-http` prelude is ratified and carried forward; the two 1.0
+    additions (`REQ-HTTP-009`, `REQ-HTTP-010`) are each flagged additive. `REQ-RT-008` and
+    `REQ-HTTP-013` state the additive-only condition as testable requirements. Realizes `REQ-FW-009`.
+  - **SI3 — fold recorded, not duplicated — PASS.** Both board-fold sections record #5 and #6 as
+    CLOSED/delivered baselines, scope new work to the additive additions, and instruct the release plan
+    to file under existing epics with `supersedes` rather than open duplicates. Feeds parent I7.
+  - **SI4 — composed once — PASS.** Both full registers and both board-fold sections are composed into
+    one document here. Nothing dropped; nothing double-placed. Realizes parent I8.
+  - **SI5 — realizes `REQ-FW-007` — PASS.** Every element of `REQ-FW-007` is covered; see the table
+    above for the per-element mapping.
+  - **SI6 — testable criteria — PASS.** Every release-gating requirement (`REQ-RT-001`–`008`,
+    `REQ-HTTP-001`–`013`) carries at least one acceptance criterion naming a parent-schema
+    `verification_method`. `REQ-RT-009` (post-1.0 deferral, `release_gating: false`) carries no
+    criterion; SI6 binds release-gating requirements only, so SI6 holds.
 - **Grounding:**
   - Router: frozen surface read from `crates/ferric-router/src/` and `contracts/ferric_router_api.rs`
     at `276138f`; board issue #5 state read from the issue tracker (CLOSED). Peer behavior

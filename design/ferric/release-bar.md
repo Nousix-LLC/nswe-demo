@@ -625,6 +625,7 @@ This table is the primary check for identity I3: every row must have a BAR entry
 | REQ-DX-005 | one_oh | BAR-FERRIC-021 |
 | REQ-DX-006 | one_oh | BAR-FERRIC-021 |
 | REQ-DX-007 (SSR build docs) | one_oh | BAR-FERRIC-021 |
+| REQ-DX-008 | one_oh | BAR-FERRIC-022 |
 | REQ-DX-009 | one_oh | BAR-FERRIC-022 |
 | REQ-DX-010 | one_oh | BAR-FERRIC-022 |
 | REQ-REL-001 | one_oh | BAR-FERRIC-023 |
@@ -642,7 +643,9 @@ This table is the primary check for identity I3: every row must have a BAR entry
 | REQ-REL-021 | one_oh | BAR-FERRIC-024 |
 | REQ-REL-022 | one_oh | BAR-FERRIC-024 |
 | REQ-REL-023 | one_oh | BAR-FERRIC-024 |
+| REQ-REL-024 | one_oh | BAR-FERRIC-024 |
 | REQ-REL-025 | one_oh | BAR-FERRIC-024 |
+| REQ-REL-027 | one_oh | BAR-FERRIC-024 |
 | REQ-REL-026 | one_oh | BAR-FERRIC-024 |
 | REQ-REL-028 | one_oh | BAR-FERRIC-024 |
 | REQ-REL-029 | one_oh | BAR-FERRIC-024 |

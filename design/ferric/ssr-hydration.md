@@ -196,6 +196,14 @@ are the `REQ-SSR-*` register in §7, all `stage: one_oh`.
 - **Islands / partial hydration.** Hydrating only marked subtrees and leaving the rest static (Qwik, Astro,
   Leptos islands) is a performance strategy layered on whole-document hydration; the 1.0 hydrates the app, and
   islands are a later optimization.
+- **Component panics during `render_to_string` (deferred).** If a component panics during a server render,
+  `render_to_string` will unwind through the Axum handler, propagating the panic. Ferric 1.0 does not require
+  `render_to_string` to return `Result<String, RenderError>` or to catch panics internally. An Axum handler
+  calling `render_to_string` should wrap the call in `std::panic::catch_unwind` (or equivalent) and respond
+  with an appropriate HTTP error if needed; that is the application's responsibility, not the framework's, in
+  1.0. A framework-level `Result`-returning render surface is post-1.0. *Production risk: an uncaught panic
+  aborts the request; callers that do not wrap the call will return a 500 or a dropped connection. This is
+  noted so the decision is explicit, not silent.*
 
 These SSR-area deferrals are named so the bar is drawn without a hidden cut. They sit outside the `REQ-SSR-*`
 gating set below.
@@ -274,9 +282,18 @@ nothing in it is an early-usable-floor capability.
 - **Rationale:** The reactive runtime is thread-local; a server that renders many requests must isolate each
   render's reactive context or it will serve one user state from another user's render — a correctness and a
   data-safety failure, not a performance detail.
+- **Design constraint (isolation mechanism):** `render_to_string` MUST invoke the component's `render()`
+  method without an active reactive observer on the thread-local stack — that is, outside any `create_effect`
+  or equivalent reactive tracking context. The `dom::mount` entry point wraps the render in a `create_effect`
+  so that signal reads register subscriptions for future re-renders; `render_to_string` must NOT follow this
+  pattern. Any signal read during a server render that registers a subscription to a thread-local observer
+  will leak that subscription across requests and violate this requirement. Implementers must confirm that
+  the call path through `render_to_string` contains no `create_effect` wrapper at any level.
 - **Acceptance criteria:** A stated test renders two requests with different seeded state (concurrently, or in
   a way that would expose shared state) and each rendered output reflects only its own request's state; no
-  value from one render appears in the other.
+  value from one render appears in the other. A separate test confirms that calling `render_to_string` leaves
+  no residual reactive subscription in the thread-local runtime (i.e., the subscriber count for a signal
+  seeded only for the render returns to zero after `render_to_string` completes).
 - **Stage:** one_oh · **Release gating:** true
 - **References:** `REQ-FW-004`.
 

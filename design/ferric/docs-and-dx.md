@@ -166,8 +166,11 @@ MVP-vs-1.0 line); `release_gating` is `true` for every requirement here (the DX 
 - **Rationale:** Every credible peer ships a conceptual guide (the Leptos Book; the Dioxus and Yew guides); an
   evaluating author (A1) and an application author (A2) learn the model from it, and a framework whose only true
   documentation is its source cannot be evaluated or adopted at scale.
-- **Acceptance criteria:** A guide exists in the repository covering each of the named topics; a reviewer
-  confirms each topic is present and that its description matches the shipped behavior for a stated example.
+- **Acceptance criteria:** A guide exists in the repository covering each of the named topics (reactivity,
+  component/view model, authoring macro, SSR + hydration, routing, data/async/forms); a reviewer reads each
+  topic's description and confirms the described behavior against the tutorial end-state app (`REQ-DX-002`) or
+  against the relevant named example in `REQ-DX-004`, whichever the guide's own cross-reference names. A topic
+  entry whose description cannot be checked against one of these two artifacts does not satisfy this criterion.
 - **Stage:** one_oh · **Release gating:** true · **Verification:** doc_inspection
 - **Traceability:** `REQ-FW-011`; JA1, JA2; A1, A2.
 
@@ -230,7 +233,10 @@ MVP-vs-1.0 line); `release_gating` is `true` for every requirement here (the DX 
   requirement checks the connection end to end.
 - **Acceptance criteria:** A reviewer who has not used Ferric completes the four documented steps (install
   prerequisites, scaffold from the starter, build and serve, follow the tutorial to its compiling end state)
-  using only the repository's documentation and the standard toolchain, and reaches a running app at each stage.
+  using only the repository's documentation and the standard toolchain, reaches a running app at each stage,
+  and does so within a single working session on a current workstation (typically ≤ 4 hours, excluding any
+  waiting for Rust or toolchain downloads). A step requiring out-of-band knowledge not present in the
+  documentation — or requiring debugging steps with no documented path — fails this criterion.
 - **Stage:** one_oh · **Release gating:** true · **Verification:** example_build, doc_inspection
 - **Traceability:** `REQ-FW-002`, `REQ-FW-011`; JA1, JA2; A1, A2. Depends on `REQ-DX-002`, `REQ-DX-005`,
   `REQ-DX-007`.
@@ -256,10 +262,14 @@ MVP-vs-1.0 line); `release_gating` is `true` for every requirement here (the DX 
 - **Rationale:** What happens when an author gets it wrong is a large part of whether a Rust frontend framework
   is kept or abandoned; the diagnostics themselves are `REQ-API-*` / `REQ-FW-014`, but an author also needs them
   explained where they look for help.
-- **Acceptance criteria:** A troubleshooting section exists listing a stated set of common mistakes (for example
-  a malformed `view!`, a misused prop, a missing mount element) with resolutions; a reviewer reproduces the
-  stated cases and confirms the documented guidance matches the observed diagnostic. Representative macro
-  diagnostics are covered by a `trybuild` test owned under `REQ-API-*`.
+- **Acceptance criteria:** A troubleshooting section exists covering, at minimum, the following cases: (1) a
+  malformed `view!` macro call (e.g., unclosed tag or invalid attribute syntax) and the expected compiler
+  diagnostic; (2) a wrong-typed prop value passed to a component and the expected compiler diagnostic; (3) a
+  missing mount-point element in the HTML and the expected runtime behavior; (4) a type-mismatch on a signal
+  (e.g., setting a `Signal<String>` from an `i32`) and the expected compiler diagnostic; (5) an incorrect async
+  resource usage (e.g., reading a resource outside `Suspense`) and the expected behavior. A reviewer reproduces
+  each named case and confirms the documented guidance matches the observed diagnostic or behavior.
+  Representative macro diagnostics are covered by a `trybuild` test owned under `REQ-API-*`.
 - **Stage:** usable_early · **Release gating:** true · **Verification:** doc_inspection, automated_test
 - **Traceability:** `REQ-FW-014`; JA2; A2, A3. Diagnostics mechanism → `REQ-API-*` (read-only).
 

@@ -415,7 +415,7 @@ settled here, and no other area's id is minted here. Conformance to `../contract
 #### REQ-FW-013 — A lean dependency footprint
 - **Statement:** The 1.0 preserves Ferric's lean dependency footprint — the core builds on `wasm-bindgen`, `web-sys`, and `js-sys` without pulling in a heavy runtime — so the bundle-size cost stays defensible.
 - **Rationale:** In WASM, every dependency is downloaded bytes; leanness is the baseline's stated design choice and a real differentiator against heavier stacks. Letting the dependency set grow unchecked during the 1.0 work would quietly erode the performance story the framework competes on.
-- **Acceptance criteria:** The core framework's required dependency set remains limited to the WASM-binding essentials plus narrowly-scoped additions justified per crate (the HTTP client's `serde`/`wasm-bindgen-futures` being the expected example); no heavy general-purpose runtime is introduced; the dependency set is documented and its bundle-size impact is reflected in the performance numbers.
+- **Acceptance criteria:** The core framework's required dependency set is documented per crate; the `ferric` core's required transitive dependencies are limited to `wasm-bindgen`, `web-sys`, and `js-sys`; the `ferric-http` client may additionally include `serde`, `serde_json`, and `wasm-bindgen-futures`; no heavy general-purpose runtime (e.g., Tokio, async-std) is introduced. The bundle-size and dependency-footprint numbers measured under `REQ-FW-012` serve as the falsifiable evidence: a bundle within the stated measured bounds satisfies this requirement; a bundle that substantially exceeds the stated bounds or introduces an undocumented transitive dependency fails it.
 - **Stage:** one_oh · **Release gating:** true
 - **Traceability:** §1; A1, A4. Bundle-size measurement → performance (`REQ-PERF-*`); per-crate dependency choices → each owning area.
 
@@ -550,6 +550,41 @@ do not gate the release, and the release bar must leave them out.
   not require it; it is recorded as a possible future direction, out of this release.
 - **Stage:** post_one_oh · **Release gating:** false · referenced by no `BAR-FERRIC-*`.
 
+#### REQ-FW-019 — Framework-level accessibility contract (deferred)
+- **Statement (deferred):** A framework-level accessibility contract — ARIA attribute passthrough on
+  `view!`-macro elements to the real DOM, accessibility-tree integrity under keyed-diff rendering and
+  hydration, and focus management as a framework concern — is **not** part of 1.0.
+- **Reason:** Individual surfaces already carry specific accessibility requirements where they are directly
+  in scope: the `<Link>` component is required to be keyboard-focusable and announced by assistive technology
+  (`REQ-RT-005`), and `aria-current="page"` is required on active links (`REQ-RT-007`). A broader
+  *framework-level* accessibility contract — which would specify how the `view!` macro handles arbitrary ARIA
+  attributes, how the keyed diff preserves the accessibility tree, and what focus management primitives the
+  framework exposes — is a substantial design surface that goes beyond the individual feature requirements
+  already registered. It is not a prerequisite for building or using the 1.0 framework; it is recorded here
+  as post-1.0 scope to be designed against real app experience.
+- **Stage:** post_one_oh · **Release gating:** false · referenced by no `BAR-FERRIC-*`.
+
+#### REQ-FW-020 — Component-level error boundaries (deferred)
+- **Statement (deferred):** A component-level error-boundary mechanism — containing WASM-thread panics so a
+  single component error does not crash the whole application — is **not** part of 1.0.
+- **Reason:** WASM execution runs in a single thread; a panic in any component currently aborts that thread,
+  taking the whole app down. Containing this requires a panic-catching mechanism (`std::panic::catch_unwind`
+  or a WASM-specific equivalent) and a framework-level error-boundary API. This is a significant design and
+  implementation surface. For 1.0, the existing `<ErrorBoundary>` component (`REQ-ASYNC-*`) handles
+  *async-resource* errors (not panics), and that is the scoped error-handling story for this release.
+  Extending containment to synchronous component panics is post-1.0.
+- **Stage:** post_one_oh · **Release gating:** false · referenced by no `BAR-FERRIC-*`.
+
+#### REQ-FW-021 — Component testing utilities (deferred)
+- **Statement (deferred):** A framework-level component testing utility — a way to render a single component
+  in an environment outside a browser (e.g., a headless WASM runner or a DOM-mocking test harness) and
+  assert on its output — is **not** part of 1.0.
+- **Reason:** Ferric's rendering is tightly coupled to the browser's real DOM through `web-sys` bindings.
+  Decoupling the component render path from the real DOM to support a test-only environment is a non-trivial
+  architectural surface. For 1.0, component behavior is verified through integration tests against a running
+  application (see `REQ-DX-004`, `REQ-REL-*`). A headless or DOM-mocking render path is post-1.0.
+- **Stage:** post_one_oh · **Release gating:** false · referenced by no `BAR-FERRIC-*`.
+
 ---
 
 ## Metadata
@@ -561,8 +596,7 @@ do not gate the release, and the release bar must leave them out.
 - **Grounding commit:** `Nousix-LLC/nswe-demo` @ `276138f` (`main`).
 - **Register summary:** `REQ-FW-001`–`REQ-FW-014` are 1.0 requirements (`release_gating: true`), staged
   `usable_early` (003, 005, 006, 007, 009, 014) or `one_oh` (001, 002, 004, 008, 010, 011, 012, 013);
-  `REQ-FW-015`–`REQ-FW-018` are recorded post-1.0 deferrals (`post_one_oh`, `release_gating: false`,
+  `REQ-FW-015`–`REQ-FW-021` are recorded post-1.0 deferrals (`post_one_oh`, `release_gating: false`,
   referenced by no `BAR-FERRIC-*`).
 - **Cross-references** to `REQ-SSR-*`, `REQ-API-*`, `REQ-ASYNC-*`, `REQ-RT-*`, `REQ-HTTP-*`, `REQ-DX-*`,
   `REQ-REL-*`, `REQ-PERF-*` are read-only; those registers are owned by their sibling spokes.
-```
