@@ -1,0 +1,168 @@
+# chirp durable store — single-primary PostgreSQL StatefulSet.
+# Owned by SUBTASK_store_provisioning (EPIC-PERSIST #64/#67). This is the pod-independent durable
+# store ADR-0001 fixes: one PostgreSQL primary reached by chirp-server over the network via sqlx on
+# CHIRP_DATABASE_URL. Domain state lives on a per-replica PersistentVolumeClaim (volumeClaimTemplates),
+# so it OUTLIVES any chirp-server pod and any postgres pod across restart, redeploy, and reschedule.
+#
+# Composed against ../../contracts/deploy_durability_contract.yaml (FROZEN seam, read-only):
+#   store.engine=postgresql, topology=single-primary-statefulset, primary_replicas=1 (no HA this
+#   release — ADR-0001 §2, a documented limitation), headless_service=true, port=5432;
+#   connection.env_var=CHIRP_DATABASE_URL, secret_handling=out-of-band; psa.standard=restricted.
+#
+# Identities this file carries (../../contracts/_MANIFEST.yaml):
+#   * store-is-pod-independent — kind StatefulSet with volumeClaimTemplates (a PVC per ordinal).
+#   * single-writer-posture    — spec.replicas == 1 (one writable primary; no HA/failover).
+#   * (argocd-can-sync-store is carried by the additive AppProject whitelist in
+#      ../argocd/appproject.yaml; schema-versioned is carried by the server's sqlx migrator at startup.)
+#
+# The DB name / user / headless-service DNS / StatefulSet name / PVC size are recorded (frozen) in
+# this task's outputs/provisioning_notes.md — the reference SUBTASK_server_wiring, SUBTASK_retention_capacity,
+# SUBTASK_durability_drill, and the gate read.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chirp-postgres
+  namespace: chirp
+  labels:
+    app.kubernetes.io/name: chirp-postgres
+    app.kubernetes.io/part-of: chirp
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: argocd
+spec:
+  # The headless Service (45-postgres-service.yaml) that gives the primary stable pod DNS.
+  serviceName: chirp-postgres
+  # replicas: 1 is DELIBERATE and frozen by ADR-0001 §2: exactly one writable PostgreSQL primary
+  # holds one consistent dataset. No HA / failover / read-replica this release (documented limitation).
+  # Data can never silently fork because there is never more than one writable copy.
+  replicas: 1
+  revisionHistoryLimit: 5
+  # Keep per-ordinal PVCs on scale-down AND on StatefulSet deletion — the data is the product and must
+  # not be destroyed by a controller action. (GA persistentVolumeClaimRetentionPolicy; default is
+  # Retain/Retain, set explicitly here because silence would itself be a retention choice.) Pair with a
+  # Retain-reclaim StorageClass for full safety; on k3d the default `local-path` PV persists on-node.
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chirp-postgres
+      app.kubernetes.io/part-of: chirp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chirp-postgres
+        app.kubernetes.io/part-of: chirp
+        app.kubernetes.io/component: database
+        app.kubernetes.io/managed-by: argocd
+    spec:
+      # Postgres does not call the Kubernetes API; do not mount a ServiceAccount token.
+      automountServiceAccountToken: false
+      # Postgres handles SIGTERM with a fast/smart shutdown; 60s is ample to flush and checkpoint.
+      terminationGracePeriodSeconds: 60
+      # --- restricted-PSA pod posture (namespace enforces pod-security.kubernetes.io/enforce: restricted) ---
+      # The stock postgres:17-alpine `postgres` user is uid/gid 70 (verified). Running as that non-root
+      # uid satisfies runAsNonRoot; fsGroup 70 makes the PVC group-owned and writable by the process so
+      # initdb/the server can write PGDATA without a root chown step.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch   # avoid a recursive chown of the whole volume on every mount
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          # postgres:17-alpine pinned by immutable manifest-list digest (never a movable tag).
+          image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+          imagePullPolicy: IfNotPresent     # digest is immutable; no need to always re-pull
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          # Database name / superuser / password come from the OUT-OF-BAND Secret `chirp-db-credentials`
+          # (namespace chirp, NOT committed to git, NOT ArgoCD-managed — see README.md and
+          # outputs/provisioning_notes.md). These MUST agree with the CHIRP_DATABASE_URL in the same
+          # Secret that SUBTASK_server_wiring injects into chirp-server.
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: chirp-db-credentials
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: chirp-db-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chirp-db-credentials
+                  key: POSTGRES_PASSWORD
+            # PGDATA is a SUBDIRECTORY of the mounted volume (not the mount root) so the volume's
+            # mount-point ownership / any lost+found never collides with initdb.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          # pg_isready reports whether the server is accepting connections; it gates /readyz-backed
+          # readiness of chirp-server transitively (chirp-server's /readyz calls store_health).
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30            # up to ~150s for first-boot initdb + migration apply
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            # readOnlyRootFilesystem is intentionally NOT set true here. The restricted PSS does NOT
+            # require it (it is an extra NSA/CISA hardening recommendation), and the official postgres
+            # entrypoint writes to runtime paths outside the data volume (the socket dir
+            # /var/run/postgresql, the postgres home, lock files) during initdb and normal operation.
+            # Forcing a read-only root fs would make first-boot brittle for no PSA-mandated gain; every
+            # other restricted control (non-root 70, drop ALL caps, no privilege escalation,
+            # RuntimeDefault seccomp, fsGroup-owned volume) is enforced. Durable state is confined to the
+            # PVC below, not the container layer.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  # One durable PVC per replica ordinal (here, data-chirp-postgres-0). The pod re-binds to ITS OWN PVC
+  # across restart/redeploy/reschedule, which is what makes the store pod-independent. storageClassName
+  # is omitted so the cluster default class provisions it (on the k3d target that is `local-path`, which
+  # supplies ReadWriteOnce on-node storage). RWO + replicas:1 + the StatefulSet's one-pod-per-ordinal
+  # identity gives the single-writer guarantee here; ReadWriteOncePod (the stricter cluster-wide
+  # single-writer mode) is the target on a CSI-backed class and is a safe additive hardening later.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: chirp-postgres
+          app.kubernetes.io/part-of: chirp
+          app.kubernetes.io/component: database
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            # Provisioned request with headroom for the demo's row volume; the growth assumption and
+            # any resize are documented by SUBTASK_retention_capacity (deploy/chirp/retention-capacity.md).
+            storage: 2Gi

@@ -73,6 +73,25 @@ spec:
       kind: Deployment
     - group: networking.k8s.io
       kind: Ingress
+    # --- EPIC-PERSIST additive extension (SUBTASK_store_provisioning, #64/#67) ----------------
+    # The durable store is a single-primary PostgreSQL StatefulSet bound to a per-replica
+    # PersistentVolumeClaim (deploy/chirp/40-postgres-statefulset.yaml). ArgoCD cannot reconcile
+    # those kinds unless they are whitelisted here, so they are added ADDITIVELY — the existing
+    # kinds above are untouched, and this is NOT widened to a `*/*` wildcard.
+    - group: apps
+      kind: StatefulSet            # the Postgres primary (volumeClaimTemplates mints its PVC)
+    - group: ""
+      kind: PersistentVolumeClaim  # the durable per-ordinal volume (data-chirp-postgres-0)
+    - group: batch
+      kind: CronJob                # pre-authorized for SUBTASK_retention_capacity's OPTIONAL scheduled
+                                   # transient-state sweep. Harmless if unused (the sweep may instead
+                                   # run as chirp-server's in-process timer). Pre-provisioned here
+                                   # because retention_capacity depends on this task and cannot edit
+                                   # this file; the contract assigns the sweep-kind whitelist to this
+                                   # task (../contracts/_MANIFEST.yaml, deploy_durability_contract.yaml).
+    # Secret REMAINS EXCLUDED (see the note above): the DB credential is handled out-of-band in
+    # namespace chirp (the ghcr-pull precedent), never committed and never ArgoCD-managed. Do NOT
+    # add Secret to this list to commit a credential.
 
   # Surface any resources in the chirp namespace that belong to NO Application as a warning,
   # so unmanaged sprawl in the project's namespace is visible.

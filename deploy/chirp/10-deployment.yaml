@@ -1,10 +1,12 @@
 # chirp-server workload.
-# Owned by SUBTASK_app_manifests. Image pinned by the immutable @sha256: manifest-list digest
-# resolved in ../SUBTASK_discovery/outputs/ground_truth.md (#24 SEC-3 — never a movable tag).
 #
-# replicas: 1 is DELIBERATE. chirp-server uses an in-memory repository (no DB / no PVC per the
-# Dockerfile), so each replica would hold independent state; running >1 replica would split state
-# across pods and serve inconsistent data. Scale-out requires a shared backing store first.
+# Image: durable chirp-server built with the `postgres` feature, pinned by immutable @sha256:
+# digest (never a movable tag). The backend is runtime-selected: with CHIRP_DATABASE_URL set and
+# the postgres-feature binary, the server uses the durable PostgreSQL store; without it, it falls
+# back to in-memory. See README.md for the store, credential, and scaling model.
+#
+# replicas: 1 is the demo default. Domain state now lives in the external PostgreSQL store (one
+# writable primary), not in pod memory, so the app tier is safe to scale; it defaults to 1 here.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,8 +58,25 @@ spec:
         - name: ghcr-pull
       containers:
         - name: chirp-server
-          image: ghcr.io/nousix-llc/chirp-server@sha256:054af27f588c13aeebd8698dbddf690e15bf75cd36c9a087b38763fd0902abe3
+          # Durable chirp-server image (built --features postgres). Pin by immutable digest only,
+          # never a movable tag. The durable digest is produced by main's CI after this change
+          # merges; until then this is a syntactically valid placeholder digest, so a pre-merge
+          # rollout is visibly not-ready rather than silently serving the non-durable in-memory
+          # image. Replace with the real digest from main's image build as the post-merge follow-up.
+          image: ghcr.io/nousix-llc/chirp-server@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent   # digest is immutable; no need to always re-pull
+          env:
+            # Selects the durable PostgreSQL backend. CHIRP_DATABASE_URL takes precedence over
+            # DATABASE_URL in the server; the value is a postgres:// connection string to the
+            # headless Postgres Service in this namespace. Sourced from the out-of-band
+            # `chirp-db-credentials` Secret, created directly in the namespace and kept outside
+            # ArgoCD's managed set (same pattern as the ghcr-pull secret) — no credential value is
+            # committed to git. The pod wedges in CreateContainerConfigError until that Secret exists.
+            - name: CHIRP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: chirp-db-credentials
+                  key: CHIRP_DATABASE_URL
           ports:
             - name: http
               containerPort: 8080          # CHIRP_BIND_ADDR=0.0.0.0:8080 (image default)
@@ -69,7 +88,8 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          # Probes target the JSON API health endpoint /healthz on :8080 (NOT the SPA at "/").
+          # Liveness/startup probe /healthz (process is up); readiness probes /readyz (store is
+          # healthy, gating on ChirpRepository::store_health) on :8080 — not the SPA at "/".
           startupProbe:
             httpGet:
               path: /healthz
@@ -86,7 +106,7 @@ spec:
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 8080
             periodSeconds: 10
             timeoutSeconds: 3

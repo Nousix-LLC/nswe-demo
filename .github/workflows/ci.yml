@@ -68,6 +68,13 @@ jobs:
       # clippy::all=warn) are promoted to hard errors here with -D warnings.
       - name: cargo clippy -D warnings
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The durable PostgreSQL backing (chirp-server `postgres` feature, ADR-0001)
+      # is off by default, so the workspace clippy above never compiles it. Lint it
+      # explicitly here so the optional backend cannot compile- or lint-rot when the
+      # repository trait or domain types change. Self-contained: it needs no database
+      # (the migration runner reads local files at build time; queries are runtime).
+      - name: cargo clippy (chirp-server postgres feature) -D warnings
+        run: cargo clippy -p chirp-server --features postgres --all-targets --locked -- -D warnings
 
   test:
     name: test

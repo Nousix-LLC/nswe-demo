@@ -2,11 +2,15 @@
 #
 # chirp — single self-contained production image.
 #
-# One multi-stage build that (1) compiles the release `chirp-server` binary, (2) builds the
+# One multi-stage build that (1) compiles the release `chirp-server` binary with the durable
+# PostgreSQL backing compiled in (`--features postgres`, ADR-0001), (2) builds the
 # `chirp-frontend` WebAssembly SPA and runs `wasm-bindgen` to emit its JS/wasm glue, and (3)
 # assembles the server binary + the built SPA bundle into a minimal, non-root, health-checked
-# distroless runtime image that serves the whole app (REST API + SPA) out of the box with the
-# in-memory repository default — no external database.
+# distroless runtime image that serves the whole app (REST API + SPA) out of the box. The backend
+# is selected at RUNTIME, not at build: with a database URL configured (CHIRP_DATABASE_URL /
+# DATABASE_URL) the server uses the durable PostgreSQL store; with none set it falls back to the
+# in-memory repository. The `postgres` cargo feature stays OFF by default (so `cargo build`/`cargo
+# test` remain store-free); only this production image builds it in.
 #
 # Build:   docker build -t chirp:local .
 # Run:     docker run --rm -p 8080:8080 chirp:local
@@ -50,7 +54,10 @@ COPY . .
 # Build everything in one layer, with cargo's registry and target dirs mounted as BuildKit caches
 # (fast rebuilds, and the caches never bloat an image layer). Artifacts are copied OUT of the
 # cache-mounted target dir to stable /out paths the runtime stage can COPY from.
-#   1. release server binary
+#   1. release server binary, built `--features postgres` so the runtime binary can select the
+#      durable PostgreSQL backing when a database URL is configured (ADR-0001). The feature pulls in
+#      `sqlx` + the `repository::postgres` module; it needs NO database at build time (migrations are
+#      embedded from local .sql files; all queries are runtime, not compile-time-checked macros).
 #   2. frontend wasm (the `chirp` example is the SPA's wasm entry — calls chirp_frontend::start())
 #   3. wasm-bindgen JS + wasm glue into the asset tree's pkg/ (index.html imports ./pkg/chirp.js)
 #   4. the static index.html harness
@@ -58,7 +65,7 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     set -eux; \
-    cargo build --release --locked -p chirp-server; \
+    cargo build --release --locked -p chirp-server --features postgres; \
     cargo build --release --locked -p chirp-frontend --example chirp --target wasm32-unknown-unknown; \
     mkdir -p /out/bin /out/static/pkg; \
     cp target/release/chirp-server /out/bin/chirp-server; \

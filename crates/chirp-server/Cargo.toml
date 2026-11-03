@@ -23,6 +23,15 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `postgres` compiles in the durable PostgreSQL backing (ADR-0001): the `repository::postgres`
+# module and its `sqlx` dependency. It is OFF by default, so `cargo build` and `cargo test` stay
+# fully in-memory and need neither `sqlx` nor a database — the durable store is an *optional*,
+# config-selected production backing, never a test prerequisite. Production images build with
+# `--features postgres`; at runtime the composition root (main.rs) then selects the durable store
+# when a connection string is configured and falls back to in-memory otherwise.
+postgres = ["dep:sqlx"]
+
 [dependencies]
 # The single source of truth for every wire type (domain entities + API DTOs). Path dependency on
 # the sibling workspace member — the server imports the contract, it never forks or re-declares it.
@@ -50,6 +59,20 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 # the workspace so server and frontend share one serde.
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Durable PostgreSQL backing (ADR-0001), OPTIONAL — pulled in only by the `postgres` feature, so the
+# default build and the store-free test suite never compile it. `sqlx` is the async SQL driver the
+# ADR fixes: async (matching the `async` seam), a `Send + Sync` pool usable through `&self`
+# (`Arc<dyn ChirpRepository>`-compatible), and an embedded, forward-only, version-tracked migration
+# runner (`migrate`) for the versioned schema. `tls-rustls` keeps TLS to a managed primary available
+# without OpenSSL. Durable query bodies are downstream; the scaffold uses only the pool + migrator.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "migrate",
+    "macros",
+], optional = true }
 
 # --- Transport layer (owned by the api-layer spoke; declared here as part of crate scaffolding) ---
 # The repository layer this spoke delivers does not use these; they are provisioned so the api-layer
