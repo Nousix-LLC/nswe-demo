@@ -1,0 +1,56 @@
+# Contract manifest — design-ferric-1_0
+# The co-designed structural output of this decomposition, alongside the task tree in ../_GLOBAL.md.
+# READ-ONLY for every descendant task. Descendants compose against it; they do not modify it.
+# Amendments are additive only (new ids/areas/epics MAY be added; existing declarations MUST NOT change).
+
+kind: [yaml_schema, json_schema, yaml_artifact_map]
+
+purpose: >
+  Fix the one seam every child of this framework design shares so the pieces recompose mechanically:
+  a single id-and-traceability scheme (REQ-<AREA>-*, BAR-FERRIC-*), a fixed design-artifact layout under
+  design/ferric/, and a fixed epic/work-item schema. Narrative lives in ../_GLOBAL.md; this is structure only.
+
+artifacts:
+  - file: id_and_traceability_schema.yaml
+    declares: >
+      REQ id schema + the per-area namespace partition; BAR-FERRIC id schema; the acceptance-criterion
+      structure; the verification_method closed vocabulary (framework-appropriate); the stage vocabulary
+      (mvp vs one_oh); the epic and work-item schemas; the trace rules.
+  - file: design_artifact_map.yaml
+    declares: >
+      The map from each owning child to its design-doc filename and its target path under design/ferric/
+      in the repository, which the design_pr task consumes to place each doc exactly once.
+
+# Ownership: every artifact and every id namespace has exactly one producer.
+ownership:
+  REQ-FW-*:    SUBTASK_scope_and_requirements      # framework scope, users, 1.0-vs-MVP line, out-of-1.0 list
+  REQ-SSR-*:   SUBTASK_ssr_hydration               # server-side rendering + hydration (the must-have)
+  REQ-API-*:   SUBTASK_authoring_model             # view! macro, props/children/slots, context, component model
+  REQ-ASYNC-*: SUBTASK_async_forms_events          # async resources/suspense, forms/two-way binding, events
+  REQ-RT-*:    SUBTASK_router_and_http             # router: params, nested routes, links (absorbs #5)
+  REQ-HTTP-*:  SUBTASK_router_and_http             # HTTP/JSON client (absorbs #6)
+  REQ-DX-*:    SUBTASK_docs_and_dx                 # guide, tutorial, API docs, examples, cargo-generate starter
+  REQ-REL-*:   SUBTASK_release_and_distribution    # crates.io, semver, changelog, versioning/compat policy
+  REQ-PERF-*:  SUBTASK_performance_and_benchmark   # js-framework-benchmark entry + honest comparison
+  BAR-FERRIC-*: SUBTASK_release_bar                # the consolidated, testable 1.0 release bar
+  epic/work-item plan: SUBTASK_release_plan        # epics + work-items under #1, folding #5/#6
+  design/ferric/README.md + the PR: SUBTASK_design_pr
+  board issue numbers: SUBTASK_file_backlog
+  SYNTHESIS.md (at hub root): SUBTASK_synthesis
+
+# Identities the synthesis task evaluates as assertions. A failure is a structured signal, never a silent plug.
+identities:
+  I1_disjoint_registers: "Each spoke writes only its own REQ-<AREA>-* ids; namespaces do not overlap."
+  I2_no_invented_req:    "Every BAR-FERRIC-* references >=1 REQ-* that exists in some spoke's register."
+  I3_gating_coverage:    "Every one_oh-gating REQ-* is referenced by >=1 BAR-FERRIC-*."
+  I4_ssr_must_have:      "At least one one_oh BAR-FERRIC-* marks SSR+hydration as the gating must-have."
+  I5_out_of_scope_recorded: "Scoped CSS/styling, devtools, hot reload, desktop/mobile appear as explicit non-1.0 items and are referenced by NO BAR-FERRIC-*."
+  I6_plan_traces:        "Every epic maps to >=1 design-doc area; every one_oh BAR is covered by >=1 work-item; every work-item cites the REQ/BAR it satisfies."
+  I7_fold_not_duplicate: "The router/HTTP epic(s) supersede/extend board issues #5 and #6; the plan records the fold and file_backlog edits #5/#6 rather than filing duplicates."
+  I8_artifacts_placed_once: "Each owned design doc lands exactly once at its mapped design/ferric/<file>.md path; none unplaced or double-placed."
+  I9_frozen_surfaces:    "The router/HTTP design is additive over the existing ferric-router/ferric-http frozen prelude surfaces (extend, never silently redefine)."
+
+derived_artifacts:
+  - "id_and_traceability_schema.yaml is the validator shape for I1-I9."
+  - "design_artifact_map.yaml is the placement map for SUBTASK_design_pr."
+  - "SUBTASK_release_plan output is the source SUBTASK_file_backlog consumes to create/extend issues."

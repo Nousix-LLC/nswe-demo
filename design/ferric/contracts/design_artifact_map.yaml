@@ -1,0 +1,50 @@
+# design_artifact_map.yaml — where each owned design doc lands in the repository.
+# READ-ONLY for descendants. SUBTASK_design_pr consumes this to place each doc exactly once (identity I8).
+# Each spoke writes its doc as its own declared output in its own workspace under the given `filename`;
+# SUBTASK_design_pr copies it to `repo_path` on branch work/design-ferric-1_0.
+
+repo_subtree: design/ferric/          # the framework design lives here, beside the existing chirp design/
+branch: work/design-ferric-1_0
+base: main
+
+artifacts:
+  - owner: SUBTASK_scope_and_requirements
+    filename: scope-and-requirements.md
+    repo_path: design/ferric/scope-and-requirements.md
+  - owner: SUBTASK_ssr_hydration
+    filename: ssr-hydration.md
+    repo_path: design/ferric/ssr-hydration.md
+  - owner: SUBTASK_authoring_model
+    filename: authoring-model.md
+    repo_path: design/ferric/authoring-model.md
+  - owner: SUBTASK_async_forms_events
+    filename: async-forms-events.md
+    repo_path: design/ferric/async-forms-events.md
+  - owner: SUBTASK_router_and_http
+    filename: router-and-http.md
+    repo_path: design/ferric/router-and-http.md
+  - owner: SUBTASK_docs_and_dx
+    filename: docs-and-dx.md
+    repo_path: design/ferric/docs-and-dx.md
+  - owner: SUBTASK_release_and_distribution
+    filename: release-and-distribution.md
+    repo_path: design/ferric/release-and-distribution.md
+  - owner: SUBTASK_performance_and_benchmark
+    filename: performance-and-benchmark.md
+    repo_path: design/ferric/performance-and-benchmark.md
+  - owner: SUBTASK_release_bar
+    filename: release-bar.md
+    repo_path: design/ferric/release-bar.md
+  - owner: SUBTASK_release_plan
+    filename: release-plan.md
+    repo_path: design/ferric/release-plan.md
+
+# SUBTASK_design_pr additionally authors the index and copies the contract into the PR:
+index:
+  repo_path: design/ferric/README.md
+  authored_by: SUBTASK_design_pr
+  content: "index of the above docs, how the bar and backlog relate, and where the release bar lives"
+contracts_copy:
+  from: taskflow/dags/design-ferric-1_0/contracts/
+  repo_path: design/ferric/contracts/
+  note: "the id/traceability schema + artifact map ship with the design so BAR/REQ ids are documented in-repo"
