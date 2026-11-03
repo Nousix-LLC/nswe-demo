@@ -77,8 +77,8 @@ Criteria are organized by capability area and numbered sequentially. Stage appea
 **Statement:** The reactive runtime provides `create_signal`, `create_memo`, `create_effect`, and `batch`,
 with scoped cleanup that unsubscribes every reactive subscription owned by a dropped scope without leaks;
 `create_memo` does not recompute when its output value has not changed; `batch` defers effect execution until
-the batch closes. An app written against the baseline `ferric` prelude compiles at 1.0 without modification to
-any previously exported item.
+the batch closes. An app written against the `ferric` prelude at the `v0.1.0-usable_early` git tag compiles at 1.0
+without modification to any item exported at that tag.
 
 **References:** REQ-FW-005, REQ-FW-009
 
@@ -111,7 +111,8 @@ unaffected DOM nodes are replaced on a partial-state update.
 
 **Statement:** Ferric renders an app to an HTML string on the server (off WASM, on the server's native target)
 using a renderable core that compiles with `--features ssr`; each concurrent request gets its own isolated
-reactive scope; the produced HTML passes a standard HTML sanitizer without injected markup. A test produces
+reactive scope; the produced HTML is unchanged by the `ammonia` HTML sanitizer — specifically,
+`assert_eq!(html, ammonia::clean(&html))` holds for the rendered test component. A test produces
 the HTML string for a representative component and checks its content without running a browser.
 
 **References:** REQ-SSR-001, REQ-SSR-002, REQ-SSR-003, REQ-SSR-010, REQ-SSR-012
@@ -158,7 +159,9 @@ that no network request fires for that resource during hydration.
 **BAR-FERRIC-006 — Hydration mismatch detection and Axum integration**
 
 **Statement:** When the client-rendered structure diverges from the server HTML, Ferric detects the mismatch
-and recovers without a silent fault. The SSR integration works with Axum: the reference Axum server handler
+and recovers without a silent fault: in development builds, Ferric emits a `console.warn` message
+to the browser console identifying the mismatched node; in production builds, Ferric performs a
+full client-side re-render of the affected subtree. The SSR integration works with Axum: the reference Axum server handler
 renders Ferric to HTML and returns it in an HTTP response that the browser then hydrates. An Axum integration
 example is documented and builds from the stated steps.
 
@@ -319,8 +322,8 @@ two-way relationship.
 component in a reactive `<Outlet>`. Nested routes nest their `<Outlet>` inside a parent route's view.
 Each route level can declare a fallback for no-match. `navigate(path)` and the History API `push` / `replace`
 functions change the current path reactively. An `<a>`-backed `<Link>` component is keyboard-focusable and
-announced by assistive technology as a link. The `ferric-router` prelude surfaces present at the baseline
-are present at 1.0; no previously exported item is removed or redefined. Stated router examples compile.
+announced by assistive technology as a link. The `ferric-router` prelude surfaces present at the `v0.1.0-usable_early` git tag are present at
+1.0; no item exported at that tag is removed or redefined. Stated router examples compile.
 
 **References:** REQ-RT-001, REQ-RT-002, REQ-RT-003, REQ-RT-004, REQ-RT-005, REQ-RT-006, REQ-RT-008
 
@@ -350,8 +353,8 @@ correctly.
 per RFC 3986, GET/POST/PUT/DELETE methods, a typed `body::<T>()` that serializes `T` to JSON, a
 typed `send::<T>()` that deserializes the response body as `T`, and a matchable `Error` enum covering network
 failure, non-2xx status, and deserialization failure. Non-2xx responses surface as `Err` by default. Request
-headers can be set per-request. The `ferric-http` prelude surfaces present at the baseline are present at 1.0
-without removal or redefinition. Stated HTTP client examples compile.
+headers can be set per-request. The `ferric-http` prelude surfaces present at the `v0.1.0-usable_early` git tag are present at
+1.0 without removal or redefinition. Stated HTTP client examples compile.
 
 **References:** REQ-HTTP-001, REQ-HTTP-002, REQ-HTTP-003, REQ-HTTP-004, REQ-HTTP-005, REQ-HTTP-006,
 REQ-HTTP-007, REQ-HTTP-008, REQ-HTTP-011, REQ-HTTP-013
