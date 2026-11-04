@@ -34,5 +34,5 @@ pub mod router;
 pub mod prelude {
     pub use crate::link::link;
     pub use crate::matcher::{Params, RoutePattern};
-    pub use crate::router::{current_path, navigate, Router};
+    pub use crate::router::{current_path, navigate, navigate_replace, Router};
 }
