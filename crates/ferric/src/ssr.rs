@@ -217,8 +217,8 @@ mod tests {
     fn renders_nested_children_at_correct_depth() {
         let html = render_to_string(|| {
             el("ul")
-                .child(el("li").child(text("one")).into())
-                .child(el("li").child(text("two")).into())
+                .child(el("li").child(text("one")))
+                .child(el("li").child(text("two")))
                 .into()
         });
         let one = format!("{}{}{}", TEXT_OPEN_MARKER, "one", TEXT_CLOSE_MARKER);
@@ -234,7 +234,7 @@ mod tests {
     fn renders_deeply_nested_structure() {
         let html = render_to_string(|| {
             el("section")
-                .child(el("div").child(el("p").child(text("deep")).into()).into())
+                .child(el("div").child(el("p").child(text("deep"))))
                 .into()
         });
         let deep = format!("{}{}{}", TEXT_OPEN_MARKER, "deep", TEXT_CLOSE_MARKER);
