@@ -42,6 +42,11 @@ use crate::matcher::{Params, RoutePattern};
 /// router can hold a heterogeneous table of route handlers; every handler is `'static`.
 type ViewFn = Box<dyn Fn(&Params) -> VNode>;
 
+/// A boxed layout builder for nested routes: given the matched prefix params and a reference to
+/// the child outlet component, produce a `ferric` view tree. The child outlet renders the matched
+/// child route.
+type LayoutFn = Box<dyn Fn(&Params, &dyn Component) -> VNode>;
+
 thread_local! {
     /// The single source of truth for the currently-routed path, as a `ferric` signal. `None` until
     /// first use; created lazily by [`path_signal`] outside any reactive effect so it is owned by
@@ -101,6 +106,29 @@ fn install_popstate_listener() {
     closure.forget();
 }
 
+/// A pre-rendered child-outlet adapter: wraps a [`VNode`] so it can be passed as `&dyn Component`
+/// to a layout closure. `render` clones the stored node, which is cheap — [`VNode`] clones share
+/// `Rc`-backed event handlers.
+struct ChildOutlet {
+    node: VNode,
+}
+
+impl Component for ChildOutlet {
+    fn render(&self) -> VNode {
+        self.node.clone()
+    }
+}
+
+/// Flattened nested-route entry stored inside the outlet closure. Produced by consuming a child
+/// [`Router`] in [`Router::outlet`], capturing the child's route table and fallback by value so
+/// they can be moved into the `'static` outlet closure.
+struct NestedEntry {
+    prefix: RoutePattern,
+    layout: LayoutFn,
+    child_routes: Vec<(RoutePattern, ViewFn)>,
+    child_fallback: Option<ViewFn>,
+}
+
 /// The client-side router: a declarative route table plus History-API navigation, rendered through
 /// a reactive outlet that re-renders when the current path changes.
 ///
@@ -120,8 +148,11 @@ fn install_popstate_listener() {
 /// mount(body(), app.outlet());
 /// ```
 pub struct Router {
-    /// Registered routes, in declaration order; resolution is first-match-wins.
+    /// Registered flat routes, in declaration order; resolution is first-match-wins.
     routes: Vec<(RoutePattern, ViewFn)>,
+    /// Nested routes: a prefix pattern, a layout closure, and the configured child router.
+    /// Tried before flat routes in declaration order.
+    nested: Vec<(RoutePattern, LayoutFn, Router)>,
     /// The no-match view, invoked with empty params when no route matches.
     fallback: Option<ViewFn>,
 }
@@ -131,6 +162,7 @@ impl Router {
     pub fn new() -> Self {
         Router {
             routes: Vec::new(),
+            nested: Vec::new(),
             fallback: None,
         }
     }
@@ -149,6 +181,28 @@ impl Router {
     /// matches. Builder-style (returns `self`); a later call replaces an earlier fallback.
     pub fn fallback(mut self, view: impl Fn(&Params) -> VNode + 'static) -> Self {
         self.fallback = Some(Box::new(view));
+        self
+    }
+
+    /// Register a nested route. When the current path begins with `prefix`, `layout` is
+    /// called with the matched params and a reference to the child router's outlet component.
+    /// The child outlet renders the matched child route's view (using the remaining path after
+    /// the prefix) and carries its own per-level fallback.
+    ///
+    /// `child_builder` receives a fresh `Router::new()` and returns the configured child router.
+    /// Child routes are relative to the prefix (the remaining path is matched).
+    ///
+    /// Builder-style (returns `self`). Nested routes are tried before flat routes; the
+    /// first prefix match wins.
+    pub fn nest(
+        mut self,
+        prefix: &str,
+        layout: impl Fn(&Params, &dyn Component) -> VNode + 'static,
+        child_builder: impl FnOnce(Router) -> Router,
+    ) -> Self {
+        let child_router = child_builder(Router::new());
+        self.nested
+            .push((RoutePattern::new(prefix), Box::new(layout), child_router));
         self
     }
 
@@ -172,10 +226,11 @@ impl Router {
     /// currently-matched route and re-renders reactively whenever the current path changes. Mount
     /// it with `ferric::mount(root, router.outlet())`.
     ///
-    /// Resolution is first-match-wins over the registered routes; on no match the `fallback` (if
-    /// any) is invoked with empty params, otherwise an empty node is rendered. The returned
-    /// component reads [`current_path`] inside its render, so `ferric`'s render effect re-runs it on
-    /// every navigation.
+    /// Resolution order: nested routes (prefix matching) are tried first in declaration order;
+    /// flat routes (exact matching) are tried after. Within each group, the first match wins.
+    /// On no match the `fallback` (if any) is invoked with empty params, otherwise an empty node
+    /// is rendered. The returned component reads [`current_path`] inside its render, so `ferric`'s
+    /// render effect re-runs it on every navigation.
     pub fn outlet(self) -> impl Component + 'static {
         // Force the current-path signal into existence here, at builder time (outside any reactive
         // effect), so it is a runtime-root node and the outlet's own render effect never owns — and
@@ -183,9 +238,48 @@ impl Router {
         let _ = path_signal();
         let routes = self.routes;
         let fallback = self.fallback;
+        // Flatten each nested entry: consume the child Router into its parts so they can be
+        // moved into the `'static` outlet closure without carrying the Router type itself.
+        let nested: Vec<NestedEntry> = self
+            .nested
+            .into_iter()
+            .map(|(prefix, layout, child_router)| NestedEntry {
+                prefix,
+                layout,
+                child_routes: child_router.routes,
+                child_fallback: child_router.fallback,
+            })
+            .collect();
+
         move || -> VNode {
             // Reactive read: subscribes this render effect to the current-path signal.
             let path = current_path();
+
+            // Try nested routes first, in declaration order.
+            for entry in &nested {
+                if let Some((params, remaining)) = entry.prefix.match_prefix(&path) {
+                    // Resolve the child route against the remaining path.
+                    let mut child_view: Option<VNode> = None;
+                    for (child_pattern, child_view_fn) in &entry.child_routes {
+                        if let Some(child_params) = child_pattern.match_path(&remaining) {
+                            child_view = Some(child_view_fn(&child_params));
+                            break;
+                        }
+                    }
+                    if child_view.is_none() {
+                        child_view = entry
+                            .child_fallback
+                            .as_ref()
+                            .map(|f| f(&Params::default()))
+                            .or_else(|| Some(text("")));
+                    }
+                    let child_node = child_view.unwrap_or_else(|| text(""));
+                    let child_component = ChildOutlet { node: child_node };
+                    return (entry.layout)(&params, &child_component);
+                }
+            }
+
+            // Fall through to flat routes.
             for (pattern, view) in &routes {
                 if let Some(params) = pattern.match_path(&path) {
                     return view(&params);
@@ -330,6 +424,84 @@ mod tests {
         assert_eq!(current_path(), "/replace-target");
         navigate("/push-target");
         assert_eq!(current_path(), "/push-target");
+    }
+
+    #[test]
+    fn nested_route_renders_layout_with_child_view() {
+        // /settings/profile → layout("settings layout | profile")
+        navigate("/settings/profile");
+        let router = Router::new().route("/", |_| text("home")).nest(
+            "/settings",
+            |_params, child| {
+                use ferric::vdom::{VElement, VNode};
+                VElement::new("div")
+                    .child(ferric::vdom::text("settings layout | "))
+                    .child(child.render())
+                    .into()
+            },
+            |child_router| {
+                child_router
+                    .route("/", |_| text("settings index"))
+                    .route("/profile", |_| text("profile"))
+            },
+        );
+        let view = router.outlet().render();
+        // The layout is a div with two children: a text node and the child outlet's text node.
+        match view {
+            VNode::Element(e) => {
+                assert_eq!(e.tag, "div");
+                assert_eq!(e.children.len(), 2);
+                assert!(matches!(&e.children[0], VNode::Text(s) if s == "settings layout | "));
+                assert!(matches!(&e.children[1], VNode::Text(s) if s == "profile"));
+            }
+            other => panic!("expected element, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nested_route_index_path_renders_index_child() {
+        // /settings → remaining "/" → child index route "/"
+        navigate("/settings");
+        let router = Router::new().nest(
+            "/settings",
+            |_params, child| child.render(),
+            |child_router| {
+                child_router
+                    .route("/", |_| text("settings index"))
+                    .route("/profile", |_| text("profile"))
+            },
+        );
+        assert!(matches!(router.outlet().render(), VNode::Text(s) if s == "settings index"));
+    }
+
+    #[test]
+    fn nested_route_uses_child_fallback_on_unmatched_child() {
+        // /settings/unknown → child fallback
+        navigate("/settings/unknown");
+        let router = Router::new().nest(
+            "/settings",
+            |_params, child| child.render(),
+            |child_router| {
+                child_router
+                    .route("/profile", |_| text("profile"))
+                    .fallback(|_| text("settings not found"))
+            },
+        );
+        assert!(matches!(router.outlet().render(), VNode::Text(s) if s == "settings not found"));
+    }
+
+    #[test]
+    fn nested_route_prefix_non_match_falls_through_to_flat_routes() {
+        // /other → not matched by /settings prefix → falls to flat route
+        navigate("/other");
+        let router = Router::new()
+            .nest(
+                "/settings",
+                |_params, child| child.render(),
+                |child_router| child_router.route("/profile", |_| text("profile")),
+            )
+            .route("/other", |_| text("other page"));
+        assert!(matches!(router.outlet().render(), VNode::Text(s) if s == "other page"));
     }
 }
 
