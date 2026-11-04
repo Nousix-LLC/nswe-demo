@@ -222,6 +222,27 @@ pub fn navigate(path: &str) {
     set_current_path(path.to_string());
 }
 
+/// Programmatically navigate to `path` by **replacing** the current History entry
+/// (`replaceState`) and updating the reactive current path so every mounted outlet re-renders.
+///
+/// Unlike [`navigate`], which *pushes* a new entry (the user can press back to return to the
+/// previous URL), `navigate_replace` *replaces* the current entry in place — the previous URL
+/// is gone from the history stack. Use `navigate_replace` for redirects, login flows, or any
+/// navigation where adding a back-step would be confusing or incorrect.
+///
+/// Off-wasm the History API is skipped; only the reactive current path is updated, keeping
+/// the routing logic (navigation → resolution → view) exercisable in native unit tests.
+pub fn navigate_replace(path: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        if let Some(history) = web_sys::window().and_then(|window| window.history().ok()) {
+            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(path));
+        }
+    }
+    set_current_path(path.to_string());
+}
+
 /// Read the current path reactively (subscribes the calling reactive context, like a `ferric`
 /// signal read). Returns the path portion currently routed (e.g. `"/user/42"`).
 pub fn current_path() -> String {
@@ -296,6 +317,20 @@ mod tests {
             .render();
         assert!(matches!(view, VNode::Text(s) if s == "ok"));
     }
+
+    #[test]
+    fn navigate_replace_updates_current_path() {
+        navigate_replace("/new");
+        assert_eq!(current_path(), "/new");
+    }
+
+    #[test]
+    fn navigate_replace_and_navigate_both_update_path() {
+        navigate_replace("/replace-target");
+        assert_eq!(current_path(), "/replace-target");
+        navigate("/push-target");
+        assert_eq!(current_path(), "/push-target");
+    }
 }
 
 // =====================================================================================
@@ -305,7 +340,7 @@ mod tests {
 // =====================================================================================
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
-    use super::{current_path, navigate};
+    use super::{current_path, navigate, navigate_replace};
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -314,5 +349,30 @@ mod wasm_tests {
     fn navigate_pushes_history_and_updates_current_path() {
         navigate("/user/99");
         assert_eq!(current_path(), "/user/99");
+    }
+
+    /// `navigate_replace` replaces the current history entry instead of pushing a new one.
+    /// Length before replace == length after replace; length after a subsequent push-navigate grows.
+    #[wasm_bindgen_test]
+    fn navigate_replace_does_not_grow_history() {
+        let window = web_sys::window().expect("no window");
+        let history = window.history().expect("no history");
+
+        let len_before = history.length().expect("history.length before replace");
+        navigate_replace("/replace-test");
+        assert_eq!(current_path(), "/replace-test");
+        let len_after_replace = history.length().expect("history.length after replace");
+        assert_eq!(
+            len_before, len_after_replace,
+            "navigate_replace must not grow the history stack"
+        );
+
+        navigate("/push-test");
+        assert_eq!(current_path(), "/push-test");
+        let len_after_push = history.length().expect("history.length after push");
+        assert!(
+            len_after_push > len_after_replace,
+            "navigate (push) must grow the history stack"
+        );
     }
 }
