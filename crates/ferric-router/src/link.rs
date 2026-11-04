@@ -43,7 +43,7 @@
 
 use ferric::vdom::{text, EventKind, VElement, VNode};
 
-use crate::router::navigate;
+use crate::router::{current_path, navigate};
 
 /// The CSS class placed on every link element so applications can style in-app links
 /// (e.g. `.ferric-router-link { cursor: pointer; color: blue; text-decoration: underline; }`).
@@ -120,14 +120,26 @@ impl Link {
     /// The result is a `<span role="link" tabindex="0">` carrying the chosen class, a `data-to`
     /// attribute recording the destination, and a [`EventKind::Click`] handler that calls
     /// [`navigate`] to the destination.
+    ///
+    /// When `self.to` equals [`current_path()`] at build time the emitted element additionally
+    /// carries `aria-current="page"`, marking it as the active route for assistive technology and
+    /// CSS. When the paths do not match the element is structurally identical to the frozen surface
+    /// (no `aria-current` attribute, no class change).
     #[must_use]
     pub fn build(self) -> VNode {
         let Link { to, label, class } = self;
-        VElement::new("span")
+        let is_active = to == current_path();
+        let element = VElement::new("span")
             .attr("role", "link")
             .attr("tabindex", "0")
             .attr("class", class)
-            .attr("data-to", to.as_str())
+            .attr("data-to", to.as_str());
+        let element = if is_active {
+            element.attr("aria-current", "page")
+        } else {
+            element
+        };
+        element
             .on(EventKind::Click, move || navigate(&to))
             .child(text(label))
             .into()
@@ -198,5 +210,47 @@ mod tests {
         // The click wiring and destination are unchanged by the additive builder.
         assert_eq!(attr(&element, "data-to"), Some("/about"));
         assert!(matches!(element.events.as_slice(), [(EventKind::Click, _)]));
+    }
+
+    #[test]
+    fn active_link_emits_aria_current_when_path_matches() {
+        crate::router::navigate("/active");
+        let element = element(Link::new("/active", "Active").build());
+        assert_eq!(
+            attr(&element, "aria-current"),
+            Some("page"),
+            "link to current path must have aria-current=\"page\""
+        );
+    }
+
+    #[test]
+    fn inactive_link_has_no_aria_current() {
+        crate::router::navigate("/other");
+        let element = element(Link::new("/active", "Active").build());
+        assert_eq!(
+            attr(&element, "aria-current"),
+            None,
+            "link whose to != current_path must have no aria-current attribute"
+        );
+    }
+
+    #[test]
+    fn aria_current_toggles_on_navigation() {
+        // Before navigating to /about — no aria-current.
+        crate::router::navigate("/home");
+        let element_before = element(Link::new("/about", "About").build());
+        assert_eq!(
+            attr(&element_before, "aria-current"),
+            None,
+            "aria-current must be absent while current path is /home"
+        );
+        // After navigating to /about — aria-current present.
+        crate::router::navigate("/about");
+        let element_after = element(Link::new("/about", "About").build());
+        assert_eq!(
+            attr(&element_after, "aria-current"),
+            Some("page"),
+            "aria-current must be present after navigating to /about"
+        );
     }
 }

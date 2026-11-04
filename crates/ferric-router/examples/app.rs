@@ -1,15 +1,20 @@
-//! A small `ferric-router` single-page app, built for the browser.
+//! A `ferric-router` single-page app demonstrating all r1 additions.
 //!
-//! It wires the whole router together end-to-end:
+//! **Routes**
 //!
-//! - a [`Router`] with three routes — `/` (home), `/about`, and the parameterised `/user/:id` —
-//!   plus a fallback view for unknown paths;
-//! - [`Router::mount_history`] to seed the current path from `window.location` and track browser
-//!   back/forward;
-//! - a reactive [`Router::outlet`] rendered inside a root component, so navigating re-renders only
-//!   the routed view;
-//! - a nav bar built from [`link`] for declarative in-app navigation, and a button that calls
-//!   [`navigate`] programmatically.
+//! - `/` — home
+//! - `/about` — about
+//! - `/user/:id` — parameterised user profile
+//! - `/settings` — settings layout (nested route)
+//!   - `/settings/` — settings index (nested child)
+//!   - `/settings/profile` — profile page (nested child)
+//!
+//! **Features demonstrated**
+//!
+//! - [`Router::nest`] — nested route with a shared `<section>` layout
+//! - [`link`] active-route awareness — the nav bar's `link()` helpers emit `aria-current="page"`
+//!   on the active link, enabling CSS active-link styling
+//! - [`navigate_replace`] — a "redirect to login" button that replaces the current History entry
 //!
 //! Build it for wasm:
 //!
@@ -17,16 +22,16 @@
 //! cargo build -p ferric-router --example app --target wasm32-unknown-unknown
 //! ```
 //!
-//! To run it in a browser, generate the JS bindings with `wasm-bindgen` (or use `trunk`) and load
-//! the module from an HTML page that provides a mount point — see `crates/ferric-router/README.md`.
-//!
-//! [`Router`]: ferric_router::prelude::Router
+//! [`Router::nest`]: ferric_router::prelude::Router::nest
 //! [`link`]: ferric_router::prelude::link
-//! [`navigate`]: ferric_router::prelude::navigate
+//! [`navigate_replace`]: ferric_router::prelude::navigate_replace
 
+use ferric::component::Component;
 use ferric::prelude::*;
 use ferric::vdom::text;
 use ferric_router::prelude::*;
+
+// ── Flat routes ───────────────────────────────────────────────────────────────
 
 /// The home route (`/`).
 fn home_view() -> VNode {
@@ -63,7 +68,55 @@ fn not_found_view() -> VNode {
         .into()
 }
 
-/// The persistent nav bar: declarative in-app links plus one programmatic-navigation button.
+// ── Nested route: /settings ───────────────────────────────────────────────────
+
+/// The settings layout: a shared `<section>` wrapper rendered for every `/settings/*` path.
+/// The `child_outlet` renders the matched child route's content inside the layout.
+///
+/// This is the [`Router::nest`] `layout` closure argument: it receives the prefix params
+/// (empty here — `/settings` has no `:param` segments) and a `&dyn Component` for the
+/// child outlet, and returns a `VNode`.
+fn settings_layout(_params: &Params, child_outlet: &dyn Component) -> VNode {
+    VElement::new("section")
+        .attr("class", "settings")
+        .child(VElement::new("h1").child(text("Settings")))
+        .child(
+            VElement::new("nav")
+                .attr("class", "settings-nav")
+                .child(link("/settings/", "Overview"))
+                .child(text(" | "))
+                .child(link("/settings/profile", "Profile")),
+        )
+        // The child outlet renders whichever child route matched the remaining path.
+        .child(child_outlet.render())
+        .into()
+}
+
+/// The settings index (`/settings/`): shown when the remaining path after the prefix is `/`.
+fn settings_index_view() -> VNode {
+    VElement::new("div")
+        .child(VElement::new("h2").child(text("Settings Overview")))
+        .child(VElement::new("p").child(text("Choose a category on the left.")))
+        .into()
+}
+
+/// The settings profile child route (`/settings/profile`).
+fn settings_profile_view() -> VNode {
+    VElement::new("div")
+        .child(VElement::new("h2").child(text("Profile Settings")))
+        .child(VElement::new("p").child(text("Edit your display name and avatar here.")))
+        .into()
+}
+
+// ── Nav bar ───────────────────────────────────────────────────────────────────
+
+/// The persistent nav bar.
+///
+/// Each [`link`] call emits a `<span role="link">` that navigates on click and adds
+/// `aria-current="page"` when its destination equals the current path — active-route awareness.
+/// The `navigate_replace` button replaces the current History entry instead of pushing a new one,
+/// demonstrating a redirect-style navigation (the user cannot press back to reach the page they
+/// just left).
 fn nav_bar() -> VNode {
     VElement::new("nav")
         .attr("class", "app-nav")
@@ -73,8 +126,16 @@ fn nav_bar() -> VNode {
         .child(text(" | "))
         .child(link("/user/42", "User 42"))
         .child(text(" | "))
-        // Programmatic navigation: a plain ferric button whose click handler calls `navigate`
-        // directly, exactly as `link` does internally.
+        .child(link("/settings/", "Settings"))
+        .child(text(" | "))
+        // navigate_replace: replaces the current entry — the user cannot press back to return here.
+        .child(
+            VElement::new("button")
+                .on(EventKind::Click, || navigate_replace("/"))
+                .child(text("Redirect home (replace)")),
+        )
+        .child(text(" "))
+        // Plain navigate: pushes a new entry — the user can press back.
         .child(
             VElement::new("button")
                 .on(EventKind::Click, || navigate("/user/7"))
@@ -89,15 +150,20 @@ fn main() {
         .route("/", |_params| home_view())
         .route("/about", |_params| about_view())
         .route("/user/:id", user_view)
+        // Nested route: /settings with a shared layout and two child routes.
+        .nest("/settings", settings_layout, |child_router| {
+            child_router
+                .route("/", |_params| settings_index_view())
+                .route("/profile", |_params| settings_profile_view())
+                .fallback(|_| not_found_view())
+        })
         .fallback(|_params| not_found_view())
         .mount_history();
 
     // The reactive outlet renders the matched route and re-renders on navigation.
     let outlet = router.outlet();
 
-    // One root component: a persistent nav bar above the reactive outlet. Calling `outlet.render()`
-    // inside this render subscribes the mount effect to the current-path signal, so a click on a
-    // `link` (or the programmatic button) re-renders the routed view in place.
+    // One root component: a persistent nav bar above the reactive outlet.
     let app = move || -> VNode {
         VElement::new("div")
             .attr("class", "app")
@@ -106,8 +172,7 @@ fn main() {
             .into()
     };
 
-    // Mount into `#app` if the page provides it, otherwise into `<body>` — mirroring the ferric
-    // counter example.
+    // Mount into `#app` if the page provides it, otherwise into `<body>`.
     let document = web_sys::window()
         .expect("no browser `window`")
         .document()
