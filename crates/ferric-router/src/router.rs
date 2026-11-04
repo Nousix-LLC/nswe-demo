@@ -433,7 +433,7 @@ mod tests {
         let router = Router::new().route("/", |_| text("home")).nest(
             "/settings",
             |_params, child| {
-                use ferric::vdom::{VElement, VNode};
+                use ferric::vdom::VElement;
                 VElement::new("div")
                     .child(ferric::vdom::text("settings layout | "))
                     .child(child.render())
