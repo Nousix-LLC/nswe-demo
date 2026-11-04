@@ -41,7 +41,7 @@ pub struct ClientBuilder { ... }
 
 impl ClientBuilder {
     pub fn base_url(self, url: impl Into<String>) -> Self;
-    pub fn default_header(self, name: impl Into<String>, value: impl Into<String>) -> Self;
+    pub fn default_header(self, name: &str, value: &str) -> Self;
     pub fn build(self) -> Client;
 }
 ```
@@ -52,12 +52,14 @@ impl ClientBuilder {
 pub struct RequestBuilder { ... }
 
 impl RequestBuilder {
-    /// Append a query parameter (RFC-3986 percent-encoded).
-    pub fn query(self, key: &str, value: &str) -> Self;
-    /// Set a per-request header (overrides any matching default header).
-    pub fn header(self, name: impl Into<String>, value: impl Into<String>) -> Self;
+    /// Append query-string parameters (RFC-3986 percent-encoded); accumulates across calls.
+    pub fn query(self, params: &[(&str, &str)]) -> Self;
+    /// Append a per-request header (same-named headers accumulate; Fetch API combines them).
+    pub fn header(self, name: &str, value: &str) -> Self;
     /// Serialize `body` as JSON and set Content-Type: application/json.
     pub fn json<B: Serialize + ?Sized>(self, body: &B) -> Result<Self>;
+    /// Set a raw string request body; caller is responsible for any `Content-Type` header.
+    pub fn body_string(self, body: impl Into<String>) -> Self;
     /// Send the request; non-2xx responses are NOT an error (caller inspects).
     pub async fn send(self) -> Result<Response>;
     /// Send and deserialize the response body as `T`; non-2xx → `Err(Error::Status)`.
@@ -72,11 +74,14 @@ pub struct Response { ... }
 
 impl Response {
     pub fn status(&self) -> u16;
+    pub fn status_text(&self) -> &str;
     pub fn ok(&self) -> bool;
     pub fn url(&self) -> &str;
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T>;
-    pub fn text(&self) -> &str;
+    pub fn headers(&self) -> &[(String, String)];
     pub fn header(&self, name: &str) -> Option<&str>;
+    pub fn body(&self) -> &str;
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T>;
+    pub fn text(self) -> String;
     pub fn error_for_status(self) -> Result<Self>;
 }
 ```
@@ -93,12 +98,25 @@ pub enum Error {
     Deserialize(serde_json::Error),
     Body(String),
 }
+
+impl Error {
+    pub fn is_network(&self) -> bool;
+    pub fn is_status(&self) -> bool;
+    pub fn status(&self) -> Option<u16>;
+}
 ```
 
 **`Method`** — HTTP verb.
 
 ```rust
 pub enum Method { Get, Post, Put, Delete }
+
+impl Method {
+    /// The uppercase HTTP token (e.g. `"GET"`).
+    pub fn as_str(&self) -> &'static str;
+}
+
+impl std::fmt::Display for Method { /* delegates to as_str() */ }
 ```
 
 **`type Result<T> = std::result::Result<T, Error>`**
@@ -120,7 +138,7 @@ pub enum Method { Get, Post, Put, Delete }
 
 #### Not in scope (deferred to issue #149)
 
-- `PATCH` method (REQ-HTTP-009)
+- `PATCH` method (REQ-HTTP-009); when added in #149, `Method` will gain `#[non_exhaustive]`
 - Per-request timeout (REQ-HTTP-010)
 - Lean-footprint audit (BAR-FERRIC-021)
 
