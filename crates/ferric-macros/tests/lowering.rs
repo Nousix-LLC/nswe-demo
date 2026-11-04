@@ -344,9 +344,18 @@ fn test_for_list_all_keyed() {
         label: &'static str,
     }
     let items = vec![
-        Item { id: 1, label: "one" },
-        Item { id: 2, label: "two" },
-        Item { id: 3, label: "three" },
+        Item {
+            id: 1,
+            label: "one",
+        },
+        Item {
+            id: 2,
+            label: "two",
+        },
+        Item {
+            id: 3,
+            label: "three",
+        },
     ];
 
     let result: VNode = view! {

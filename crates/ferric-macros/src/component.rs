@@ -35,10 +35,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{
-    parse::{ParseStream},
-    Attribute, Expr, FnArg, GenericParam, Ident, ItemFn, Token, Type,
-};
+use syn::{parse::ParseStream, Attribute, Expr, FnArg, GenericParam, Ident, ItemFn, Token, Type};
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -141,7 +138,12 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
                 let ty = (*typed.ty).clone();
                 let kind = extract_prop_kind(&typed.attrs)?;
                 let is_named_slot = is_named_slot_type(&ty);
-                params.push(PropParam { ident, ty, kind, is_named_slot });
+                params.push(PropParam {
+                    ident,
+                    ty,
+                    kind,
+                    is_named_slot,
+                });
             }
         }
     }
@@ -188,9 +190,10 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
     // (generic components).
     // -----------------------------------------------------------------------
 
-    let has_generics = generics.params.iter().any(|p| {
-        matches!(p, GenericParam::Type(_) | GenericParam::Const(_))
-    });
+    let has_generics = generics
+        .params
+        .iter()
+        .any(|p| matches!(p, GenericParam::Type(_) | GenericParam::Const(_)));
 
     if has_generics {
         // --- Fallback: runtime-panic builder (original implementation) ---
@@ -226,13 +229,8 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
 
     // If there are no required params, use a simple builder without PhantomData.
     if n_req == 0 {
-        let builder_code = build_simple_builder(
-            fn_vis,
-            &props_name,
-            &impl_name,
-            &params,
-            &fn_name_str,
-        );
+        let builder_code =
+            build_simple_builder(fn_vis, &props_name, &impl_name, &params, &fn_name_str);
         return Ok(quote! {
             #impl_struct_and_trait
             #builder_code
@@ -276,12 +274,12 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
         let (unset_ty, set_ty) = if p.is_named_slot {
             (
                 format_ident!("{}_missing_required_slot_{}", comp_name_str, name_str),
-                format_ident!("{}_slot_{}_already_filled",   comp_name_str, name_str),
+                format_ident!("{}_slot_{}_already_filled", comp_name_str, name_str),
             )
         } else {
             (
                 format_ident!("{}_missing_required_prop_{}", comp_name_str, name_str),
-                format_ident!("__{}Prop{}Set",               comp_name_str, uname),
+                format_ident!("__{}Prop{}Set", comp_name_str, uname),
             )
         };
         let has_tr = format_ident!("__{}Has{}", comp_name_str, uname);
@@ -292,7 +290,9 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
             format!("missing required prop `{name_str}` on `{comp_name_str}`")
         };
         let omit_note = if p.is_named_slot {
-            format!("fill `<slot:{name_str}>…</slot:{name_str}>` inside `<{comp_name_str}>` in `view!`")
+            format!(
+                "fill `<slot:{name_str}>…</slot:{name_str}>` inside `<{comp_name_str}>` in `view!`"
+            )
         } else {
             format!("call `.{name_str}(value)` on `{props_name}` before calling `.build()`")
         };
@@ -647,9 +647,7 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
             match &p.kind {
                 PropKind::Required | PropKind::Into => {
                     // safe because the type-state guarantees the field is set
-                    let msg = format!(
-                        "INTERNAL BUG: required prop `{name_str}` unexpectedly None"
-                    );
+                    let msg = format!("INTERNAL BUG: required prop `{name_str}` unexpectedly None");
                     let _ = param_i;
                     quote! { #name: self.#name.expect(#msg) }
                 }
@@ -713,6 +711,7 @@ fn expand_inner(func: ItemFn) -> syn::Result<TokenStream2> {
 // Fallback: runtime-panic builder (used for generic components)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn build_panic_builder(
     fn_vis: &syn::Visibility,
     props_name: &Ident,
@@ -770,9 +769,7 @@ fn build_panic_builder(
             let name_str = p.ident.to_string();
             match &p.kind {
                 PropKind::Required | PropKind::Into => {
-                    let msg = format!(
-                        "missing required prop `{name_str}` on `{fn_name_str}`"
-                    );
+                    let msg = format!("missing required prop `{name_str}` on `{fn_name_str}`");
                     quote! { #name: self.#name.expect(#msg) }
                 }
                 PropKind::Default(default_expr) => {
@@ -864,9 +861,7 @@ fn build_simple_builder(
             match &p.kind {
                 PropKind::Required | PropKind::Into => {
                     // Should not reach here, but fall back to panic.
-                    let msg = format!(
-                        "missing required prop `{name_str}` on `{fn_name_str}`"
-                    );
+                    let msg = format!("missing required prop `{name_str}` on `{fn_name_str}`");
                     quote! { #name: self.#name.expect(#msg) }
                 }
                 PropKind::Default(default_expr) => {
@@ -904,32 +899,30 @@ fn build_simple_builder(
 fn extract_prop_kind(attrs: &[Attribute]) -> syn::Result<PropKind> {
     for attr in attrs {
         if attr.path().is_ident("prop") {
-            return attr.parse_args_with(
-                |input: ParseStream| -> syn::Result<PropKind> {
-                    let kw: Ident = input.parse()?;
-                    match kw.to_string().as_str() {
-                        "default" => {
-                            let _eq: Token![=] = input.parse()?;
-                            let expr: Expr = input.parse()?;
-                            Ok(PropKind::Default(expr))
-                        }
-                        "into" => Ok(PropKind::Into),
-                        "optional" => {
-                            // Treat as `#[prop(default = None)]` for `Option<T>` fields.
-                            Ok(PropKind::Default(syn::parse_quote!(
-                                ::std::option::Option::None
-                            )))
-                        }
-                        other => Err(syn::Error::new(
-                            kw.span(),
-                            format!(
-                                "unknown #[prop] option `{other}`; \
-                                 expected `default = <expr>`, `into`, or `optional`"
-                            ),
-                        )),
+            return attr.parse_args_with(|input: ParseStream| -> syn::Result<PropKind> {
+                let kw: Ident = input.parse()?;
+                match kw.to_string().as_str() {
+                    "default" => {
+                        let _eq: Token![=] = input.parse()?;
+                        let expr: Expr = input.parse()?;
+                        Ok(PropKind::Default(expr))
                     }
-                },
-            );
+                    "into" => Ok(PropKind::Into),
+                    "optional" => {
+                        // Treat as `#[prop(default = None)]` for `Option<T>` fields.
+                        Ok(PropKind::Default(syn::parse_quote!(
+                            ::std::option::Option::None
+                        )))
+                    }
+                    other => Err(syn::Error::new(
+                        kw.span(),
+                        format!(
+                            "unknown #[prop] option `{other}`; \
+                                 expected `default = <expr>`, `into`, or `optional`"
+                        ),
+                    )),
+                }
+            });
         }
     }
     Ok(PropKind::Required)

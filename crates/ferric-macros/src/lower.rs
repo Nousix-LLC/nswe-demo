@@ -6,7 +6,9 @@
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
 
-use crate::parser::{AttrValue, ChildItem, Element, ForList, HtmlAttr, SlotFillNode, ViewNode, ViewRoot};
+use crate::parser::{
+    AttrValue, ChildItem, Element, ForList, HtmlAttr, SlotFillNode, ViewNode, ViewRoot,
+};
 
 /// Lower a parsed `view!` root into a `VNode` expression.
 pub(crate) fn lower_root(root: &ViewRoot) -> TokenStream2 {
@@ -147,11 +149,7 @@ fn lower_element(el: &Element) -> TokenStream2 {
     }
 
     // Build children pushes.
-    let child_stmts: Vec<TokenStream2> = el
-        .children
-        .iter()
-        .map(lower_child_push)
-        .collect();
+    let child_stmts: Vec<TokenStream2> = el.children.iter().map(lower_child_push).collect();
 
     quote! {
         {
@@ -404,8 +402,10 @@ fn lower_component(el: &Element) -> TokenStream2 {
 
     // --- build children thunk if there are regular children ---
     if !regular_child_items.is_empty() {
-        let child_stmts: Vec<TokenStream2> =
-            regular_child_items.iter().map(|c| lower_child_push_to_vec(c)).collect();
+        let child_stmts: Vec<TokenStream2> = regular_child_items
+            .iter()
+            .map(|c| lower_child_push_to_vec(c))
+            .collect();
         builder_calls.push(quote! {
             .children(::std::rc::Rc::new(move || {
                 let mut __ferric_v: ::std::vec::Vec<::ferric::VNode> =

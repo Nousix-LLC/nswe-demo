@@ -878,7 +878,11 @@ mod tests {
             .child(el("span").attr("class", "b").child(text("hello")))
             .into();
         let patches = assert_roundtrip(&old, &new);
-        assert_eq!(patches.len(), 1, "expected exactly one patch, got {patches:?}");
+        assert_eq!(
+            patches.len(),
+            1,
+            "expected exactly one patch, got {patches:?}"
+        );
         assert!(
             matches!(&patches[0], Patch::SetAttr { name, value, .. }
                 if name == "class" && value == "b"),

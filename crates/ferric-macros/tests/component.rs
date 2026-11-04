@@ -40,15 +40,15 @@ fn velem_eq(a: &ferric::vdom::VElement, b: &ferric::vdom::VElement) -> bool {
 /// A `#[component]` with a required `String` prop.
 #[component]
 fn Greeter(name: String) -> VNode {
-    VElement::new("span").child(text(format!("hello {name}"))).into()
+    VElement::new("span")
+        .child(text(format!("hello {name}")))
+        .into()
 }
 
 #[test]
 fn test_required_prop_set_and_renders() {
     let result = view! { <Greeter name={"ferric".to_string()} /> };
-    let expected: VNode = VElement::new("span")
-        .child(text("hello ferric"))
-        .into();
+    let expected: VNode = VElement::new("span").child(text("hello ferric")).into();
     assert!(
         vnode_eq(&result, &expected),
         "required prop mismatch\n  got:  {:?}\n  want: {:?}",
@@ -209,7 +209,11 @@ fn test_component_with_named_slot() {
     match &result {
         VNode::Element(article) => {
             assert_eq!(article.tag, "article", "outer tag should be article");
-            assert_eq!(article.children.len(), 2, "article should have header + main");
+            assert_eq!(
+                article.children.len(),
+                2,
+                "article should have header + main"
+            );
             // First child: <header><h1>Title</h1></header>
             match &article.children[0] {
                 VNode::Element(hdr) => {
@@ -264,15 +268,10 @@ fn List<T: Clone + 'static>(items: Vec<T>, row: SlotFn<T>) -> VNode {
 #[test]
 fn test_slotfn_type_compiles_and_is_usable() {
     // Construct directly at the Rust level (not via view!).
-    let row: SlotFn<String> = Rc::new(|s: String| {
-        vec![VElement::new("span").child(text(s)).into()]
-    });
+    let row: SlotFn<String> =
+        Rc::new(|s: String| vec![VElement::new("span").child(text(s)).into()]);
     let items = vec!["a".to_string(), "b".to_string()];
-    let result = ListProps::new()
-        .items(items)
-        .row(row)
-        .build()
-        .render();
+    let result = ListProps::new().items(items).row(row).build().render();
     match &result {
         VNode::Element(ul) => {
             assert_eq!(ul.tag, "ul");
@@ -306,21 +305,22 @@ fn test_dyn_component_dispatch_unaffected() {
     }
 
     let badge = BadgeProps::new().label("ok".to_string()).build();
-    let components: Vec<Box<dyn Component>> = vec![
-        Box::new(Clock),
-        Box::new(spacer),
-        Box::new(badge),
-    ];
+    let components: Vec<Box<dyn Component>> =
+        vec![Box::new(Clock), Box::new(spacer), Box::new(badge)];
 
-    let tags: Vec<&str> = components.iter().map(|c| {
-        match c.render() {
+    let tags: Vec<&str> = components
+        .iter()
+        .map(|c| match c.render() {
             VNode::Element(e) => Box::leak(e.tag.into_boxed_str()) as &str,
             VNode::Text(_) => "text",
-        }
-    }).collect();
+        })
+        .collect();
 
-    assert_eq!(tags, vec!["time", "hr", "span"],
-        "dyn Component dispatch should work for all three component forms");
+    assert_eq!(
+        tags,
+        vec!["time", "hr", "span"],
+        "dyn Component dispatch should work for all three component forms"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -351,9 +351,7 @@ fn test_zero_prop_component() {
 
 #[test]
 fn test_children_type_callable() {
-    let thunk: Children = Rc::new(|| {
-        vec![VElement::new("li").child(text("item")).into()]
-    });
+    let thunk: Children = Rc::new(|| vec![VElement::new("li").child(text("item")).into()]);
     let nodes = thunk();
     assert_eq!(nodes.len(), 1);
     assert!(matches!(&nodes[0], VNode::Element(e) if e.tag == "li"));

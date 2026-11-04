@@ -1084,7 +1084,11 @@ mod tests {
             let found: Signal<i32> = use_context::<Signal<i32>>().expect("signal context present");
             assert_eq!(found.get(), 10);
             sig.set(99);
-            assert_eq!(found.get(), 99, "signal value is live through context handle");
+            assert_eq!(
+                found.get(),
+                99,
+                "signal value is live through context handle"
+            );
         });
     }
 
@@ -1118,7 +1122,11 @@ mod tests {
                 assert_eq!(use_context::<u32>(), Some(2), "inner value shadows outer");
             });
             // After inner scope's run, only outer is on the owner stack again.
-            assert_eq!(use_context::<u32>(), Some(1), "outer value visible after inner run ends");
+            assert_eq!(
+                use_context::<u32>(),
+                Some(1),
+                "outer value visible after inner run ends"
+            );
         });
     }
 

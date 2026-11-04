@@ -1,7 +1,7 @@
 //! Procedural macros for the Ferric web framework.
 //!
 //! This crate exposes the [`view!`] macro, which compiles Ferric template
-//! syntax into a [`ferric::VNode`] builder expression.
+//! syntax into a `ferric::VNode` builder expression.
 //!
 //! # Quick reference
 //!
@@ -29,7 +29,7 @@ use parser::ViewRoot;
 /// Compiles a Ferric template into a `VNode` expression.
 ///
 /// The macro accepts an HTML/JSX-flavoured template and lowers it onto the
-/// frozen [`ferric::VNode`] builder API (§2.12 of the authoring model).
+/// frozen `ferric::VNode` builder API (§2.12 of the authoring model).
 ///
 /// # Supported constructs
 ///

@@ -74,6 +74,7 @@ pub(crate) enum AttrValue {
 pub(crate) struct EventBinding {
     pub name: String,
     pub handler: Expr,
+    #[allow(dead_code)]
     pub handler_span: Span,
 }
 
@@ -221,9 +222,7 @@ fn parse_attrs(
                         other => {
                             return Err(syn::Error::new(
                                 ev_span,
-                                format!(
-                                    "unknown event `{other}`; bound events are: click, input"
-                                ),
+                                format!("unknown event `{other}`; bound events are: click, input"),
                             ));
                         }
                     }
@@ -299,11 +298,7 @@ fn parse_attr_value(input: ParseStream) -> Result<(AttrValue, Span)> {
     }
 }
 
-fn parse_children(
-    input: ParseStream,
-    tag: &str,
-    open_span: Span,
-) -> Result<Vec<ChildItem>> {
+fn parse_children(input: ParseStream, tag: &str, open_span: Span) -> Result<Vec<ChildItem>> {
     let mut children = Vec::new();
 
     loop {
@@ -319,9 +314,7 @@ fn parse_children(
             if close_name != tag {
                 return Err(syn::Error::new(
                     close_span,
-                    format!(
-                        "closing tag `</{close_name}>` does not match open tag `<{tag}>`"
-                    ),
+                    format!("closing tag `</{close_name}>` does not match open tag `<{tag}>`"),
                 ));
             }
             break;
@@ -475,9 +468,7 @@ fn parse_for_body(input: ParseStream, span: Span) -> Result<ViewNode> {
     if close_name != "For" {
         return Err(syn::Error::new(
             close_id.span(),
-            format!(
-                "closing tag `</{close_name}>` does not match open tag `<For>`"
-            ),
+            format!("closing tag `</{close_name}>` does not match open tag `<For>`"),
         ));
     }
 
@@ -485,8 +476,7 @@ fn parse_for_body(input: ParseStream, span: Span) -> Result<ViewNode> {
         span,
         each: each.ok_or_else(|| syn::Error::new(span, "<For> requires `each={…}`"))?,
         key_fn: key_fn.unwrap(),
-        item: item_ident
-            .ok_or_else(|| syn::Error::new(span, "<For> requires `let:item`"))?,
+        item: item_ident.ok_or_else(|| syn::Error::new(span, "<For> requires `let:item`"))?,
         body: Box::new(body),
     }))
 }
