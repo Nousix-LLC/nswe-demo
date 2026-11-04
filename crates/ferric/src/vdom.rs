@@ -58,13 +58,130 @@ pub struct VElement {
 /// Stable identity for keyed list diffing.
 pub type Key = String;
 
-/// Events the framework binds (acceptance criteria require at least click + input).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Events the framework binds. The full set is frozen by the walking skeleton; feature spokes
+/// consume these variants but do not add new ones. `Custom(String)` prevents `Copy`; use
+/// `.clone()` wherever an owned value is needed from a reference.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EventKind {
+    // Mouse events
     /// A `click` event.
     Click,
+    /// A `dblclick` event.
+    DblClick,
+    /// A `mousedown` event.
+    MouseDown,
+    /// A `mouseup` event.
+    MouseUp,
+    /// A `mouseenter` event.
+    MouseEnter,
+    /// A `mouseleave` event.
+    MouseLeave,
+    /// A `mousemove` event.
+    MouseMove,
+    /// A `mouseover` event.
+    MouseOver,
+    /// A `mouseout` event.
+    MouseOut,
+    /// A `contextmenu` event.
+    ContextMenu,
+
+    // Keyboard events
+    /// A `keydown` event.
+    KeyDown,
+    /// A `keyup` event.
+    KeyUp,
+    /// A `keypress` event.
+    KeyPress,
+
+    // Input / focus events
     /// An `input` event.
     Input,
+    /// A `change` event.
+    Change,
+    /// A `focus` event.
+    Focus,
+    /// A `blur` event.
+    Blur,
+
+    // Form events
+    /// A `submit` event.
+    Submit,
+    /// A `reset` event.
+    Reset,
+
+    // Pointer events
+    /// A `pointerdown` event.
+    PointerDown,
+    /// A `pointerup` event.
+    PointerUp,
+    /// A `pointerenter` event.
+    PointerEnter,
+    /// A `pointerleave` event.
+    PointerLeave,
+    /// A `pointermove` event.
+    PointerMove,
+    /// A `pointercancel` event.
+    PointerCancel,
+
+    // Scroll / resize
+    /// A `scroll` event.
+    Scroll,
+    /// A `resize` event.
+    Resize,
+
+    // Drag events
+    /// A `dragstart` event.
+    DragStart,
+    /// A `drag` event.
+    Drag,
+    /// A `dragend` event.
+    DragEnd,
+    /// A `dragenter` event.
+    DragEnter,
+    /// A `dragleave` event.
+    DragLeave,
+    /// A `dragover` event.
+    DragOver,
+    /// A `drop` event.
+    Drop,
+
+    // Touch events
+    /// A `touchstart` event.
+    TouchStart,
+    /// A `touchend` event.
+    TouchEnd,
+    /// A `touchmove` event.
+    TouchMove,
+    /// A `touchcancel` event.
+    TouchCancel,
+
+    // Clipboard events
+    /// A `copy` event.
+    Copy,
+    /// A `cut` event.
+    Cut,
+    /// A `paste` event.
+    Paste,
+
+    // Animation / transition
+    /// An `animationstart` event.
+    AnimationStart,
+    /// An `animationend` event.
+    AnimationEnd,
+    /// An `animationiteration` event.
+    AnimationIteration,
+    /// A `transitionend` event.
+    TransitionEnd,
+
+    // Load events
+    /// A `load` event.
+    Load,
+    /// An `error` event.
+    Error,
+
+    // Custom escape hatch
+    /// A custom DOM event identified by its string name.
+    Custom(String),
 }
 
 /// A boxed event callback. The concrete wrapper type is owner-designed; the frozen form is a
@@ -290,8 +407,8 @@ fn diff_attrs(old: &VElement, new: &VElement, path: &[usize], patches: &mut Vec<
 }
 
 fn diff_events(old: &VElement, new: &VElement, path: &[usize], patches: &mut Vec<Patch>) {
-    let old_kinds: HashSet<EventKind> = old.events.iter().map(|(k, _)| *k).collect();
-    let new_kinds: HashSet<EventKind> = new.events.iter().map(|(k, _)| *k).collect();
+    let old_kinds: HashSet<EventKind> = old.events.iter().map(|(k, _)| k.clone()).collect();
+    let new_kinds: HashSet<EventKind> = new.events.iter().map(|(k, _)| k.clone()).collect();
     if old_kinds != new_kinds {
         patches.push(Patch::SetEvents {
             path: path.to_vec(),
@@ -478,7 +595,7 @@ impl fmt::Debug for Patch {
 }
 
 fn event_kinds(events: &[(EventKind, EventHandler)]) -> Vec<EventKind> {
-    events.iter().map(|(k, _)| *k).collect()
+    events.iter().map(|(k, _)| k.clone()).collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -492,9 +609,11 @@ fn event_kinds(events: &[(EventKind, EventHandler)]) -> Vec<EventKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     // A canonicalised structural mirror of a VNode (closures dropped; attrs/event-kinds canonical).
+    // Events are stored in a HashSet because EventKind no longer derives Ord (Custom(String)
+    // prevents Copy/Ord; we use Clone + Hash + Eq instead).
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum Shadow {
         Text(String),
@@ -502,7 +621,7 @@ mod tests {
             tag: String,
             key: Option<String>,
             attrs: BTreeMap<String, String>,
-            events: BTreeSet<EventKind>,
+            events: HashSet<EventKind>,
             children: Vec<Shadow>,
         },
     }
@@ -514,7 +633,7 @@ mod tests {
                 tag: e.tag.clone(),
                 key: e.key.clone(),
                 attrs: e.attrs.iter().cloned().collect(),
-                events: e.events.iter().map(|(k, _)| *k).collect(),
+                events: e.events.iter().map(|(k, _)| k.clone()).collect(),
                 children: e.children.iter().map(shadow).collect(),
             },
         }
@@ -565,7 +684,7 @@ mod tests {
                 }
                 Patch::SetEvents { path, events } => {
                     if let Shadow::Element { events: ev, .. } = node_at(root, path) {
-                        *ev = events.iter().map(|(k, _)| *k).collect();
+                        *ev = events.iter().map(|(k, _)| k.clone()).collect();
                     } else {
                         panic!("SetEvents on a non-element");
                     }

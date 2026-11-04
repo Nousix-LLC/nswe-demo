@@ -13,7 +13,7 @@
 //!    view tree against the previous one ([`diff`]) and applies the resulting keyed [`Patch`] list
 //!    to the *live* DOM — creating, updating, moving, and removing only the nodes that changed,
 //!    rather than rebuilding the subtree.
-//! 4. Event handlers carried on the view tree are bound to real DOM events (`click`, `input`).
+//! 4. Event handlers carried on the view tree are bound to real DOM events.
 //!
 //! # Patch addressing
 //!
@@ -51,8 +51,8 @@ use crate::vdom::{diff, EventHandler, EventKind, Patch, VNode};
 ///
 /// The runtime clears `root`, renders `component` into it, and wraps the render in
 /// [`create_effect`] so that any [`Signal`](crate::signal::Signal) read during rendering re-runs
-/// the render when it changes. Re-renders are applied as a minimal keyed [`diff`]/[`Patch`] against
-/// the live DOM, and the handlers on the view tree are bound to `click` and `input` events.
+/// the render. Re-renders are applied as a minimal keyed [`diff`]/[`Patch`] against the live DOM,
+/// and the handlers on the view tree are bound to real DOM events.
 ///
 /// `root` is the mount point (for example `document.body()` or an element retrieved by id); it is
 /// emptied before the component is rendered into it.
@@ -215,60 +215,297 @@ fn resolve_element(root: &web_sys::Element, path: &[usize]) -> web_sys::Element 
         .expect("resolve_element: node at path is not an element")
 }
 
-/// Bind `events` on `element`, first detaching any previously bound listeners for the (closed) set
-/// of supported kinds so a re-bind never leaves a stale, double-firing listener.
+/// Bind `events` on `element`, first detaching any previously bound listeners so a re-bind never
+/// leaves a stale, double-firing listener.
+///
+/// # Detachment strategy
+///
+/// For every static (non-`Custom`) [`EventKind`] variant: look up the stash key on the element
+/// and, if a previously-leaked closure is found there, remove its listener and delete the property.
+///
+/// For `Custom` event names: a previous pass may have recorded the bound custom names as a
+/// `js_sys::Array` under `"__ferric_custom_events"`. We read that list, remove each named
+/// listener, and delete the recorded list before writing the new one.
 fn set_events(element: &web_sys::Element, events: &[(EventKind, EventHandler)]) {
     let target: &JsValue = element.as_ref();
+    let element_obj = element.unchecked_ref::<js_sys::Object>();
 
-    // Detach anything we stashed previously.
-    for kind in [EventKind::Click, EventKind::Input] {
-        let key = JsValue::from_str(stash_key(kind));
-        if let Ok(existing) = js_sys::Reflect::get(target, &key) {
+    // --- 1. Detach all static-kind previously-bound listeners ---
+    for kind in static_event_kinds() {
+        let key_js = JsValue::from_str(&stash_key(&kind));
+        if let Ok(existing) = js_sys::Reflect::get(target, &key_js) {
             if existing.is_function() {
                 let func = existing.unchecked_ref::<js_sys::Function>();
-                let _ = element.remove_event_listener_with_callback(event_name(kind), func);
-                let _ = js_sys::Reflect::delete_property(
-                    element.unchecked_ref::<js_sys::Object>(),
-                    &key,
-                );
+                let en = event_name(&kind);
+                let _ = element.remove_event_listener_with_callback(&en, func);
+                let _ = js_sys::Reflect::delete_property(element_obj, &key_js);
             }
         }
     }
 
-    // Bind the current handlers.
+    // --- 2. Detach any previously-bound Custom listeners recorded on the element ---
+    let custom_list_key = JsValue::from_str("__ferric_custom_events");
+    if let Ok(custom_list) = js_sys::Reflect::get(target, &custom_list_key) {
+        if let Some(array) = custom_list.dyn_ref::<js_sys::Array>() {
+            for i in 0..array.length() {
+                if let Some(name) = array.get(i).as_string() {
+                    let sk_js = JsValue::from_str(&format!("__ferric_on_custom_{name}"));
+                    if let Ok(existing) = js_sys::Reflect::get(target, &sk_js) {
+                        if existing.is_function() {
+                            let func = existing.unchecked_ref::<js_sys::Function>();
+                            let _ = element.remove_event_listener_with_callback(&name, func);
+                            let _ = js_sys::Reflect::delete_property(element_obj, &sk_js);
+                        }
+                    }
+                }
+            }
+            let _ = js_sys::Reflect::delete_property(element_obj, &custom_list_key);
+        }
+    }
+
+    // --- 3. Bind the current handlers ---
+    // Track any Custom event names bound in this pass so we can detach them on the next re-bind.
+    let mut custom_names: Vec<String> = Vec::new();
+
     for (kind, handler) in events {
         let handler = handler.clone();
         let closure = Closure::wrap(Box::new(move |_event: web_sys::Event| {
             handler();
         }) as Box<dyn FnMut(web_sys::Event)>);
         let func = closure.as_ref().unchecked_ref::<js_sys::Function>();
+        let en = event_name(kind);
         element
-            .add_event_listener_with_callback(event_name(*kind), func)
+            .add_event_listener_with_callback(&en, func)
             .expect("set_events: add_event_listener failed");
-        // Keep the closure alive for the element's lifetime and make it retrievable for later
-        // detachment.
+        // Stash the closure under its key so a later re-bind or detach can find it.
         let _ = js_sys::Reflect::set(
             target,
-            &JsValue::from_str(stash_key(*kind)),
+            &JsValue::from_str(&stash_key(kind)),
             closure.as_ref(),
         );
         closure.forget();
+
+        if let EventKind::Custom(name) = kind {
+            custom_names.push(name.clone());
+        }
+    }
+
+    // --- 4. Record any Custom event names bound in this pass for future detachment ---
+    if !custom_names.is_empty() {
+        let arr = js_sys::Array::new();
+        for name in &custom_names {
+            arr.push(&JsValue::from_str(name));
+        }
+        let _ = js_sys::Reflect::set(target, &custom_list_key, &arr);
     }
 }
 
-/// The DOM event name bound for an [`EventKind`].
-fn event_name(kind: EventKind) -> &'static str {
+/// Returns all static (non-[`EventKind::Custom`]) variants.
+///
+/// Used by [`set_events`] to enumerate every possible stash slot during the detachment pass. The
+/// array is exhaustive by construction: `static_event_kinds` and `event_name` / `stash_key` must
+/// be kept in sync when new variants are added to `EventKind`.
+fn static_event_kinds() -> [EventKind; 47] {
+    [
+        // Mouse
+        EventKind::Click,
+        EventKind::DblClick,
+        EventKind::MouseDown,
+        EventKind::MouseUp,
+        EventKind::MouseEnter,
+        EventKind::MouseLeave,
+        EventKind::MouseMove,
+        EventKind::MouseOver,
+        EventKind::MouseOut,
+        EventKind::ContextMenu,
+        // Keyboard
+        EventKind::KeyDown,
+        EventKind::KeyUp,
+        EventKind::KeyPress,
+        // Input / focus
+        EventKind::Input,
+        EventKind::Change,
+        EventKind::Focus,
+        EventKind::Blur,
+        // Form
+        EventKind::Submit,
+        EventKind::Reset,
+        // Pointer
+        EventKind::PointerDown,
+        EventKind::PointerUp,
+        EventKind::PointerEnter,
+        EventKind::PointerLeave,
+        EventKind::PointerMove,
+        EventKind::PointerCancel,
+        // Scroll / resize
+        EventKind::Scroll,
+        EventKind::Resize,
+        // Drag
+        EventKind::DragStart,
+        EventKind::Drag,
+        EventKind::DragEnd,
+        EventKind::DragEnter,
+        EventKind::DragLeave,
+        EventKind::DragOver,
+        EventKind::Drop,
+        // Touch
+        EventKind::TouchStart,
+        EventKind::TouchEnd,
+        EventKind::TouchMove,
+        EventKind::TouchCancel,
+        // Clipboard
+        EventKind::Copy,
+        EventKind::Cut,
+        EventKind::Paste,
+        // Animation / transition
+        EventKind::AnimationStart,
+        EventKind::AnimationEnd,
+        EventKind::AnimationIteration,
+        EventKind::TransitionEnd,
+        // Load
+        EventKind::Load,
+        EventKind::Error,
+    ]
+}
+
+/// Returns the DOM event-listener type string for each [`EventKind`].
+///
+/// The `match` is exhaustive — no wildcard — so the compiler reports an error if a new variant is
+/// added to the enum without updating this table.
+fn event_name(kind: &EventKind) -> String {
     match kind {
-        EventKind::Click => "click",
-        EventKind::Input => "input",
+        // Mouse
+        EventKind::Click => "click".into(),
+        EventKind::DblClick => "dblclick".into(),
+        EventKind::MouseDown => "mousedown".into(),
+        EventKind::MouseUp => "mouseup".into(),
+        EventKind::MouseEnter => "mouseenter".into(),
+        EventKind::MouseLeave => "mouseleave".into(),
+        EventKind::MouseMove => "mousemove".into(),
+        EventKind::MouseOver => "mouseover".into(),
+        EventKind::MouseOut => "mouseout".into(),
+        EventKind::ContextMenu => "contextmenu".into(),
+        // Keyboard
+        EventKind::KeyDown => "keydown".into(),
+        EventKind::KeyUp => "keyup".into(),
+        EventKind::KeyPress => "keypress".into(),
+        // Input / focus
+        EventKind::Input => "input".into(),
+        EventKind::Change => "change".into(),
+        EventKind::Focus => "focus".into(),
+        EventKind::Blur => "blur".into(),
+        // Form
+        EventKind::Submit => "submit".into(),
+        EventKind::Reset => "reset".into(),
+        // Pointer
+        EventKind::PointerDown => "pointerdown".into(),
+        EventKind::PointerUp => "pointerup".into(),
+        EventKind::PointerEnter => "pointerenter".into(),
+        EventKind::PointerLeave => "pointerleave".into(),
+        EventKind::PointerMove => "pointermove".into(),
+        EventKind::PointerCancel => "pointercancel".into(),
+        // Scroll / resize
+        EventKind::Scroll => "scroll".into(),
+        EventKind::Resize => "resize".into(),
+        // Drag
+        EventKind::DragStart => "dragstart".into(),
+        EventKind::Drag => "drag".into(),
+        EventKind::DragEnd => "dragend".into(),
+        EventKind::DragEnter => "dragenter".into(),
+        EventKind::DragLeave => "dragleave".into(),
+        EventKind::DragOver => "dragover".into(),
+        EventKind::Drop => "drop".into(),
+        // Touch
+        EventKind::TouchStart => "touchstart".into(),
+        EventKind::TouchEnd => "touchend".into(),
+        EventKind::TouchMove => "touchmove".into(),
+        EventKind::TouchCancel => "touchcancel".into(),
+        // Clipboard
+        EventKind::Copy => "copy".into(),
+        EventKind::Cut => "cut".into(),
+        EventKind::Paste => "paste".into(),
+        // Animation / transition
+        EventKind::AnimationStart => "animationstart".into(),
+        EventKind::AnimationEnd => "animationend".into(),
+        EventKind::AnimationIteration => "animationiteration".into(),
+        EventKind::TransitionEnd => "transitionend".into(),
+        // Load
+        EventKind::Load => "load".into(),
+        EventKind::Error => "error".into(),
+        // Custom escape hatch: use the contained string as-is.
+        EventKind::Custom(s) => s.clone(),
     }
 }
 
-/// The element-object property under which a bound listener's closure is stashed, per [`EventKind`].
-fn stash_key(kind: EventKind) -> &'static str {
+/// The element-object property key under which a bound listener's [`Closure`] is stashed, so a
+/// later re-bind can detach the previous listener before adding the new one.
+///
+/// Keys are prefixed `__ferric_on_` and are distinct per variant (exhaustive `match`; no
+/// wildcard). `Custom` variants append `custom_<event_name>` so each distinct custom event gets
+/// its own slot and cannot collide with any static key.
+fn stash_key(kind: &EventKind) -> String {
     match kind {
-        EventKind::Click => "__ferric_on_click",
-        EventKind::Input => "__ferric_on_input",
+        // Mouse
+        EventKind::Click => "__ferric_on_click".into(),
+        EventKind::DblClick => "__ferric_on_dblclick".into(),
+        EventKind::MouseDown => "__ferric_on_mousedown".into(),
+        EventKind::MouseUp => "__ferric_on_mouseup".into(),
+        EventKind::MouseEnter => "__ferric_on_mouseenter".into(),
+        EventKind::MouseLeave => "__ferric_on_mouseleave".into(),
+        EventKind::MouseMove => "__ferric_on_mousemove".into(),
+        EventKind::MouseOver => "__ferric_on_mouseover".into(),
+        EventKind::MouseOut => "__ferric_on_mouseout".into(),
+        EventKind::ContextMenu => "__ferric_on_contextmenu".into(),
+        // Keyboard
+        EventKind::KeyDown => "__ferric_on_keydown".into(),
+        EventKind::KeyUp => "__ferric_on_keyup".into(),
+        EventKind::KeyPress => "__ferric_on_keypress".into(),
+        // Input / focus
+        EventKind::Input => "__ferric_on_input".into(),
+        EventKind::Change => "__ferric_on_change".into(),
+        EventKind::Focus => "__ferric_on_focus".into(),
+        EventKind::Blur => "__ferric_on_blur".into(),
+        // Form
+        EventKind::Submit => "__ferric_on_submit".into(),
+        EventKind::Reset => "__ferric_on_reset".into(),
+        // Pointer
+        EventKind::PointerDown => "__ferric_on_pointerdown".into(),
+        EventKind::PointerUp => "__ferric_on_pointerup".into(),
+        EventKind::PointerEnter => "__ferric_on_pointerenter".into(),
+        EventKind::PointerLeave => "__ferric_on_pointerleave".into(),
+        EventKind::PointerMove => "__ferric_on_pointermove".into(),
+        EventKind::PointerCancel => "__ferric_on_pointercancel".into(),
+        // Scroll / resize
+        EventKind::Scroll => "__ferric_on_scroll".into(),
+        EventKind::Resize => "__ferric_on_resize".into(),
+        // Drag
+        EventKind::DragStart => "__ferric_on_dragstart".into(),
+        EventKind::Drag => "__ferric_on_drag".into(),
+        EventKind::DragEnd => "__ferric_on_dragend".into(),
+        EventKind::DragEnter => "__ferric_on_dragenter".into(),
+        EventKind::DragLeave => "__ferric_on_dragleave".into(),
+        EventKind::DragOver => "__ferric_on_dragover".into(),
+        EventKind::Drop => "__ferric_on_drop".into(),
+        // Touch
+        EventKind::TouchStart => "__ferric_on_touchstart".into(),
+        EventKind::TouchEnd => "__ferric_on_touchend".into(),
+        EventKind::TouchMove => "__ferric_on_touchmove".into(),
+        EventKind::TouchCancel => "__ferric_on_touchcancel".into(),
+        // Clipboard
+        EventKind::Copy => "__ferric_on_copy".into(),
+        EventKind::Cut => "__ferric_on_cut".into(),
+        EventKind::Paste => "__ferric_on_paste".into(),
+        // Animation / transition
+        EventKind::AnimationStart => "__ferric_on_animationstart".into(),
+        EventKind::AnimationEnd => "__ferric_on_animationend".into(),
+        EventKind::AnimationIteration => "__ferric_on_animationiteration".into(),
+        EventKind::TransitionEnd => "__ferric_on_transitionend".into(),
+        // Load
+        EventKind::Load => "__ferric_on_load".into(),
+        EventKind::Error => "__ferric_on_error".into(),
+        // Custom: prefix with `custom_` to prevent collisions with any static key.
+        // e.g. Custom("click") → "__ferric_on_custom_click" ≠ "__ferric_on_click"
+        EventKind::Custom(s) => format!("__ferric_on_custom_{s}"),
     }
 }
 
@@ -284,13 +521,66 @@ mod tests {
 
     #[test]
     fn event_names_map_to_dom_event_types() {
-        assert_eq!(event_name(EventKind::Click), "click");
-        assert_eq!(event_name(EventKind::Input), "input");
+        // Original two variants preserved exactly.
+        assert_eq!(event_name(&EventKind::Click), "click");
+        assert_eq!(event_name(&EventKind::Input), "input");
+        // Spot-check one variant from each newly added category.
+        assert_eq!(event_name(&EventKind::DblClick), "dblclick");
+        assert_eq!(event_name(&EventKind::Change), "change");
+        assert_eq!(event_name(&EventKind::KeyDown), "keydown");
+        assert_eq!(event_name(&EventKind::KeyUp), "keyup");
+        assert_eq!(event_name(&EventKind::KeyPress), "keypress");
+        assert_eq!(event_name(&EventKind::Focus), "focus");
+        assert_eq!(event_name(&EventKind::Blur), "blur");
+        assert_eq!(event_name(&EventKind::Submit), "submit");
+        assert_eq!(event_name(&EventKind::Reset), "reset");
+        assert_eq!(event_name(&EventKind::PointerDown), "pointerdown");
+        assert_eq!(event_name(&EventKind::PointerMove), "pointermove");
+        assert_eq!(event_name(&EventKind::PointerCancel), "pointercancel");
+        assert_eq!(event_name(&EventKind::Scroll), "scroll");
+        assert_eq!(event_name(&EventKind::Resize), "resize");
+        assert_eq!(event_name(&EventKind::DragStart), "dragstart");
+        assert_eq!(event_name(&EventKind::Drag), "drag");
+        assert_eq!(event_name(&EventKind::Drop), "drop");
+        assert_eq!(event_name(&EventKind::TouchStart), "touchstart");
+        assert_eq!(event_name(&EventKind::TouchEnd), "touchend");
+        assert_eq!(event_name(&EventKind::Copy), "copy");
+        assert_eq!(event_name(&EventKind::Cut), "cut");
+        assert_eq!(event_name(&EventKind::Paste), "paste");
+        assert_eq!(event_name(&EventKind::AnimationStart), "animationstart");
+        assert_eq!(event_name(&EventKind::AnimationEnd), "animationend");
+        assert_eq!(
+            event_name(&EventKind::AnimationIteration),
+            "animationiteration"
+        );
+        assert_eq!(event_name(&EventKind::TransitionEnd), "transitionend");
+        assert_eq!(event_name(&EventKind::Load), "load");
+        assert_eq!(event_name(&EventKind::Error), "error");
+        // Custom variant uses the contained string directly.
+        assert_eq!(
+            event_name(&EventKind::Custom("my-event".to_owned())),
+            "my-event"
+        );
     }
 
     #[test]
     fn stash_keys_are_distinct_per_kind() {
-        assert_ne!(stash_key(EventKind::Click), stash_key(EventKind::Input));
+        // Original assertion preserved.
+        assert_ne!(stash_key(&EventKind::Click), stash_key(&EventKind::Input));
+        // Different Custom names produce different keys.
+        assert_ne!(
+            stash_key(&EventKind::Custom("alpha".to_owned())),
+            stash_key(&EventKind::Custom("beta".to_owned())),
+        );
+        // A Custom whose name matches a static event name does NOT collide with that static key.
+        assert_ne!(
+            stash_key(&EventKind::Custom("click".to_owned())),
+            stash_key(&EventKind::Click),
+        );
+        assert_ne!(
+            stash_key(&EventKind::Custom("input".to_owned())),
+            stash_key(&EventKind::Input),
+        );
     }
 }
 

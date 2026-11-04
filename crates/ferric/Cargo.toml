@@ -11,10 +11,11 @@ workspace = true
 
 [dependencies]
 wasm-bindgen.workspace = true
+wasm-bindgen-futures = "0.4"
 js-sys.workspace = true
-# The DOM runtime (src/dom.rs) renders into and patches real DOM and binds click + input events.
-# These features cover element/text/comment node creation and mutation, attributes, and the two
-# required event kinds; the DOM layer may extend this list additively if it needs more.
+# The DOM runtime (src/dom.rs) renders into and patches real DOM and binds the full EventKind set.
+# These features cover element/text/comment node creation and mutation, attributes, and all
+# supported event kinds; the DOM layer may extend this list additively if it needs more.
 web-sys = { workspace = true, features = [
     "Window",
     "Document",
@@ -29,6 +30,15 @@ web-sys = { workspace = true, features = [
     "EventTarget",
     "InputEvent",
     "MouseEvent",
+    # Added for the full EventKind set (SUBTASK_dom_events):
+    "KeyboardEvent",
+    "FocusEvent",
+    "PointerEvent",
+    "DragEvent",
+    "TouchEvent",
+    "ClipboardEvent",
+    "AnimationEvent",
+    "TransitionEvent",
     "console",
     "NodeList",
     "DomTokenList",
