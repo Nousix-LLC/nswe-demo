@@ -37,6 +37,7 @@
 pub mod api;
 pub mod error;
 pub mod repository;
+pub mod ssr;
 
 pub use api::{build_router, AppState, AuthUser, ValidatedJson};
 pub use error::ServerError;

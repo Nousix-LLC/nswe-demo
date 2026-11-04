@@ -216,6 +216,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chirp-types",
+ "ferric",
  "http-body-util",
  "serde",
  "serde_json",
