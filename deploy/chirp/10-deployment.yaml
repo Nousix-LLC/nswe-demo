@@ -59,9 +59,9 @@ spec:
       containers:
         - name: chirp-server
           # Durable chirp-server image (built --features postgres). Pinned by immutable digest;
-          # never a movable tag. Digest produced by main's CI for commit 0d5917dc (post-merge
-          # image build, run 41687555341). Closes #180; unblocks #64 closure.
-          image: ghcr.io/nousix-llc/chirp-server@sha256:adaa4c26c94d2bffab0342d3dc279eb2d8b42e835494c59385c4b731e246fd41
+          # never a movable tag. Digest produced by main's CI for commit d8230fea (CI run
+          # 41803200262). Closes #206.
+          image: ghcr.io/nousix-llc/chirp-server@sha256:f845ca8c29408fd27d0fc3a6ff3f0f0d661d17ffd63b6427dcceb5b6845f044f
           imagePullPolicy: IfNotPresent   # digest is immutable; no need to always re-pull
           env:
             # Selects the durable PostgreSQL backend. CHIRP_DATABASE_URL takes precedence over
