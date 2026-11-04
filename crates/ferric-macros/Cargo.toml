@@ -1,0 +1,25 @@
+[package]
+name = "ferric-macros"
+description = "Procedural macros for the Ferric web framework."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+# Integration tests (tests/lowering.rs and tests/component.rs) need the ferric
+# VNode/VElement/EventKind/Children/Slot types.
+ferric = { path = "../ferric" }
+# Compile-fail fixture runner for diagnostic quality tests (BAR-FERRIC-010).
+trybuild = { version = "1", features = ["diff"] }

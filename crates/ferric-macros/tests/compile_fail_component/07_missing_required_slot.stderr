@@ -1,0 +1,20 @@
+error[E0599]: the method `build` exists for struct `PageProps`, but its trait bounds were not satisfied
+  --> tests/compile_fail_component/07_missing_required_slot.rs:20:30
+   |
+ 9 | #[component]
+   | ------------ method `build` not found for this struct because it doesn't satisfy `Page_missing_required_slot_header: __PageHasHeader`
+...
+20 |     let _ = PageProps::new().build();
+   |                              ^^^^^ method cannot be called on `PageProps` due to unsatisfied trait bounds
+   |
+note: trait bound `Page_missing_required_slot_header: __PageHasHeader` was not satisfied
+  --> tests/compile_fail_component/07_missing_required_slot.rs:9:1
+   |
+ 9 | #[component]
+   | ^^^^^^^^^^^^
+note: the trait `__PageHasHeader` must be implemented
+  --> tests/compile_fail_component/07_missing_required_slot.rs:9:1
+   |
+ 9 | #[component]
+   | ^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `component` (in Nightly builds, run with -Z macro-backtrace for more info)

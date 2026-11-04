@@ -43,6 +43,40 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Slot types (additive — nothing existing is redefined)
+// ---------------------------------------------------------------------------
+
+/// Deferred child content — a reference-counted thunk producing zero or more [`VNode`]s.
+///
+/// A `#[component]` function accepts child content by declaring a parameter named
+/// `children: Children`. The caller fills it by nesting content inside the component
+/// element in `view!`.
+///
+/// ```
+/// use ferric::prelude::*;
+///
+/// // Children is Rc<dyn Fn() -> Vec<VNode>>; calling it re-computes the nodes.
+/// let thunk: Children = std::rc::Rc::new(|| vec![]);
+/// let nodes = thunk();
+/// assert!(nodes.is_empty());
+/// ```
+pub type Children = ::std::rc::Rc<dyn Fn() -> Vec<VNode>>;
+
+/// A named content region — same shape as [`Children`] but filled by label in `view!`.
+///
+/// A `#[component]` function accepts a named slot by declaring a parameter `name: Slot`.
+/// The caller fills it via `<slot:name>…</slot:name>` inside the component element.
+pub type Slot = ::std::rc::Rc<dyn Fn() -> Vec<VNode>>;
+
+/// A parameterized content region — the render-prop pattern.
+///
+/// `SlotFn<T>` is the type for parameterized slots where the component passes a value
+/// into the caller-provided content. Declare as `name: SlotFn<T>` in a `#[component]`
+/// function. Full `view!` invocation for `SlotFn<T>` is a 1.0 feature; use at the
+/// Rust level by passing an `Rc<dyn Fn(T) -> Vec<VNode>>` directly.
+pub type SlotFn<T> = ::std::rc::Rc<dyn Fn(T) -> Vec<VNode>>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

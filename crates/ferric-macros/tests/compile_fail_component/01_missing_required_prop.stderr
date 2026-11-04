@@ -1,0 +1,20 @@
+error[E0599]: the method `build` exists for struct `GreetingProps`, but its trait bounds were not satisfied
+  --> tests/compile_fail_component/01_missing_required_prop.rs:16:34
+   |
+ 9 | #[component]
+   | ------------ method `build` not found for this struct because it doesn't satisfy `_: __GreetingHasName`
+...
+16 |     let _ = GreetingProps::new().build();
+   |                                  ^^^^^ method cannot be called on `GreetingProps` due to unsatisfied trait bounds
+   |
+note: trait bound `Greeting_missing_required_prop_name: __GreetingHasName` was not satisfied
+  --> tests/compile_fail_component/01_missing_required_prop.rs:9:1
+   |
+ 9 | #[component]
+   | ^^^^^^^^^^^^
+note: the trait `__GreetingHasName` must be implemented
+  --> tests/compile_fail_component/01_missing_required_prop.rs:9:1
+   |
+ 9 | #[component]
+   | ^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `component` (in Nightly builds, run with -Z macro-backtrace for more info)

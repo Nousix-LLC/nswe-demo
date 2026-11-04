@@ -36,6 +36,8 @@ web-sys = { workspace = true, features = [
     "Attr",
 ] }
 
+ferric-macros = { path = "../ferric-macros", version = "0.1" }
+
 # Browser test harness — available to native-gated `wasm_bindgen_test` suites the layer spokes add.
 [dev-dependencies]
 wasm-bindgen-test.workspace = true

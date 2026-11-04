@@ -1,0 +1,26 @@
+error[E0599]: the method `header` exists for struct `PageProps<Page_slot_header_already_filled>`, but its trait bounds were not satisfied
+  --> tests/compile_fail_component/06_fill_slot_twice.rs:23:10
+   |
+ 9 |   #[component]
+   |   ------------ method `header` not found for this struct because it doesn't satisfy `_: __PageHeaderNotYetFilled`
+...
+21 |       let _ = PageProps::new()
+   |  _____________-
+22 | |         .header(::std::rc::Rc::new(fill))
+23 | |         .header(::std::rc::Rc::new(fill)) // second fill — compile error
+   | |         -^^^^^^-------------------------- help: remove the arguments
+   | |         ||
+   | |_________|field, not a method
+   |
+   |
+note: trait bound `Page_slot_header_already_filled: __PageHeaderNotYetFilled` was not satisfied
+  --> tests/compile_fail_component/06_fill_slot_twice.rs:9:1
+   |
+ 9 | #[component]
+   | ^^^^^^^^^^^^
+note: the trait `__PageHeaderNotYetFilled` must be implemented
+  --> tests/compile_fail_component/06_fill_slot_twice.rs:9:1
+   |
+ 9 | #[component]
+   | ^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `component` (in Nightly builds, run with -Z macro-backtrace for more info)

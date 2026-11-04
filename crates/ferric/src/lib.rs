@@ -22,6 +22,13 @@ pub mod dom;
 pub mod signal;
 pub mod vdom;
 
+// Top-level re-exports: the `view!` macro's generated code references these
+// types via `::ferric::VElement`, `::ferric::VNode`, and `::ferric::EventKind`,
+// so they must be accessible at the crate root in addition to their canonical
+// path `ferric::vdom::*`.  Additive-only — the `ferric::vdom` module and the
+// `prelude` are unchanged.
+pub use crate::vdom::{EventKind, VElement, VNode};
+
 /// The frozen public surface of `ferric`.
 ///
 /// `use ferric::prelude::*;` brings the core API into scope: reactive primitives, the view-tree
@@ -29,8 +36,12 @@ pub mod vdom;
 /// and [`mount`](crate::dom::mount). This set is the `public_api_surface` identity the synthesis
 /// gate asserts; additions are additive-only.
 pub mod prelude {
-    pub use crate::component::Component;
+    pub use crate::component::{Children, Component, Slot, SlotFn};
     pub use crate::dom::mount;
-    pub use crate::signal::{batch, create_effect, create_memo, create_signal, Memo, Signal};
+    pub use crate::signal::{
+        batch, create_effect, create_memo, create_signal, expect_context, provide_context,
+        use_context, Memo, Signal,
+    };
     pub use crate::vdom::{EventKind, VElement, VNode};
+    pub use ferric_macros::{component, view};
 }
