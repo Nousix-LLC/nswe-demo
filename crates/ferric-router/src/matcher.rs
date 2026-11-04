@@ -131,6 +131,47 @@ impl RoutePattern {
 
         Some(Params { pairs })
     }
+
+    /// Match the beginning of `path` against this pattern. On success returns
+    /// `Some((params, remaining))` where `params` holds any `:name` captures and
+    /// `remaining` is the path suffix after the matched prefix segments, normalized
+    /// as a `/`-led string (e.g. pattern `/settings` against `/settings/profile`
+    /// returns `(params, "/profile")`; against `/settings` returns `(params, "/")`).
+    /// Returns `None` if any pattern segment fails to match.
+    ///
+    /// A root pattern (zero segments) matches any path; `remaining` is the full path
+    /// (normalized with a leading `/`).
+    pub fn match_prefix(&self, path: &str) -> Option<(Params, String)> {
+        let path_segments: Vec<&str> = split_segments(path).collect();
+        // A pattern with more segments than the path can never prefix-match.
+        if self.segments.len() > path_segments.len() {
+            return None;
+        }
+
+        let mut pairs = Vec::new();
+        for (pattern_segment, path_segment) in self.segments.iter().zip(path_segments.iter()) {
+            match pattern_segment {
+                Segment::Static(expected) => {
+                    if expected != path_segment {
+                        return None;
+                    }
+                }
+                Segment::Param(name) => {
+                    pairs.push((name.clone(), (*path_segment).to_owned()));
+                }
+            }
+        }
+
+        // Build the remaining path: the segments after the matched prefix, as a /‑led string.
+        let remaining_segments = &path_segments[self.segments.len()..];
+        let remaining = if remaining_segments.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{}", remaining_segments.join("/"))
+        };
+
+        Some((Params { pairs }, remaining))
+    }
 }
 
 /// Split a `/`-separated path (pattern or concrete) into its non-empty segments.
@@ -290,5 +331,66 @@ mod tests {
         let pattern = RoutePattern::new("/:slug");
         assert!(pattern.match_path("/a").is_some());
         assert!(pattern.match_path("/a/b").is_none());
+    }
+
+    #[test]
+    fn match_prefix_exact_path_returns_slash_remaining() {
+        // Pattern /settings against /settings → remaining = "/"
+        let pattern = RoutePattern::new("/settings");
+        let (params, remaining) = pattern.match_prefix("/settings").expect("prefix match");
+        assert!(params.is_empty());
+        assert_eq!(remaining, "/");
+    }
+
+    #[test]
+    fn match_prefix_path_with_child_returns_child_remaining() {
+        // Pattern /settings against /settings/profile → remaining = "/profile"
+        let pattern = RoutePattern::new("/settings");
+        let (params, remaining) = pattern
+            .match_prefix("/settings/profile")
+            .expect("prefix match");
+        assert!(params.is_empty());
+        assert_eq!(remaining, "/profile");
+    }
+
+    #[test]
+    fn match_prefix_param_captures_and_remaining() {
+        // Pattern /user/:id against /user/42/edit → params{id="42"}, remaining="/edit"
+        let pattern = RoutePattern::new("/user/:id");
+        let (params, remaining) = pattern.match_prefix("/user/42/edit").expect("prefix match");
+        assert_eq!(params.get("id"), Some("42"));
+        assert_eq!(remaining, "/edit");
+    }
+
+    #[test]
+    fn match_prefix_too_few_segments_returns_none() {
+        // Pattern /user/:id against /user → None (too few)
+        let pattern = RoutePattern::new("/user/:id");
+        assert!(pattern.match_prefix("/user").is_none());
+    }
+
+    #[test]
+    fn match_prefix_static_mismatch_returns_none() {
+        // Pattern /settings against /other/42/edit → None
+        let pattern = RoutePattern::new("/settings");
+        assert!(pattern.match_prefix("/other/42/edit").is_none());
+    }
+
+    #[test]
+    fn match_prefix_root_matches_any_path() {
+        // Root pattern matches any path; remaining = the full path
+        let pattern = RoutePattern::new("/");
+        let (params, remaining) = pattern
+            .match_prefix("/anything/at/all")
+            .expect("root prefix");
+        assert!(params.is_empty());
+        assert_eq!(remaining, "/anything/at/all");
+    }
+
+    #[test]
+    fn match_prefix_root_against_root_returns_slash() {
+        let pattern = RoutePattern::new("/");
+        let (_, remaining) = pattern.match_prefix("/").expect("root prefix root");
+        assert_eq!(remaining, "/");
     }
 }
