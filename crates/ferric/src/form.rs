@@ -358,9 +358,10 @@ mod tests {
 
     #[test]
     fn form_field_works_with_f64() {
-        let field: FormField<f64> = FormField::new("3.14");
-        let parsed = field.parsed().expect("3.14 should parse as f64");
-        assert!((parsed - 3.14_f64).abs() < 1e-10);
+        // Use 1.5 (not an approximate mathematical constant) to avoid clippy::approx_constant.
+        let field: FormField<f64> = FormField::new("1.5");
+        let parsed = field.parsed().expect("1.5 should parse as f64");
+        assert!((parsed - 1.5_f64).abs() < 1e-10);
         field.set_raw("bad".to_string());
         assert!(field.parsed().is_err());
     }
