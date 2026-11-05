@@ -170,9 +170,9 @@ where
     pub fn on_input_handler(&self) -> EventHandler {
         let raw = self.raw;
         let buf = self.input_buf;
-        Rc::new(move || {
+        EventHandler::NoArg(Rc::new(move || {
             raw.set(buf.get());
-        })
+        }))
     }
 
     /// Write `value` into the input buffer.
@@ -303,7 +303,7 @@ mod tests {
         let bind = Bind::new(&field);
         bind.set_input("42".to_string());
         let handler = bind.on_input_handler();
-        handler();
+        if let EventHandler::NoArg(f) = &handler { f(); } else { unreachable!() }
         assert_eq!(field.raw(), "42");
         assert_eq!(field.parsed(), Ok(42u32));
     }
@@ -315,7 +315,7 @@ mod tests {
         let bind = Bind::new(&field);
         bind.set_input("not_a_number".to_string());
         let handler = bind.on_input_handler();
-        handler();
+        if let EventHandler::NoArg(f) = &handler { f(); } else { unreachable!() }
         assert_eq!(field.raw(), "not_a_number");
         assert!(field.parsed().is_err());
     }
@@ -325,9 +325,10 @@ mod tests {
         let field: FormField<u32> = FormField::new("0");
         let bind = Bind::new(&field);
         let handler = bind.on_input_handler();
+        let f = if let EventHandler::NoArg(f) = &handler { f.clone() } else { unreachable!() };
         for (input, expected) in [("1", 1u32), ("22", 22), ("333", 333)] {
             bind.set_input(input.to_string());
-            handler();
+            f();
             assert_eq!(field.parsed(), Ok(expected));
         }
     }
@@ -348,11 +349,11 @@ mod tests {
 
         let bind = Bind::new(&field);
         bind.set_input("5".to_string());
-        bind.on_input_handler()();
+        if let EventHandler::NoArg(f) = bind.on_input_handler() { f(); } else { unreachable!() }
         assert_eq!(run_count.get(), 2);
 
         bind.set_input("10".to_string());
-        bind.on_input_handler()();
+        if let EventHandler::NoArg(f) = bind.on_input_handler() { f(); } else { unreachable!() }
         assert_eq!(run_count.get(), 3);
     }
 
@@ -382,7 +383,7 @@ mod tests {
         let bind = Bind::new(&field);
         // Fire the handler without setting the buffer — it should propagate "99" (not corrupt).
         let handler = bind.on_input_handler();
-        handler();
+        if let EventHandler::NoArg(f) = &handler { f(); } else { unreachable!() }
         assert_eq!(field.raw(), "99");
     }
 }

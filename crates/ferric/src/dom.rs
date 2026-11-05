@@ -269,8 +269,11 @@ fn set_events(element: &web_sys::Element, events: &[(EventKind, EventHandler)]) 
 
     for (kind, handler) in events {
         let handler = handler.clone();
-        let closure = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            handler();
+        let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
+            match &handler {
+                EventHandler::NoArg(f) => f(),
+                EventHandler::WithEvent(f) => f(&event as &dyn std::any::Any),
+            }
         }) as Box<dyn FnMut(web_sys::Event)>);
         let func = closure.as_ref().unchecked_ref::<js_sys::Function>();
         let en = event_name(kind);
@@ -618,5 +621,35 @@ mod wasm_tests {
         // A signal write re-renders through the keyed patch and updates the live DOM text.
         count.set(5);
         assert!(root.text_content().unwrap().contains("count: 5"));
+    }
+
+    /// REQ-ASYNC-023: an event-carrying handler can call `prevent_default()` on the DOM event.
+    ///
+    /// Constructs a `WithEvent` handler that downcasts its `&dyn Any` argument to
+    /// `&web_sys::Event` and calls `prevent_default()`, then verifies that
+    /// `event.default_prevented()` returns `true`.
+    #[wasm_bindgen_test]
+    fn event_carrying_handler_can_call_prevent_default() {
+        use crate::vdom::EventHandler;
+
+        // Build an event-carrying closure that calls prevent_default() on the DOM event.
+        let handler = EventHandler::WithEvent(std::rc::Rc::new(|any: &dyn std::any::Any| {
+            let event = any
+                .downcast_ref::<web_sys::Event>()
+                .expect("expected web_sys::Event");
+            event.prevent_default();
+        }));
+
+        // Create a real DOM event.
+        let event = web_sys::Event::new("click").expect("Event::new failed");
+        assert!(!event.default_prevented(), "event should not be prevented initially");
+
+        // Dispatch through the handler directly (the full set_events path is covered by the
+        // mount test above; here we exercise the downcast → prevent_default path).
+        if let EventHandler::WithEvent(f) = &handler {
+            f(&event as &dyn std::any::Any);
+        }
+
+        assert!(event.default_prevented(), "prevent_default() must have been called");
     }
 }

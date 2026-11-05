@@ -18,13 +18,15 @@
 //!
 //! # Event handlers
 //!
-//! [`EventHandler`] is an opaque `Rc<dyn Fn()>`; closures cannot be compared, so the diff cannot
-//! minimise against handler identity. Retained elements re-bind their handlers (via [`Patch::SetEvents`])
-//! only when the **set of bound [`EventKind`]s changes** — a no-op diff of structurally identical
-//! trees therefore produces no patches even when handlers are present. Because handlers in a
-//! signal-based framework read their signals live rather than capturing values, keeping a retained
-//! element's prior closure across a re-render is sound; the DOM layer may additively enrich the
-//! handler form (e.g. to carry a `web_sys::Event`) when it needs the event payload.
+//! [`EventHandler`] is an enum with two variants: a zero-argument [`EventHandler::NoArg`] and
+//! an event-carrying [`EventHandler::WithEvent`] that receives the raw DOM event as a
+//! platform-independent `&dyn Any` reference (downcast to `web_sys::Event` in the DOM layer).
+//! Closures cannot be compared, so the diff cannot minimise against handler identity. Retained
+//! elements re-bind their handlers (via [`Patch::SetEvents`]) only when the **set of bound
+//! [`EventKind`]s changes** — a no-op diff of structurally identical trees therefore produces no
+//! patches even when handlers are present. Because handlers in a signal-based framework read their
+//! signals live rather than capturing values, keeping a retained element's prior closure across a
+//! re-render is sound.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -184,10 +186,19 @@ pub enum EventKind {
     Custom(String),
 }
 
-/// A boxed event callback. The concrete wrapper type is owner-designed; the frozen form is a
-/// reference-counted zero-argument closure. The DOM layer may additively refine it to carry a
-/// `web_sys::Event` when it needs the event payload.
-pub type EventHandler = Rc<dyn Fn()>;
+/// An event callback — either a zero-argument closure or one that receives the raw DOM event
+/// via a platform-independent `&dyn Any` erasure (downcast to `web_sys::Event` in the DOM layer).
+///
+/// `vdom.rs` does not import `web_sys`; the type erasure keeps this module fully native-testable.
+#[allow(clippy::type_complexity)]
+#[derive(Clone)]
+pub enum EventHandler {
+    /// A handler that ignores the triggering event.
+    NoArg(Rc<dyn Fn()>),
+    /// A handler that receives the triggering event as a platform-independent type erasure.
+    /// The DOM layer downcasts the reference to `&web_sys::Event`.
+    WithEvent(Rc<dyn Fn(&dyn std::any::Any)>),
+}
 
 /// A single patch operation produced by the keyed [`diff`]. Each variant addresses a node by its
 /// `path` (child indices from the root; empty = root). Patches are applied in list order.
@@ -299,10 +310,23 @@ impl VElement {
         self
     }
 
-    /// Bind an event handler (builder style).
+    /// Bind a zero-argument event handler (builder style).
+    ///
+    /// Existing callers passing `move || { ... }` closures are unaffected.
     #[must_use]
     pub fn on(mut self, kind: EventKind, handler: impl Fn() + 'static) -> Self {
-        self.events.push((kind, Rc::new(handler)));
+        self.events.push((kind, EventHandler::NoArg(Rc::new(handler))));
+        self
+    }
+
+    /// Bind an event-carrying handler (builder style).
+    ///
+    /// The closure receives the triggering DOM event as `&dyn std::any::Any`. In the browser
+    /// runtime (`dom.rs`) the reference points to a `web_sys::Event`; downcast with
+    /// `event.downcast_ref::<web_sys::Event>()` to access `prevent_default()` and friends.
+    #[must_use]
+    pub fn on_with_event(mut self, kind: EventKind, handler: impl Fn(&dyn std::any::Any) + 'static) -> Self {
+        self.events.push((kind, EventHandler::WithEvent(Rc::new(handler))));
         self
     }
 
