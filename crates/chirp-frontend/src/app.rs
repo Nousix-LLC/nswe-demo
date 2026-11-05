@@ -149,9 +149,14 @@ pub fn start() {
 
     // Hydrate when the server has already populated the mount root with SSR markup; fall back
     // to a fresh client-side mount when there is no server-rendered content in the root.
+    // `ferric::hydrate` is wasm32-only; the cfg gate keeps non-wasm (native test / clippy)
+    // compilation clean while preserving the runtime conditional on the wasm32 target.
+    #[cfg(target_arch = "wasm32")]
     if root.has_child_nodes() {
         ferric::hydrate(root, app);
     } else {
         mount(root, app);
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    mount(root, app);
 }

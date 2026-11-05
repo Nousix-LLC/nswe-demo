@@ -71,11 +71,9 @@ fn hydrate_adopt_walk_no_structural_mutations() {
 
     // Hydrate with a structurally-identical component (same tags, same text).
     ferric::hydrate(container.clone(), move || {
-        VNode::Element(
-            VElement::new("div").child(VNode::Element(
-                VElement::new("span").child(VNode::Text("hello".into())),
-            )),
-        )
+        VNode::Element(VElement::new("div").child(VNode::Element(
+            VElement::new("span").child(VNode::Text("hello".into())),
+        )))
     });
 
     // The <div> must be the same DOM node — not recreated.
