@@ -269,11 +269,9 @@ fn set_events(element: &web_sys::Element, events: &[(EventKind, EventHandler)]) 
 
     for (kind, handler) in events {
         let handler = handler.clone();
-        let closure = Closure::wrap(Box::new(move |event: web_sys::Event| {
-            match &handler {
-                EventHandler::NoArg(f) => f(),
-                EventHandler::WithEvent(f) => f(&event as &dyn std::any::Any),
-            }
+        let closure = Closure::wrap(Box::new(move |event: web_sys::Event| match &handler {
+            EventHandler::NoArg(f) => f(),
+            EventHandler::WithEvent(f) => f(&event as &dyn std::any::Any),
         }) as Box<dyn FnMut(web_sys::Event)>);
         let func = closure.as_ref().unchecked_ref::<js_sys::Function>();
         let en = event_name(kind);
@@ -642,7 +640,10 @@ mod wasm_tests {
 
         // Create a real DOM event.
         let event = web_sys::Event::new("click").expect("Event::new failed");
-        assert!(!event.default_prevented(), "event should not be prevented initially");
+        assert!(
+            !event.default_prevented(),
+            "event should not be prevented initially"
+        );
 
         // Dispatch through the handler directly (the full set_events path is covered by the
         // mount test above; here we exercise the downcast → prevent_default path).
@@ -650,6 +651,9 @@ mod wasm_tests {
             f(&event as &dyn std::any::Any);
         }
 
-        assert!(event.default_prevented(), "prevent_default() must have been called");
+        assert!(
+            event.default_prevented(),
+            "prevent_default() must have been called"
+        );
     }
 }

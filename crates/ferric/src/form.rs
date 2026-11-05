@@ -26,6 +26,11 @@ use std::str::FromStr;
 use crate::signal::{create_signal, Signal};
 use crate::vdom::EventHandler;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use web_sys::{Event, HtmlInputElement};
+
 /// Typed form state wrapper.
 ///
 /// Keeps the raw string buffer of a form field separate from its parsed-and-validated form.
@@ -183,6 +188,43 @@ where
     pub fn set_input(&self, value: String) {
         self.input_buf.set(value);
     }
+
+    /// Return an [`EventHandler`] that reads the DOM input element's current value and writes
+    /// it directly to the field's raw signal (REQ-ASYNC-042).
+    ///
+    /// Unlike [`on_input_handler`], which requires [`set_input`] to be called first, this
+    /// handler reads `HtmlInputElement::value()` directly from the DOM event's target,
+    /// bypassing the secondary input buffer entirely.
+    ///
+    /// The closure captures the field's raw signal. When invoked with a `&dyn Any` that
+    /// downcasts to `&web_sys::Event`:
+    /// 1. `event.target()` retrieves the [`EventTarget`].
+    /// 2. `dyn_into::<HtmlInputElement>()` casts to the concrete input type.
+    /// 3. `.value()` reads the current DOM value.
+    /// 4. `raw.set(value)` updates the field signal, notifying all reactive subscribers.
+    ///
+    /// If any step fails (target absent, or the target is not an `<input>` element), the
+    /// closure returns without updating the signal — no panic.
+    ///
+    /// This method is gated to `wasm32` because it references `web_sys` DOM types that are
+    /// not available on native targets.
+    ///
+    /// [`on_input_handler`]: Bind::on_input_handler
+    /// [`set_input`]: Bind::set_input
+    /// [`EventTarget`]: web_sys::EventTarget
+    #[cfg(target_arch = "wasm32")]
+    pub fn on_input_event_handler(&self) -> EventHandler {
+        let raw = self.raw;
+        EventHandler::WithEvent(Rc::new(move |any: &dyn std::any::Any| {
+            if let Some(event) = any.downcast_ref::<Event>() {
+                if let Some(target) = event.target() {
+                    if let Ok(input_el) = target.dyn_into::<HtmlInputElement>() {
+                        raw.set(input_el.value());
+                    }
+                }
+            }
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -303,7 +345,11 @@ mod tests {
         let bind = Bind::new(&field);
         bind.set_input("42".to_string());
         let handler = bind.on_input_handler();
-        if let EventHandler::NoArg(f) = &handler { f(); } else { unreachable!() }
+        if let EventHandler::NoArg(f) = &handler {
+            f();
+        } else {
+            unreachable!()
+        }
         assert_eq!(field.raw(), "42");
         assert_eq!(field.parsed(), Ok(42u32));
     }
@@ -315,7 +361,11 @@ mod tests {
         let bind = Bind::new(&field);
         bind.set_input("not_a_number".to_string());
         let handler = bind.on_input_handler();
-        if let EventHandler::NoArg(f) = &handler { f(); } else { unreachable!() }
+        if let EventHandler::NoArg(f) = &handler {
+            f();
+        } else {
+            unreachable!()
+        }
         assert_eq!(field.raw(), "not_a_number");
         assert!(field.parsed().is_err());
     }
@@ -325,7 +375,11 @@ mod tests {
         let field: FormField<u32> = FormField::new("0");
         let bind = Bind::new(&field);
         let handler = bind.on_input_handler();
-        let f = if let EventHandler::NoArg(f) = &handler { f.clone() } else { unreachable!() };
+        let f = if let EventHandler::NoArg(f) = &handler {
+            f.clone()
+        } else {
+            unreachable!()
+        };
         for (input, expected) in [("1", 1u32), ("22", 22), ("333", 333)] {
             bind.set_input(input.to_string());
             f();
@@ -349,11 +403,19 @@ mod tests {
 
         let bind = Bind::new(&field);
         bind.set_input("5".to_string());
-        if let EventHandler::NoArg(f) = bind.on_input_handler() { f(); } else { unreachable!() }
+        if let EventHandler::NoArg(f) = bind.on_input_handler() {
+            f();
+        } else {
+            unreachable!()
+        }
         assert_eq!(run_count.get(), 2);
 
         bind.set_input("10".to_string());
-        if let EventHandler::NoArg(f) = bind.on_input_handler() { f(); } else { unreachable!() }
+        if let EventHandler::NoArg(f) = bind.on_input_handler() {
+            f();
+        } else {
+            unreachable!()
+        }
         assert_eq!(run_count.get(), 3);
     }
 
@@ -383,7 +445,87 @@ mod tests {
         let bind = Bind::new(&field);
         // Fire the handler without setting the buffer — it should propagate "99" (not corrupt).
         let handler = bind.on_input_handler();
-        if let EventHandler::NoArg(f) = &handler { f(); } else { unreachable!() }
+        if let EventHandler::NoArg(f) = &handler {
+            f();
+        } else {
+            unreachable!()
+        }
         assert_eq!(field.raw(), "99");
+    }
+}
+
+// =====================================================================================
+// WASM integration test — exercises the full DOM→signal path for REQ-ASYNC-042.
+//
+// Compiles only for wasm32 and runs under `wasm-pack test --headless --firefox`.
+// A real <input> element is inserted into the document, its value is set, a synthetic
+// input event is dispatched, and the test asserts the field signal reflects the typed value.
+// =====================================================================================
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests {
+    use super::*;
+    use crate::vdom::EventHandler;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    /// REQ-ASYNC-042: an `input` event on a bound `<input>` element must update the signal to
+    /// the user-typed value.
+    ///
+    /// Test flow:
+    /// 1. Create a real `<input>` element and attach it to the document body so that a
+    ///    dispatched event carries a valid `target()`.
+    /// 2. Set the element's value to `"hello"` (simulating a user keystroke).
+    /// 3. Build a `Bind<String>` around a fresh `FormField<String>`.
+    /// 4. Call `bind.on_input_event_handler()` to obtain the event-carrying handler.
+    /// 5. Wire the handler to the element via a `wasm_bindgen::Closure`.
+    /// 6. Dispatch a synthetic `input` event — `event.target()` resolves to the element.
+    /// 7. Assert the field signal equals `"hello"`.
+    #[wasm_bindgen_test]
+    fn on_input_event_handler_updates_signal_from_dom_value() {
+        let document = web_sys::window().unwrap().document().unwrap();
+
+        // A real DOM element attached to the body so dispatched events carry a valid target().
+        let input_el: web_sys::HtmlInputElement =
+            document.create_element("input").unwrap().unchecked_into();
+        document.body().unwrap().append_child(&input_el).unwrap();
+
+        // Pre-set the element's value to what a user would have typed.
+        input_el.set_value("hello");
+
+        // Build a fresh Bind<String> and obtain the event-carrying handler (REQ-ASYNC-042).
+        let field: FormField<String> = FormField::new("");
+        let bind = Bind::new(&field);
+        let handler = bind.on_input_event_handler();
+
+        // Wire the handler to the element via a wasm_bindgen Closure.
+        let closure = Closure::<dyn FnMut(web_sys::Event)>::new(move |event: web_sys::Event| {
+            if let EventHandler::WithEvent(ref f) = handler {
+                f(&event as &dyn std::any::Any);
+            }
+        });
+        input_el
+            .add_event_listener_with_callback("input", closure.as_ref().unchecked_ref())
+            .unwrap();
+        // `forget()` is acceptable in a test: the closure has test scope and the element is
+        // removed at the end of the test.
+        closure.forget();
+
+        // Dispatch a synthetic input event — event.target() is set to input_el by the browser.
+        let event = web_sys::Event::new("input").unwrap();
+        input_el.dispatch_event(&event).unwrap();
+
+        // The handler must have read HtmlInputElement::value() and written to the signal.
+        assert_eq!(
+            field.raw(),
+            "hello",
+            "REQ-ASYNC-042: signal must equal the DOM value after the input event"
+        );
+
+        // Clean up the DOM so other tests in the same run are not affected.
+        document.body().unwrap().remove_child(&input_el).unwrap();
     }
 }

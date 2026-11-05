@@ -315,7 +315,8 @@ impl VElement {
     /// Existing callers passing `move || { ... }` closures are unaffected.
     #[must_use]
     pub fn on(mut self, kind: EventKind, handler: impl Fn() + 'static) -> Self {
-        self.events.push((kind, EventHandler::NoArg(Rc::new(handler))));
+        self.events
+            .push((kind, EventHandler::NoArg(Rc::new(handler))));
         self
     }
 
@@ -325,8 +326,13 @@ impl VElement {
     /// runtime (`dom.rs`) the reference points to a `web_sys::Event`; downcast with
     /// `event.downcast_ref::<web_sys::Event>()` to access `prevent_default()` and friends.
     #[must_use]
-    pub fn on_with_event(mut self, kind: EventKind, handler: impl Fn(&dyn std::any::Any) + 'static) -> Self {
-        self.events.push((kind, EventHandler::WithEvent(Rc::new(handler))));
+    pub fn on_with_event(
+        mut self,
+        kind: EventKind,
+        handler: impl Fn(&dyn std::any::Any) + 'static,
+    ) -> Self {
+        self.events
+            .push((kind, EventHandler::WithEvent(Rc::new(handler))));
         self
     }
 
