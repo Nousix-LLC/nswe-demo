@@ -68,7 +68,8 @@ use axum::response::{IntoResponse, Response};
 ///    lands.  The comment is structural: downstream spokes MUST anchor their island
 ///    implementation to this location rather than appending it elsewhere.
 /// 4. Loads `wasm_script_path` as an ES module so the WASM bundle initialises and calls
-///    `ferric::hydrate` after the document is parsed.
+///    `ferric::hydrate` when `#app` already contains server-rendered children (the normal
+///    SSR path), or `ferric::dom::mount` when the page has no server markup.
 ///
 /// # Parameters
 ///
