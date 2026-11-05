@@ -26,6 +26,7 @@ pub mod vdom;
 // `ssr` is always compiled (native and wasm32); it must not import web_sys or
 // wasm_bindgen.  `hydrate` is WASM-only: it uses web_sys::Element and DOM APIs.
 pub mod ssr;
+
 #[cfg(target_arch = "wasm32")]
 pub mod hydrate;
 
@@ -38,9 +39,9 @@ pub use crate::vdom::{EventKind, VElement, VNode};
 
 // SSR + hydration re-exports (additive — not in the frozen prelude block).
 // `render_to_string` is always reachable; `hydrate` is wasm32-only.
-pub use crate::ssr::render_to_string;
 #[cfg(target_arch = "wasm32")]
 pub use crate::hydrate::hydrate;
+pub use crate::ssr::render_to_string;
 
 /// The frozen public surface of `ferric`.
 ///

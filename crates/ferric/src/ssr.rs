@@ -13,7 +13,7 @@
 //! # Implementation
 //!
 //! `render_to_string` runs the component closure once inside a fresh
-//! [`crate::signal::ReactiveScope`], which is disposed before the function returns. This
+//! a per-request reactive scope, which is disposed before the function returns. This
 //! ensures no signal subscriptions from one render leak into subsequent calls or run as
 //! effects on the server.
 
@@ -40,8 +40,20 @@ pub const TEXT_CLOSE_MARKER: &str = "<!--/$t-->";
 fn is_void_element(tag: &str) -> bool {
     matches!(
         tag,
-        "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
-            | "link" | "meta" | "param" | "source" | "track" | "wbr"
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
     )
 }
 
@@ -175,7 +187,7 @@ mod tests {
 
     #[test]
     fn escapes_all_five_injection_chars_in_text_content() {
-        let html = render_to_string(|| text("<>&\"'").into());
+        let html = render_to_string(|| text("<>&\"'"));
         assert!(html.contains("&lt;"), "< not escaped: {html}");
         assert!(html.contains("&gt;"), "> not escaped: {html}");
         assert!(html.contains("&amp;"), "& not escaped: {html}");
@@ -199,14 +211,14 @@ mod tests {
 
     #[test]
     fn text_node_wrapped_in_markers() {
-        let html = render_to_string(|| text("world").into());
+        let html = render_to_string(|| text("world"));
         let expected = format!("{}{}{}", TEXT_OPEN_MARKER, "world", TEXT_CLOSE_MARKER);
         assert_eq!(html, expected, "text not wrapped in markers: {html}");
     }
 
     #[test]
     fn empty_text_node_wrapped_in_markers() {
-        let html = render_to_string(|| text("").into());
+        let html = render_to_string(|| text(""));
         let expected = format!("{}{}", TEXT_OPEN_MARKER, TEXT_CLOSE_MARKER);
         assert_eq!(html, expected, "empty text not wrapped in markers: {html}");
     }
@@ -319,8 +331,14 @@ mod tests {
         let forty_two = format!("{}{}{}", TEXT_OPEN_MARKER, "42", TEXT_CLOSE_MARKER);
         let ninety_nine = format!("{}{}{}", TEXT_OPEN_MARKER, "99", TEXT_CLOSE_MARKER);
 
-        assert!(html_a.contains(&forty_two), "render A value wrong: {html_a}");
-        assert!(html_b.contains(&ninety_nine), "render B value wrong: {html_b}");
+        assert!(
+            html_a.contains(&forty_two),
+            "render A value wrong: {html_a}"
+        );
+        assert!(
+            html_b.contains(&ninety_nine),
+            "render B value wrong: {html_b}"
+        );
         assert!(
             !html_b.contains("42"),
             "render A signal leaked into render B: {html_b}"
