@@ -30,6 +30,7 @@
 //! | [`resolve_token`](ChirpRepository::resolve_token) | authenticate a bearer token | [`Unauthorized`](crate::error::ServerError::Unauthorized) |
 //! | [`create_chirp`](ChirpRepository::create_chirp) | post a chirp | [`NotFound`](crate::error::ServerError::NotFound) for an absent author/reply target |
 //! | [`timeline`](ChirpRepository::timeline) | home timeline page | [`NotFound`](crate::error::ServerError::NotFound) for an absent viewer |
+//! | [`public_timeline`](ChirpRepository::public_timeline) | unauthenticated global feed | — |
 //! | [`follow`](ChirpRepository::follow) / [`unfollow`](ChirpRepository::unfollow) | follow graph | [`Forbidden`](crate::error::ServerError::Forbidden) on self-follow |
 //! | [`like`](ChirpRepository::like) / [`unlike`](ChirpRepository::unlike) | likes | [`NotFound`](crate::error::ServerError::NotFound) for an absent chirp |
 //!
@@ -289,6 +290,15 @@ pub trait ChirpRepository: Send + Sync {
         viewer: UserId,
         query: TimelineQuery,
     ) -> Result<Page<Chirp>, ServerError>;
+
+    /// Returns one reverse-chronological page of all public chirps across all authors, newest-first.
+    ///
+    /// No viewer argument — the feed is global and unauthenticated. Soft-removed chirps are
+    /// excluded. Pagination uses the same opaque cursor scheme as [`timeline`](Self::timeline): a
+    /// present `cursor` is the last-seen chirp id; a malformed cursor fails safe to the first page.
+    /// The page size is `query.limit` clamped to `1..=`[`MAX_TIMELINE_LIMIT`], defaulting to
+    /// [`DEFAULT_TIMELINE_LIMIT`] when absent.
+    async fn public_timeline(&self, query: TimelineQuery) -> Result<Page<Chirp>, ServerError>;
 
     /// Makes `follower` follow `followee`. Idempotent: following an already-followed user succeeds
     /// and leaves the counts unchanged.

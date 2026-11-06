@@ -404,6 +404,10 @@ impl ChirpRepository for InMemoryRepository {
         Ok(Page::new(items, next_cursor))
     }
 
+    async fn public_timeline(&self, _query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
+        todo!("public_timeline not yet implemented")
+    }
+
     async fn follow(
         &self,
         follower: UserId,

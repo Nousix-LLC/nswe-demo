@@ -77,6 +77,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/sessions", post(handlers::login))
         .route("/api/chirps", post(handlers::create_chirp))
         .route("/api/timeline", get(handlers::timeline))
+        .route("/api/public/timeline", get(handlers::public_timeline))
         .route(
             "/api/users/{id}/follow",
             put(handlers::follow).delete(handlers::unfollow),

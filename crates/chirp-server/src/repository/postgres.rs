@@ -581,6 +581,10 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
+    async fn public_timeline(&self, _query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
+        todo!("public_timeline not yet implemented")
+    }
+
     /// Durably makes `follower` follow `followee`, maintaining the denormalized follow counts in the
     /// SAME confirmed-write transaction as the edge insert (`counts_match_edges`, `multiwrite_atomic`,
     /// `confirmed_write_durable`).

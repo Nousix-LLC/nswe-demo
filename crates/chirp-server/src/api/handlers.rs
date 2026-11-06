@@ -37,6 +37,7 @@
 //! | [`login`] | `POST /api/sessions` | no | 200 |
 //! | [`create_chirp`] | `POST /api/chirps` | yes | 201 |
 //! | [`timeline`] | `GET /api/timeline` | yes | 200 |
+//! | [`public_timeline`] | `GET /api/public/timeline` | no | 200 |
 //! | [`follow`] | `PUT /api/users/{id}/follow` | yes | 200 |
 //! | [`unfollow`] | `DELETE /api/users/{id}/follow` | yes | 200 |
 //! | [`like`] | `PUT /api/chirps/{id}/like` | yes | 200 |
@@ -135,6 +136,22 @@ pub async fn timeline(
     Query(query): Query<TimelineQuery>,
 ) -> Result<Json<Page<Chirp>>, ServerError> {
     let page = state.repo.timeline(viewer, query).await?;
+    Ok(Json(page))
+}
+
+/// `GET /api/public/timeline` — the global public timeline. Unauthenticated.
+///
+/// Takes the [`TimelineQuery`] (`limit`, `cursor`) from the query string and delegates to
+/// [`ChirpRepository::public_timeline`](crate::repository::ChirpRepository::public_timeline).
+/// Returns **200 OK** with a [`Page`]`<`[`Chirp`]`>`. The feed is global (all authors, all
+/// non-removed chirps), newest-first, with no bearer-token requirement. Pagination and cursor
+/// semantics are identical to [`timeline`]: the repository clamps `limit` and interprets the
+/// opaque `cursor`, so the handler passes the query through unchanged.
+pub async fn public_timeline(
+    State(state): State<AppState>,
+    Query(query): Query<TimelineQuery>,
+) -> Result<Json<Page<Chirp>>, ServerError> {
+    let page = state.repo.public_timeline(query).await?;
     Ok(Json(page))
 }
 
