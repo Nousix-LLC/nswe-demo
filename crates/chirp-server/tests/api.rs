@@ -810,10 +810,7 @@ mod readiness {
         async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError> {
             unimplemented!()
         }
-        async fn public_timeline(
-            &self,
-            _query: TimelineQuery,
-        ) -> Result<Page<Chirp>, ServerError> {
+        async fn public_timeline(&self, _query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
             unimplemented!()
         }
     }
