@@ -342,7 +342,7 @@ fn empty_view() -> VNode {
                 .attr("class", "chirp-empty-actions")
                 .child(link("/signup", "Create account"))
                 .child(text(" · "))
-                .child(link("/compose", "Sign in")),
+                .child(link("/signin", "Sign in")),
         )
         .into()
 }
