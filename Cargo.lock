@@ -201,6 +201,7 @@ dependencies = [
  "ferric-http",
  "ferric-router",
  "js-sys",
+ "serde",
  "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",

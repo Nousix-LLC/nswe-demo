@@ -3,14 +3,17 @@
 //!
 //! This module (owned by `SUBTASK_scaffold`) realizes the frozen `contracts/app_api.rs` surface:
 //! `Session`, `AppContext` (with `AppContext::new` and `AppContext::client`), and the
-//! [`start`] entry point that assembles the `Router` route table (`/` → timeline, `/compose` →
-//! compose, `/user/:id` → profile, plus a fallback), renders a persistent nav above the reactive
-//! outlet, and mounts the application into `#app` (falling back to `<body>`).
+//! [`start`] entry point that assembles the `Router` route table, renders a persistent nav above
+//! the reactive outlet, and mounts the application into `#app` (falling back to `<body>`).
 //!
-//! The three route views ([`timeline_view`](crate::timeline::timeline_view),
-//! [`compose_view`](crate::compose::compose_view),
-//! [`profile_view`](crate::profile::profile_view)) are pre-mounted here behind the frozen seam;
-//! each owning feature spoke fills in its module body without changing this wiring.
+//! Route table:
+//! - `/`          -- [`landing_view`](crate::landing::landing_view): public home and timeline
+//! - `/@:handle`  -- [`public_profile_view`](crate::public_profile::public_profile_view)
+//! - `/signin`    -- [`sign_in_view`](crate::sign_in::sign_in_view)
+//! - `/signup`    -- [`sign_up_view`](crate::sign_up::sign_up_view)
+//! - `/compose`   -- [`compose_view`](crate::compose::compose_view)
+//! - `/user/:id`  -- [`profile_view`](crate::profile::profile_view) (authenticated)
+//! - fallback     -- not-found view
 
 use chirp_types::prelude::{SessionToken, User};
 use ferric::prelude::*;
@@ -19,7 +22,11 @@ use ferric_router::prelude::*;
 
 use crate::api::ApiClient;
 use crate::compose::compose_view;
+use crate::landing::landing_view;
 use crate::profile::profile_view;
+use crate::public_profile::public_profile_view;
+use crate::sign_in::sign_in_view;
+use crate::sign_up::sign_up_view;
 use crate::timeline::timeline_view;
 
 /// The default REST base URL: a relative base, so the SPA calls the same origin that served it.
@@ -41,7 +48,7 @@ pub struct Session {
 /// `AppContext` is `Clone`.
 #[derive(Clone)]
 pub struct AppContext {
-    /// Base URL the [`ApiClient`] targets (default `/api`; configurable — see `api_base_url`).
+    /// Base URL the [`ApiClient`] targets (default `/api`; configurable -- see `api_base_url`).
     pub base_url: String,
     /// Reactive current session; writing it (login/logout) re-renders dependent views.
     pub session: Signal<Option<Session>>,
@@ -83,18 +90,18 @@ fn api_base_url() -> String {
 
 /// The persistent navigation bar rendered above the reactive outlet.
 ///
-/// "Sign up" and "Sign in" both link to `/compose` (the current app entry point for account
-/// creation and login) so logged-out visitors have a visible path into the authenticated flow.
+/// "Create account" links to `/signup` and "Sign in" links to `/signin` so logged-out visitors
+/// have visible entry points into the authenticated flow (AC-4).
 fn nav_bar() -> VNode {
     VElement::new("nav")
         .attr("class", "chirp-nav")
-        .child(link("/", "Timeline"))
-        .child(text(" · "))
+        .child(link("/", "Chirp"))
+        .child(text(" \u{00b7} "))
         .child(link("/compose", "Compose"))
-        .child(text(" · "))
-        .child(link("/compose", "Sign up"))
-        .child(text(" · "))
-        .child(link("/compose", "Sign in"))
+        .child(text(" \u{00b7} "))
+        .child(link("/signup", "Create account"))
+        .child(text(" \u{00b7} "))
+        .child(link("/signin", "Sign in"))
         .into()
 }
 
@@ -112,30 +119,43 @@ fn not_found_view() -> VNode {
 /// `<body>`).
 ///
 /// This is the **thin wasm mount entry**. Per the subtree constraint it MAY use `expect()` for
-/// mount-point acquisition (and only for that) — mirroring the `ferric` / `ferric-router` examples;
+/// mount-point acquisition (and only for that) -- mirroring the `ferric` / `ferric-router` examples;
 /// everything below it (views, `AppContext` logic, the feature modules) surfaces failure as
 /// [`AppError`](crate::error::AppError) UI state and never panics.
 pub fn start() {
     let ctx = AppContext::new(api_base_url());
 
-    let timeline_ctx = ctx.clone();
-    let compose_ctx = ctx.clone();
+    let landing_ctx = ctx.clone();
     let profile_ctx = ctx.clone();
+    let public_profile_ctx = ctx.clone();
+    let signin_ctx = ctx.clone();
+    let signup_ctx = ctx.clone();
+    let compose_ctx = ctx.clone();
+    let timeline_ctx = ctx.clone();
 
     let router = Router::new()
-        .route("/", move |_params| timeline_view(&timeline_ctx))
+        // Public home / landing: the public timeline for logged-out visitors.
+        .route("/", move |_params| landing_view(&landing_ctx))
+        // Public user profile: `/@alice` shows alice's public chirp list.
+        .route("/@:handle", move |params| {
+            let handle = params.get("handle").unwrap_or("").to_string();
+            public_profile_view(&public_profile_ctx, handle)
+        })
+        // Sign-in and sign-up routes: form stubs for now, owned by a future auth feature.
+        .route("/signin", move |_params| sign_in_view(&signin_ctx))
+        .route("/signup", move |_params| sign_up_view(&signup_ctx))
+        // Existing authenticated routes -- kept intact; not part of the public-timeline feature.
         .route("/compose", move |_params| compose_view(&compose_ctx))
         .route("/user/:id", move |params| {
             profile_view(&profile_ctx, params)
         })
+        .route("/timeline", move |_params| timeline_view(&timeline_ctx))
         .fallback(|_params| not_found_view())
         .mount_history();
 
     let outlet = router.outlet();
 
-    // One root component: the persistent nav above the reactive outlet. Calling `outlet.render()`
-    // here subscribes the mount effect to the current-path signal, so navigation re-renders the
-    // routed view in place.
+    // One root component: the persistent nav above the reactive outlet.
     let app = move || -> VNode {
         VElement::new("div")
             .attr("class", "chirp-app")
@@ -146,7 +166,7 @@ pub fn start() {
 
     // Acquire the mount root: `#app` if the page provides it, otherwise `<body>`.
     let document = web_sys::window()
-        .expect("chirp-frontend: no browser `window` — the app requires a browser context")
+        .expect("chirp-frontend: no browser `window` -- the app requires a browser context")
         .document()
         .expect("chirp-frontend: no `document` on `window`");
     let root = document
@@ -156,8 +176,6 @@ pub fn start() {
 
     // Hydrate when the server has already populated the mount root with SSR markup; fall back
     // to a fresh client-side mount when there is no server-rendered content in the root.
-    // `ferric::hydrate` is wasm32-only; the cfg gate keeps non-wasm (native test / clippy)
-    // compilation clean while preserving the runtime conditional on the wasm32 target.
     #[cfg(target_arch = "wasm32")]
     if root.has_child_nodes() {
         ferric::hydrate(root, app);
