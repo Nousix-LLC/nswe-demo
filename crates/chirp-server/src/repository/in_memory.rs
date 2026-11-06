@@ -404,8 +404,43 @@ impl ChirpRepository for InMemoryRepository {
         Ok(Page::new(items, next_cursor))
     }
 
-    async fn public_timeline(&self, _query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
-        todo!("public_timeline not yet implemented")
+    async fn public_timeline(&self, query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
+        let store = self.lock()?;
+
+        let limit = query
+            .limit
+            .unwrap_or(DEFAULT_TIMELINE_LIMIT)
+            .clamp(1, MAX_TIMELINE_LIMIT) as usize;
+
+        // A malformed cursor is treated as "from the newest" — cursors are server-minted and
+        // opaque, so a value we did not mint simply fails safe to the first page.
+        let cursor_id: Option<u64> = query.cursor.as_ref().and_then(|c| c.0.parse::<u64>().ok());
+
+        // Public timeline = all non-removed chirps across all authors, no visibility filter.
+        let mut visible: Vec<&Chirp> = store
+            .chirps
+            .values()
+            // Soft-removed chirps are not served (chirp_removal), mirroring the durable
+            // `WHERE removed = FALSE`.
+            .filter(|chirp| !store.removed.contains(&chirp.id))
+            .filter(|chirp| cursor_id.is_none_or(|cid| chirp.id.get() < cid))
+            .collect();
+        // Reverse-chronological: newest (largest id) first.
+        visible.sort_by_key(|chirp| std::cmp::Reverse(chirp.id.get()));
+
+        // Take one extra to learn whether a further page exists.
+        let mut items: Vec<Chirp> = visible.into_iter().take(limit + 1).cloned().collect();
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+        let next_cursor = if has_more {
+            items.last().map(|chirp| Cursor(chirp.id.get().to_string()))
+        } else {
+            None
+        };
+
+        Ok(Page::new(items, next_cursor))
     }
 
     async fn follow(
