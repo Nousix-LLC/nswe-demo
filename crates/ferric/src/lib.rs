@@ -17,8 +17,10 @@
 //! // A full counter lives in `crates/ferric/examples/counter.rs`.
 //! ```
 
+pub mod async_resource;
 pub mod component;
 pub mod dom;
+pub mod form;
 pub mod signal;
 pub mod vdom;
 
@@ -50,8 +52,10 @@ pub use crate::ssr::render_to_string;
 /// and [`mount`](crate::dom::mount). This set is the `public_api_surface` identity the synthesis
 /// gate asserts; additions are additive-only.
 pub mod prelude {
+    pub use crate::async_resource::{suspense, Resource, ResourceState};
     pub use crate::component::{Children, Component, Slot, SlotFn};
     pub use crate::dom::mount;
+    pub use crate::form::{Bind, FormField};
     pub use crate::signal::{
         batch, create_effect, create_memo, create_signal, expect_context, provide_context,
         use_context, Memo, Signal,

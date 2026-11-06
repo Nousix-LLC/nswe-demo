@@ -140,7 +140,11 @@ mod tests {
         // The handler is wired; invoking it drives the signal (the DOM layer binds it to events).
         if let VNode::Element(e) = button.render() {
             assert_eq!(e.events.len(), 1);
-            (e.events[0].1)();
+            if let crate::vdom::EventHandler::NoArg(f) = &e.events[0].1 {
+                f();
+            } else {
+                panic!("expected NoArg handler");
+            }
         } else {
             panic!("expected element");
         }
