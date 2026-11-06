@@ -340,7 +340,7 @@ fn empty_view() -> VNode {
         .child(
             VElement::new("div")
                 .attr("class", "chirp-empty-actions")
-                .child(link("/compose", "Create account"))
+                .child(link("/signup", "Create account"))
                 .child(text(" · "))
                 .child(link("/compose", "Sign in")),
         )

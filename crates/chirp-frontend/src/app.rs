@@ -10,7 +10,7 @@
 //! - `/`          -- [`landing_view`](crate::landing::landing_view): public home and timeline
 //! - `/@:handle`  -- [`public_profile_view`](crate::public_profile::public_profile_view)
 //! - `/signin`    -- [`sign_in_view`](crate::sign_in::sign_in_view)
-//! - `/signup`    -- [`sign_up_view`](crate::sign_up::sign_up_view)
+//! - `/signup`    -- [`signup_view`](crate::compose::signup_view): full account-creation form
 //! - `/compose`   -- [`compose_view`](crate::compose::compose_view)
 //! - `/user/:id`  -- [`profile_view`](crate::profile::profile_view) (authenticated)
 //! - fallback     -- not-found view
@@ -21,12 +21,11 @@ use ferric::vdom::text;
 use ferric_router::prelude::*;
 
 use crate::api::ApiClient;
-use crate::compose::compose_view;
+use crate::compose::{compose_view, signup_view};
 use crate::landing::landing_view;
 use crate::profile::profile_view;
 use crate::public_profile::public_profile_view;
 use crate::sign_in::sign_in_view;
-use crate::sign_up::sign_up_view;
 use crate::timeline::timeline_view;
 
 /// The default REST base URL: a relative base, so the SPA calls the same origin that served it.
@@ -90,8 +89,8 @@ fn api_base_url() -> String {
 
 /// The persistent navigation bar rendered above the reactive outlet.
 ///
-/// "Create account" links to `/signup` and "Sign in" links to `/signin` so logged-out visitors
-/// have visible entry points into the authenticated flow (AC-4).
+/// "Create account" links to `/signup` (the full account-creation form) and "Sign in" links to
+/// `/signin` so logged-out visitors have visible entry points into each distinct flow (AC-4).
 fn nav_bar() -> VNode {
     VElement::new("nav")
         .attr("class", "chirp-nav")
@@ -141,9 +140,9 @@ pub fn start() {
             let handle = params.get("handle").unwrap_or("").to_string();
             public_profile_view(&public_profile_ctx, handle)
         })
-        // Sign-in and sign-up routes: form stubs for now, owned by a future auth feature.
+        // Sign-in and sign-up routes.
         .route("/signin", move |_params| sign_in_view(&signin_ctx))
-        .route("/signup", move |_params| sign_up_view(&signup_ctx))
+        .route("/signup", move |_params| signup_view(&signup_ctx))
         // Existing authenticated routes -- kept intact; not part of the public-timeline feature.
         .route("/compose", move |_params| compose_view(&compose_ctx))
         .route("/user/:id", move |params| {
