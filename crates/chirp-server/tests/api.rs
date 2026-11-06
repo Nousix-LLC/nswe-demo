@@ -810,5 +810,104 @@ mod readiness {
         async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError> {
             unimplemented!()
         }
+        async fn public_timeline(
+            &self,
+            _query: TimelineQuery,
+        ) -> Result<Page<Chirp>, ServerError> {
+            unimplemented!()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Public timeline — unauthenticated global feed endpoint.
+// ---------------------------------------------------------------------------------------------
+mod public_timeline {
+    use super::*;
+
+    #[tokio::test]
+    async fn public_timeline_empty_store_returns_200_with_empty_page() {
+        let app = TestApp::new();
+        let resp = app.get("/api/public/timeline", None).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let page: Page<Chirp> = resp.json();
+        assert!(page.items.is_empty(), "empty store yields no items");
+        assert!(page.next_cursor.is_none(), "empty store yields no cursor");
+    }
+
+    #[tokio::test]
+    async fn public_timeline_includes_all_users_newest_first() {
+        let app = TestApp::new();
+        let (_, alice_token) = app.register_and_login("alice").await;
+        let (_, bob_token) = app.register_and_login("bob").await;
+
+        let a1 = app.post_chirp(&alice_token, "alice one").await;
+        let b1 = app.post_chirp(&bob_token, "bob one").await;
+        let a2 = app.post_chirp(&alice_token, "alice two").await;
+
+        let resp = app.get("/api/public/timeline", None).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let page: Page<Chirp> = resp.json();
+        let ids: Vec<ChirpId> = page.items.iter().map(|c| c.id).collect();
+        // Newest-first: a2, b1, a1.
+        assert_eq!(ids, vec![a2.id, b1.id, a1.id]);
+    }
+
+    #[tokio::test]
+    async fn public_timeline_paginates_with_cursor() {
+        let app = TestApp::new();
+        let (_, token) = app.register_and_login("alice").await;
+
+        // Three chirps posted in ascending id order.
+        let mut posted = Vec::new();
+        for i in 0..3 {
+            posted.push(app.post_chirp(&token, &format!("chirp {i}")).await);
+        }
+
+        // Page 1: limit=2, newest two items, non-None cursor.
+        let resp = app.get("/api/public/timeline?limit=2", None).await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let page1: Page<Chirp> = resp.json();
+        assert_eq!(page1.items.len(), 2);
+        let cursor = page1
+            .next_cursor
+            .clone()
+            .expect("first page has a continuation cursor");
+        assert_eq!(page1.items[0].id, posted[2].id, "newest first");
+        assert_eq!(page1.items[1].id, posted[1].id);
+
+        // Page 2: remaining one item, no cursor.
+        let resp = app
+            .get(
+                &format!("/api/public/timeline?limit=2&cursor={}", cursor.0),
+                None,
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        let page2: Page<Chirp> = resp.json();
+        assert_eq!(page2.items.len(), 1);
+        assert_eq!(page2.items[0].id, posted[0].id);
+        assert!(page2.next_cursor.is_none(), "last page has no cursor");
+    }
+
+    #[tokio::test]
+    async fn public_timeline_requires_no_auth() {
+        let app = TestApp::new();
+
+        // Public endpoint: no Authorization header → 200.
+        let resp = app.get("/api/public/timeline", None).await;
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "GET /api/public/timeline must not require authentication"
+        );
+
+        // Home timeline still requires auth (regression guard).
+        let resp = app.get("/api/timeline", None).await;
+        assert_eq!(
+            resp.status,
+            StatusCode::UNAUTHORIZED,
+            "GET /api/timeline must still require authentication"
+        );
     }
 }
