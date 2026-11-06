@@ -10,6 +10,7 @@
 //! - `/`          -- [`landing_view`](crate::landing::landing_view): public home and timeline
 //! - `/@:handle`  -- [`public_profile_view`](crate::public_profile::public_profile_view)
 //! - `/signin`    -- [`sign_in_view`](crate::sign_in::sign_in_view)
+//! - `/sign-in`   -- [`sign_in_view`](crate::sign_in::sign_in_view) (alias for AC-3)
 //! - `/signup`    -- [`signup_view`](crate::compose::signup_view): full account-creation form
 //! - `/compose`   -- [`compose_view`](crate::compose::compose_view)
 //! - `/user/:id`  -- [`profile_view`](crate::profile::profile_view) (authenticated)
@@ -128,6 +129,7 @@ pub fn start() {
     let profile_ctx = ctx.clone();
     let public_profile_ctx = ctx.clone();
     let signin_ctx = ctx.clone();
+    let signin_hyphen_ctx = ctx.clone();
     let signup_ctx = ctx.clone();
     let compose_ctx = ctx.clone();
     let timeline_ctx = ctx.clone();
@@ -142,6 +144,7 @@ pub fn start() {
         })
         // Sign-in and sign-up routes.
         .route("/signin", move |_params| sign_in_view(&signin_ctx))
+        .route("/sign-in", move |_params| sign_in_view(&signin_hyphen_ctx))
         .route("/signup", move |_params| signup_view(&signup_ctx))
         // Existing authenticated routes -- kept intact; not part of the public-timeline feature.
         .route("/compose", move |_params| compose_view(&compose_ctx))
