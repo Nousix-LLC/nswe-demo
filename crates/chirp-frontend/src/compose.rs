@@ -516,7 +516,7 @@ fn render_signup(ctx: &AppContext, state: &ComposeState) -> VNode {
             VElement::new("p")
                 .attr("class", "chirp-hint")
                 .child(text("Already have an account? "))
-                .child(link("/compose", "Log in →")),
+                .child(link("/signin", "Log in →")),
         )
         .into()
 }

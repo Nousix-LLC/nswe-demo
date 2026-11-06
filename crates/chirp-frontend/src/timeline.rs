@@ -215,7 +215,7 @@ fn request_load(ctx: AppContext, kind: LoadKind) {
     });
 
     wasm_bindgen_futures::spawn_local(async move {
-        let result = ctx.client().pub_timeline(&query).await;
+        let result = ctx.client().timeline(&query).await;
         apply_result(kind, result);
     });
 }
