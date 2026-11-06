@@ -443,6 +443,106 @@ impl ChirpRepository for InMemoryRepository {
         Ok(Page::new(items, next_cursor))
     }
 
+    async fn public_chirps_with_authors(
+        &self,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<(Chirp, User)>, bool), ServerError> {
+        let store = self.lock()?;
+        let limit = limit.clamp(1, 50) as usize;
+
+        let mut visible: Vec<&Chirp> = store
+            .chirps
+            .values()
+            .filter(|chirp| !store.removed.contains(&chirp.id))
+            .filter(|chirp| before.is_none_or(|b| chirp.created_at.as_millis() < b))
+            .collect();
+        // Reverse-chronological: newest (largest created_at) first; break ties by id.
+        visible.sort_by(|a, b| {
+            b.created_at
+                .as_millis()
+                .cmp(&a.created_at.as_millis())
+                .then_with(|| b.id.get().cmp(&a.id.get()))
+        });
+
+        let mut items: Vec<Chirp> = visible.into_iter().take(limit + 1).cloned().collect();
+        let has_more = items.len() > limit;
+        if has_more {
+            items.truncate(limit);
+        }
+
+        // Join each chirp with its author (all author_ids in the store are always resolvable).
+        let pairs: Vec<(Chirp, User)> = items
+            .into_iter()
+            .filter_map(|chirp| {
+                store
+                    .users
+                    .get(&chirp.author_id)
+                    .map(|author| (chirp, author.clone()))
+            })
+            .collect();
+
+        Ok((pairs, has_more))
+    }
+
+    async fn get_user_chirps_by_username(
+        &self,
+        username: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(User, u64, Vec<Chirp>, bool), ServerError> {
+        let store = self.lock()?;
+        let limit_usize = limit.clamp(1, 50) as usize;
+
+        // Case-insensitive username lookup.
+        let user_id = store
+            .username_to_id
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(username))
+            .map(|(_, v)| *v)
+            .ok_or_else(|| ServerError::NotFound(format!("user '{username}'")))?;
+
+        let user = store
+            .users
+            .get(&user_id)
+            .cloned()
+            .ok_or_else(|| ServerError::NotFound(format!("user '{username}'")))?;
+
+        // Count all non-removed chirps authored by this user.
+        let chirp_count = store
+            .chirps
+            .values()
+            .filter(|c| c.author_id == user_id && !store.removed.contains(&c.id))
+            .count() as u64;
+
+        // Fetch a page of non-removed chirps by this user, filtered by the before cursor.
+        let mut user_chirps: Vec<&Chirp> = store
+            .chirps
+            .values()
+            .filter(|c| c.author_id == user_id && !store.removed.contains(&c.id))
+            .filter(|c| before.is_none_or(|b| c.created_at.as_millis() < b))
+            .collect();
+        // Reverse-chronological: newest first; break ties by id.
+        user_chirps.sort_by(|a, b| {
+            b.created_at
+                .as_millis()
+                .cmp(&a.created_at.as_millis())
+                .then_with(|| b.id.get().cmp(&a.id.get()))
+        });
+
+        let mut page: Vec<Chirp> = user_chirps
+            .into_iter()
+            .take(limit_usize + 1)
+            .cloned()
+            .collect();
+        let has_more = page.len() > limit_usize;
+        if has_more {
+            page.truncate(limit_usize);
+        }
+
+        Ok((user, chirp_count, page, has_more))
+    }
+
     async fn follow(
         &self,
         follower: UserId,

@@ -536,4 +536,30 @@ pub trait ChirpRepository: Send + Sync {
     /// [`Unavailable`](ServerError::Unavailable) if the store is out of capacity;
     /// [`Internal`](ServerError::Internal) if the cleanup cannot be durably committed.
     async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError>;
+
+    /// Returns one reverse-chronological page of public chirps joined with their authors.
+    ///
+    /// Each item is `(chirp, author_user)`. Soft-removed chirps are excluded. The `before`
+    /// cursor, when present, is a millisecond timestamp — only chirps with `created_at` strictly
+    /// before that value are returned. `limit` is clamped to `1..=50`, defaulting to 20 when 0.
+    async fn public_chirps_with_authors(
+        &self,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<(Chirp, User)>, bool), ServerError>;
+
+    /// Returns the user's profile and a page of their chirps, looked up by username
+    /// (case-insensitive). Also returns the user's total chirp count and whether more chirps
+    /// follow the page. Soft-removed chirps are excluded. The `before` cursor is a millisecond
+    /// timestamp.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no user has that username.
+    async fn get_user_chirps_by_username(
+        &self,
+        username: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(User, u64, Vec<Chirp>, bool), ServerError>;
 }

@@ -74,8 +74,12 @@ pub fn build_router(state: AppState) -> Router {
         // --- API surface (see HANDLERS_NOTES.md for the authoritative table) ---
         .route("/api/users", post(handlers::create_user))
         .route("/api/users/{id}", get(handlers::get_user))
+        .route("/api/users/{username}/chirps", get(handlers::user_chirps))
         .route("/api/sessions", post(handlers::login))
-        .route("/api/chirps", post(handlers::create_chirp))
+        .route(
+            "/api/chirps",
+            get(handlers::public_chirps).post(handlers::create_chirp),
+        )
         .route("/api/timeline", get(handlers::timeline))
         .route("/api/public/timeline", get(handlers::public_timeline))
         .route(

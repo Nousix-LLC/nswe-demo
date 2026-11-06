@@ -48,7 +48,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use chirp_types::api::{
     AuthResponse, CreateChirpRequest, CreateUserRequest, FollowResponse, LikeResponse,
-    LoginRequest, Page, TimelineQuery,
+    LoginRequest, Page, PublicAuthor, PublicChirp, PublicTimelineQuery, PublicTimelineResponse,
+    PublicUserChirp, PublicUserProfile, PublicUserResponse, TimelineQuery,
 };
 use chirp_types::domain::{Chirp, User};
 use chirp_types::ids::{ChirpId, UserId};
@@ -153,6 +154,83 @@ pub async fn public_timeline(
 ) -> Result<Json<Page<Chirp>>, ServerError> {
     let page = state.repo.public_timeline(query).await?;
     Ok(Json(page))
+}
+
+/// `GET /api/chirps` — public timeline with embedded author info. Unauthenticated.
+///
+/// Returns a reverse-chronological page of all public chirps with their authors embedded, as
+/// defined in the logged-out visitor API spec. Pagination uses the `before` query parameter
+/// (a millisecond timestamp — the `created_at` of the last chirp on the previous page) rather than
+/// an opaque cursor, so the response shape differs from the existing `GET /api/public/timeline`.
+/// The spec describes `before` as an ISO 8601 string; this implementation accepts milliseconds
+/// since epoch for consistency with the domain timestamp type (noted as a spec deviation).
+pub async fn public_chirps(
+    State(state): State<AppState>,
+    Query(query): Query<PublicTimelineQuery>,
+) -> Result<Json<PublicTimelineResponse>, ServerError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 50);
+    let (pairs, has_more) = state
+        .repo
+        .public_chirps_with_authors(query.before, limit)
+        .await?;
+    let chirps = pairs
+        .into_iter()
+        .map(|(chirp, author)| PublicChirp {
+            id: chirp.id,
+            content: chirp.text.into_string(),
+            author: PublicAuthor {
+                username: author.username.into_string(),
+                display_name: if author.display_name.is_empty() {
+                    None
+                } else {
+                    Some(author.display_name)
+                },
+            },
+            created_at: chirp.created_at.as_millis(),
+            like_count: chirp.like_count,
+        })
+        .collect();
+    Ok(Json(PublicTimelineResponse { chirps, has_more }))
+}
+
+/// `GET /api/users/{username}/chirps` — public user profile and chirps. Unauthenticated.
+///
+/// Looks up `username` case-insensitively, returns the user's profile and a reverse-chronological
+/// page of their chirps. Returns **404 Not Found** when no user has that handle.
+pub async fn user_chirps(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+    Query(query): Query<PublicTimelineQuery>,
+) -> Result<Json<PublicUserResponse>, ServerError> {
+    let limit = query.limit.unwrap_or(20).clamp(1, 50);
+    let (user, chirp_count, chirps, has_more) = state
+        .repo
+        .get_user_chirps_by_username(&username, query.before, limit)
+        .await?;
+    let chirps = chirps
+        .into_iter()
+        .map(|chirp| PublicUserChirp {
+            id: chirp.id,
+            content: chirp.text.into_string(),
+            created_at: chirp.created_at.as_millis(),
+            like_count: chirp.like_count,
+        })
+        .collect();
+    let profile = PublicUserProfile {
+        username: user.username.into_string(),
+        display_name: if user.display_name.is_empty() {
+            None
+        } else {
+            Some(user.display_name)
+        },
+        bio: user.bio,
+        chirp_count,
+    };
+    Ok(Json(PublicUserResponse {
+        user: profile,
+        chirps,
+        has_more,
+    }))
 }
 
 /// `PUT /api/users/{id}/follow` — follow the target user. Requires authentication; idempotent.
@@ -352,5 +430,137 @@ mod tests {
             .await
             .expect_err("liking an absent chirp is not found");
         assert!(matches!(err, ServerError::NotFound(_)));
+    }
+    #[tokio::test]
+    async fn public_chirps_returns_200_without_auth_and_empty_timeline() {
+        let state = state();
+        let Json(resp) = public_chirps(State(state), Query(PublicTimelineQuery::default()))
+            .await
+            .expect("public_chirps succeeds on empty store");
+        assert!(resp.chirps.is_empty());
+        assert!(!resp.has_more);
+    }
+
+    #[tokio::test]
+    async fn public_chirps_returns_chirp_with_embedded_author() {
+        let state = state();
+        let (_, Json(alice)) = create_user(
+            State(state.clone()),
+            ValidatedJson(CreateUserRequest {
+                username: "alice".parse().expect("valid handle"),
+                display_name: "Alice A".to_owned(),
+                bio: None,
+            }),
+        )
+        .await
+        .expect("create_user succeeds");
+        let (_, Json(chirp)) = create_chirp(
+            AuthUser(alice.id),
+            State(state.clone()),
+            ValidatedJson(CreateChirpRequest {
+                text: ChirpText::parse("hello from alice").expect("valid body"),
+                reply_to: None,
+            }),
+        )
+        .await
+        .expect("create_chirp succeeds");
+
+        let Json(resp) = public_chirps(State(state), Query(PublicTimelineQuery::default()))
+            .await
+            .expect("public_chirps succeeds");
+        assert_eq!(resp.chirps.len(), 1);
+        assert_eq!(resp.chirps[0].id, chirp.id);
+        assert_eq!(resp.chirps[0].content, "hello from alice");
+        assert_eq!(resp.chirps[0].author.username, "alice");
+        assert!(!resp.has_more);
+    }
+
+    #[tokio::test]
+    async fn user_chirps_returns_200_for_existing_user_with_no_chirps() {
+        let state = state();
+        let (_, Json(bob)) =
+            create_user(State(state.clone()), ValidatedJson(new_user_request("bob")))
+                .await
+                .expect("create_user succeeds");
+
+        let Json(resp) = user_chirps(
+            State(state),
+            Path("bob".to_owned()),
+            Query(PublicTimelineQuery::default()),
+        )
+        .await
+        .expect("user_chirps succeeds");
+        assert_eq!(resp.user.username, bob.username.as_str());
+        assert_eq!(resp.user.chirp_count, 0);
+        assert!(resp.chirps.is_empty());
+        assert!(!resp.has_more);
+    }
+
+    #[tokio::test]
+    async fn user_chirps_returns_404_for_missing_user() {
+        let err = user_chirps(
+            State(state()),
+            Path("nobody".to_owned()),
+            Query(PublicTimelineQuery::default()),
+        )
+        .await
+        .expect_err("missing user is not found");
+        assert!(matches!(err, ServerError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn user_chirps_returns_chirp_count_and_page() {
+        let state = state();
+        let (_, Json(carol)) = create_user(
+            State(state.clone()),
+            ValidatedJson(new_user_request("carol")),
+        )
+        .await
+        .expect("create_user succeeds");
+        for i in 0..3 {
+            let _ = create_chirp(
+                AuthUser(carol.id),
+                State(state.clone()),
+                ValidatedJson(CreateChirpRequest {
+                    text: ChirpText::parse(format!("chirp {i}")).expect("valid body"),
+                    reply_to: None,
+                }),
+            )
+            .await
+            .expect("create_chirp succeeds");
+        }
+
+        let Json(resp) = user_chirps(
+            State(state),
+            Path("carol".to_owned()),
+            Query(PublicTimelineQuery::default()),
+        )
+        .await
+        .expect("user_chirps succeeds");
+        assert_eq!(resp.user.username, "carol");
+        assert_eq!(resp.user.chirp_count, 3);
+        assert_eq!(resp.chirps.len(), 3);
+        assert!(!resp.has_more);
+    }
+
+    #[tokio::test]
+    async fn user_chirps_case_insensitive_lookup() {
+        let state = state();
+        let _ = create_user(
+            State(state.clone()),
+            ValidatedJson(new_user_request("dave")),
+        )
+        .await
+        .expect("create_user succeeds");
+
+        // Look up "Dave" with capital D — must find "dave".
+        let Json(resp) = user_chirps(
+            State(state),
+            Path("Dave".to_owned()),
+            Query(PublicTimelineQuery::default()),
+        )
+        .await
+        .expect("case-insensitive lookup succeeds");
+        assert_eq!(resp.user.username, "dave");
     }
 }

@@ -611,6 +611,153 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
+    async fn public_chirps_with_authors(
+        &self,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<(Chirp, User)>, bool), ServerError> {
+        let limit = limit.clamp(1, 50);
+
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                // Fetch the chirps page, ordered by created_at DESC (id as stable tiebreaker).
+                let chirp_rows: Vec<mapping::ChirpRow> = sqlx::query_as(
+                    "SELECT id, author_id, text, created_at, like_count, reply_to, removed,                      removed_at FROM chirps                      WHERE removed = FALSE                        AND ($1::BIGINT IS NULL OR created_at < $1)                      ORDER BY created_at DESC, id DESC LIMIT $2",
+                )
+                .bind(before)
+                .bind(i64::from(limit) + 1)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read public chirps: {error}"))
+                })?;
+
+                let has_more = chirp_rows.len() > limit as usize;
+                let chirp_rows: Vec<mapping::ChirpRow> =
+                    chirp_rows.into_iter().take(limit as usize).collect();
+
+                if chirp_rows.is_empty() {
+                    return Ok((Vec::new(), false));
+                }
+
+                // Collect distinct author ids for a batch user fetch.
+                let author_ids: Vec<i64> = {
+                    let mut ids: Vec<i64> = chirp_rows.iter().map(|r| r.author_id).collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    ids
+                };
+
+                let user_rows: Vec<mapping::UserRow> = sqlx::query_as(
+                    "SELECT id, username, display_name, bio, created_at, follower_count,                      following_count, suspended, suspended_at                      FROM users WHERE id = ANY($1::BIGINT[])",
+                )
+                .bind(&author_ids)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read chirp authors: {error}"))
+                })?;
+
+                // Build an id-keyed lookup map (column value -> User).
+                let users: std::collections::HashMap<i64, User> = user_rows
+                    .into_iter()
+                    .map(|row| {
+                        let id_col = row.id;
+                        row.into_user().map(|u| (id_col, u))
+                    })
+                    .collect::<Result<_, ServerError>>()?;
+
+                // Join chirps with their authors.
+                let pairs = chirp_rows
+                    .into_iter()
+                    .map(|chirp_row| {
+                        let author = users
+                            .get(&chirp_row.author_id)
+                            .cloned()
+                            .ok_or_else(|| {
+                                ServerError::Internal(format!(
+                                    "author {} missing for chirp",
+                                    chirp_row.author_id
+                                ))
+                            })?;
+                        let chirp = chirp_row.into_chirp()?;
+                        Ok((chirp, author))
+                    })
+                    .collect::<Result<Vec<(Chirp, User)>, ServerError>>()?;
+
+                Ok((pairs, has_more))
+            })
+        })
+        .await
+    }
+
+    async fn get_user_chirps_by_username(
+        &self,
+        username: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(User, u64, Vec<Chirp>, bool), ServerError> {
+        let limit = limit.clamp(1, 50);
+        let username = username.to_owned();
+
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                // Case-insensitive username lookup.
+                let user_row: Option<mapping::UserRow> = sqlx::query_as(
+                    "SELECT id, username, display_name, bio, created_at, follower_count,                      following_count, suspended, suspended_at                      FROM users WHERE LOWER(username) = LOWER($1)",
+                )
+                .bind(&username)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to look up user '{username}': {error}"))
+                })?;
+
+                let user = match user_row {
+                    Some(row) => row.into_user()?,
+                    None => return Err(ServerError::NotFound(format!("user '{username}'"))),
+                };
+
+                let user_id_col = mapping::user_id_to_column(user.id)?;
+
+                // Count all non-removed chirps authored by this user.
+                let chirp_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM chirps WHERE author_id = $1 AND removed = FALSE",
+                )
+                .bind(user_id_col)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to count chirps for user: {error}"))
+                })?;
+                let chirp_count = chirp_count.max(0) as u64;
+
+                // Fetch a page of non-removed chirps by this user.
+                let chirp_rows: Vec<mapping::ChirpRow> = sqlx::query_as(
+                    "SELECT id, author_id, text, created_at, like_count, reply_to, removed,                      removed_at FROM chirps                      WHERE author_id = $1 AND removed = FALSE                        AND ($2::BIGINT IS NULL OR created_at < $2)                      ORDER BY created_at DESC, id DESC LIMIT $3",
+                )
+                .bind(user_id_col)
+                .bind(before)
+                .bind(i64::from(limit) + 1)
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read user chirps: {error}"))
+                })?;
+
+                let has_more = chirp_rows.len() > limit as usize;
+                let chirps = chirp_rows
+                    .into_iter()
+                    .take(limit as usize)
+                    .map(mapping::ChirpRow::into_chirp)
+                    .collect::<Result<Vec<Chirp>, ServerError>>()?;
+
+                Ok((user, chirp_count, chirps, has_more))
+            })
+        })
+        .await
+    }
+
     /// Durably makes `follower` follow `followee`, maintaining the denormalized follow counts in the
     /// SAME confirmed-write transaction as the edge insert (`counts_match_edges`, `multiwrite_atomic`,
     /// `confirmed_write_durable`).

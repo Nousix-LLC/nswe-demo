@@ -136,6 +136,109 @@ pub struct TimelineQuery {
     pub cursor: Option<Cursor>,
 }
 
+// ---- Public (logged-out) endpoint types --------------------------------------------------------
+// Response and query types for GET /api/chirps and GET /api/users/:username/chirps.
+
+/// Query parameters for the public timeline and user-profile endpoints.
+///
+/// `before` is a pagination cursor expressed as a Unix timestamp in milliseconds (the `created_at`
+/// value of the last chirp on the previous page). `limit` defaults to 20 when absent, clamped 1–50.
+/// Note: the external spec describes `before` as an ISO 8601 string; this implementation uses
+/// milliseconds-since-epoch for consistency with the domain [`Timestamp`](crate::ids::Timestamp)
+/// type (the shared wire representation for timestamps across the API).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicTimelineQuery {
+    /// Pagination cursor — return items with `created_at` strictly before this timestamp
+    /// (milliseconds since the Unix epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<i64>,
+    /// Maximum number of items to return (1–50, default 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// The embedded author within a [`PublicChirp`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicAuthor {
+    /// The author's unique handle.
+    pub username: String,
+    /// The author's display name, if set.
+    pub display_name: Option<String>,
+}
+
+/// One chirp in the public timeline response (`GET /api/chirps`).
+///
+/// Note: `id` is a server-assigned integer (not a UUID), and `created_at` is milliseconds since
+/// the Unix epoch (not an ISO 8601 string) — both differ from the external spec notation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicChirp {
+    /// The chirp's server-assigned identifier.
+    pub id: ChirpId,
+    /// The chirp's body text.
+    pub content: String,
+    /// The chirp's author (embedded).
+    pub author: PublicAuthor,
+    /// When the chirp was posted (milliseconds since the Unix epoch).
+    pub created_at: i64,
+    /// Number of likes on the chirp.
+    pub like_count: u64,
+}
+
+/// Response body for `GET /api/chirps` (public timeline endpoint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicTimelineResponse {
+    /// The chirps on this page, reverse-chronological (newest first).
+    pub chirps: Vec<PublicChirp>,
+    /// Whether more chirps exist beyond this page.
+    pub has_more: bool,
+}
+
+/// User profile embedded in the user-chirps response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserProfile {
+    /// The user's unique handle.
+    pub username: String,
+    /// The user's display name, if set.
+    pub display_name: Option<String>,
+    /// The user's biography, if set.
+    pub bio: Option<String>,
+    /// The user's total chirp count.
+    pub chirp_count: u64,
+}
+
+/// One chirp in the user-profile response (no embedded author — the author is the profile subject).
+///
+/// The `id` field is a server-assigned integer and `created_at` is milliseconds since the Unix epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserChirp {
+    /// The chirp's server-assigned identifier.
+    pub id: ChirpId,
+    /// The chirp's body text.
+    pub content: String,
+    /// When the chirp was posted (milliseconds since the Unix epoch).
+    pub created_at: i64,
+    /// Number of likes on the chirp.
+    pub like_count: u64,
+}
+
+/// Response body for `GET /api/users/:username/chirps` (public user profile endpoint).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserResponse {
+    /// The user's public profile.
+    pub user: PublicUserProfile,
+    /// The user's chirps on this page, reverse-chronological.
+    pub chirps: Vec<PublicUserChirp>,
+    /// Whether more chirps exist beyond this page.
+    pub has_more: bool,
+}
+
 /// Result of a follow / unfollow action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

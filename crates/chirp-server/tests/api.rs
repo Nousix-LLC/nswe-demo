@@ -813,6 +813,21 @@ mod readiness {
         async fn public_timeline(&self, _query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
             unimplemented!()
         }
+        async fn public_chirps_with_authors(
+            &self,
+            _before: Option<i64>,
+            _limit: u32,
+        ) -> Result<(Vec<(Chirp, User)>, bool), ServerError> {
+            unimplemented!()
+        }
+        async fn get_user_chirps_by_username(
+            &self,
+            _username: &str,
+            _before: Option<i64>,
+            _limit: u32,
+        ) -> Result<(User, u64, Vec<Chirp>, bool), ServerError> {
+            unimplemented!()
+        }
     }
 }
 
