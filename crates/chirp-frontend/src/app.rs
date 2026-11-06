@@ -137,7 +137,7 @@ pub fn start() {
             .into()
     };
 
-    // Mount into `#app` if the page provides it, otherwise into `<body>`.
+    // Acquire the mount root: `#app` if the page provides it, otherwise `<body>`.
     let document = web_sys::window()
         .expect("chirp-frontend: no browser `window` — the app requires a browser context")
         .document()
@@ -147,5 +147,16 @@ pub fn start() {
         .or_else(|| document.body().map(Into::into))
         .expect("chirp-frontend: the page has no `#app` element and no `<body>` to mount into");
 
+    // Hydrate when the server has already populated the mount root with SSR markup; fall back
+    // to a fresh client-side mount when there is no server-rendered content in the root.
+    // `ferric::hydrate` is wasm32-only; the cfg gate keeps non-wasm (native test / clippy)
+    // compilation clean while preserving the runtime conditional on the wasm32 target.
+    #[cfg(target_arch = "wasm32")]
+    if root.has_child_nodes() {
+        ferric::hydrate(root, app);
+    } else {
+        mount(root, app);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     mount(root, app);
 }

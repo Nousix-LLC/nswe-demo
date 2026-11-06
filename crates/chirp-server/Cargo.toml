@@ -37,6 +37,12 @@ postgres = ["dep:sqlx"]
 # the sibling workspace member — the server imports the contract, it never forks or re-declares it.
 chirp-types = { path = "../chirp-types" }
 
+# Ferric: the client-side framework whose `render_to_string` function we call in the SSR handler.
+# This is a NATIVE (non-wasm) dependency: `ferric::ssr` compiles and runs on the server target.
+# The `dom` and `hydrate` modules inside `ferric` are wasm32-only and are gated inside that crate;
+# this entry point always compiles correctly on x86_64 / aarch64 server targets.
+ferric = { path = "../ferric" }
+
 # `async fn` in the `ChirpRepository` trait, kept object-safe so axum state can hold
 # `Arc<dyn ChirpRepository>`. Native async-fn-in-trait is not yet `dyn`-compatible, so the
 # ecosystem-standard `async-trait` is used to box the returned futures. The boxing cost is

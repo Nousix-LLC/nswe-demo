@@ -42,6 +42,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::api::handlers;
+use crate::ssr::ssr_handler;
 use crate::AppState;
 
 /// Build the fully-wired application [`Router`] over the supplied [`AppState`].
@@ -62,6 +63,10 @@ pub fn build_router(state: AppState) -> Router {
     let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
 
     Router::new()
+        // SSR entry point — `GET /` returns the server-rendered application document
+        // (REQ-SSR-011).  Registered first so it takes precedence over the SPA fallback for
+        // the root path; every other path continues to be served by the static-file fallback.
+        .route("/", get(ssr_handler))
         // Liveness probe — unauthenticated, state-free.
         .route("/healthz", get(healthz))
         // Readiness probe — unauthenticated; invokes the store-health capability.

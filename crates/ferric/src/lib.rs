@@ -22,12 +22,26 @@ pub mod dom;
 pub mod signal;
 pub mod vdom;
 
+// SSR + hydration modules (additive — frozen modules above are unchanged).
+// `ssr` is always compiled (native and wasm32); it must not import web_sys or
+// wasm_bindgen.  `hydrate` is WASM-only: it uses web_sys::Element and DOM APIs.
+pub mod ssr;
+
+#[cfg(target_arch = "wasm32")]
+pub mod hydrate;
+
 // Top-level re-exports: the `view!` macro's generated code references these
 // types via `::ferric::VElement`, `::ferric::VNode`, and `::ferric::EventKind`,
 // so they must be accessible at the crate root in addition to their canonical
 // path `ferric::vdom::*`.  Additive-only — the `ferric::vdom` module and the
 // `prelude` are unchanged.
 pub use crate::vdom::{EventKind, VElement, VNode};
+
+// SSR + hydration re-exports (additive — not in the frozen prelude block).
+// `render_to_string` is always reachable; `hydrate` is wasm32-only.
+#[cfg(target_arch = "wasm32")]
+pub use crate::hydrate::hydrate;
+pub use crate::ssr::render_to_string;
 
 /// The frozen public surface of `ferric`.
 ///
