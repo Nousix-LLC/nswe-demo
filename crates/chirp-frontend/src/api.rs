@@ -30,6 +30,7 @@ use crate::error::AppError;
 
 /// Author embedded in a public timeline chirp. Matches the `author` field in `GET /api/chirps`.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicAuthor {
     /// The author login handle (URL-safe string).
     pub username: String,
@@ -39,21 +40,23 @@ pub struct PublicAuthor {
 
 /// One chirp returned by the public timeline endpoint `GET /api/chirps`.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicChirp {
-    /// Opaque chirp id (UUID string).
-    pub id: String,
+    /// Opaque chirp id.
+    pub id: u64,
     /// The chirp text content.
     pub content: String,
     /// The author identity.
     pub author: PublicAuthor,
-    /// ISO 8601 creation timestamp.
-    pub created_at: String,
+    /// Creation timestamp (milliseconds since Unix epoch).
+    pub created_at: i64,
     /// Total number of likes this chirp has received.
     pub like_count: u64,
 }
 
 /// Response body from `GET /api/chirps`.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicTimelineResponse {
     /// Chirps in the page, newest first.
     pub chirps: Vec<PublicChirp>,
@@ -63,6 +66,7 @@ pub struct PublicTimelineResponse {
 
 /// User profile info in the public user chirp response.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicUserInfo {
     /// The user login handle.
     pub username: String,
@@ -76,19 +80,21 @@ pub struct PublicUserInfo {
 
 /// One chirp in a user profile chirp list (`GET /api/users/:username/chirps`).
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicUserChirp {
-    /// Opaque chirp id (UUID string).
-    pub id: String,
+    /// Opaque chirp id.
+    pub id: u64,
     /// The chirp text content.
     pub content: String,
-    /// ISO 8601 creation timestamp.
-    pub created_at: String,
+    /// Creation timestamp (milliseconds since Unix epoch).
+    pub created_at: i64,
     /// Total number of likes this chirp has received.
     pub like_count: u64,
 }
 
 /// Response body from `GET /api/users/:username/chirps`.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PublicUserResponse {
     /// The user profile info.
     pub user: PublicUserInfo,

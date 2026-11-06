@@ -56,8 +56,8 @@ struct LandingModel {
     loaded: bool,
     /// Accumulated chirps, newest first.
     chirps: Vec<PublicChirp>,
-    /// ISO 8601 `created_at` of the last chirp; passed as `before` for the next page.
-    before_cursor: Option<String>,
+    /// `created_at` timestamp (ms since Unix epoch) of the last chirp; passed as `before` for the next page.
+    before_cursor: Option<i64>,
     /// Whether there are more pages (from the last response's `has_more`).
     has_more: bool,
     /// Whether a "load more" continuation is in flight.
@@ -94,7 +94,7 @@ impl LandingModel {
     }
 
     fn apply_initial(&mut self, resp: PublicTimelineResponse) {
-        self.before_cursor = resp.chirps.last().map(|c| c.created_at.clone());
+        self.before_cursor = resp.chirps.last().map(|c| c.created_at);
         self.chirps = resp.chirps;
         self.has_more = resp.has_more;
         self.loaded = true;
@@ -105,7 +105,7 @@ impl LandingModel {
     fn apply_more(&mut self, resp: PublicTimelineResponse) {
         // Keep existing cursor if the continuation page is empty (guard against empty more pages).
         if let Some(last) = resp.chirps.last() {
-            self.before_cursor = Some(last.created_at.clone());
+            self.before_cursor = Some(last.created_at);
         }
         self.chirps.extend(resp.chirps);
         self.has_more = resp.has_more;
@@ -193,12 +193,16 @@ fn request_load(ctx: AppContext, kind: LoadKind) {
         let m = model.borrow();
         match kind {
             LoadKind::Initial => (None, Some(PAGE_LIMIT)),
-            LoadKind::More => (m.before_cursor.clone(), Some(PAGE_LIMIT)),
+            LoadKind::More => (m.before_cursor, Some(PAGE_LIMIT)),
         }
     });
 
     wasm_bindgen_futures::spawn_local(async move {
-        let result = ctx.client().public_timeline(before.as_deref(), limit).await;
+        let before_str = before.map(|ts| ts.to_string());
+        let result = ctx
+            .client()
+            .public_timeline(before_str.as_deref(), limit)
+            .await;
         apply_result(kind, result);
     });
 }
@@ -316,7 +320,7 @@ fn chirp_item(chirp: &PublicChirp) -> VNode {
         .as_deref()
         .unwrap_or(&chirp.author.username);
     VElement::new("li")
-        .key(chirp.id.clone())
+        .key(chirp.id.to_string())
         .attr("class", "chirp")
         .child(
             VElement::new("div")
@@ -339,7 +343,7 @@ fn chirp_item(chirp: &PublicChirp) -> VNode {
                 .child(
                     VElement::new("span")
                         .attr("class", "chirp-time")
-                        .child(text(chirp.created_at.as_str())),
+                        .child(text(chirp.created_at.to_string())),
                 ),
         )
         .into()
@@ -395,15 +399,15 @@ mod tests {
     use super::*;
     use crate::api::PublicAuthor;
 
-    fn sample_chirp(id: &str, created_at: &str) -> PublicChirp {
+    fn sample_chirp(id: u64, created_at: i64) -> PublicChirp {
         PublicChirp {
-            id: id.to_string(),
+            id,
             content: format!("content of {id}"),
             author: PublicAuthor {
                 username: "alice".to_string(),
                 display_name: Some("Alice".to_string()),
             },
-            created_at: created_at.to_string(),
+            created_at,
             like_count: 0,
         }
     }
@@ -440,11 +444,11 @@ mod tests {
     #[test]
     fn apply_initial_marks_loaded_sets_cursor_and_has_more() {
         let mut m = LandingModel::new();
-        let c = sample_chirp("id-1", "2024-01-15T12:00:00Z");
+        let c = sample_chirp(1, 1700000000000i64);
         m.apply_initial(resp(vec![c], true));
         assert!(m.loaded);
         assert_eq!(m.chirps.len(), 1);
-        assert_eq!(m.before_cursor.as_deref(), Some("2024-01-15T12:00:00Z"));
+        assert_eq!(m.before_cursor, Some(1700000000000i64));
         assert!(m.has_more);
         assert!(m.error.is_none());
     }
@@ -452,11 +456,11 @@ mod tests {
     #[test]
     fn apply_more_appends_and_updates_cursor() {
         let mut m = LandingModel::new();
-        m.apply_initial(resp(vec![sample_chirp("a", "2024-01-15T12:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         m.begin_more();
-        m.apply_more(resp(vec![sample_chirp("b", "2024-01-10T08:00:00Z")], false));
+        m.apply_more(resp(vec![sample_chirp(2, 1699000000000i64)], false));
         assert_eq!(m.chirps.len(), 2);
-        assert_eq!(m.before_cursor.as_deref(), Some("2024-01-10T08:00:00Z"));
+        assert_eq!(m.before_cursor, Some(1699000000000i64));
         assert!(!m.has_more);
         assert!(!m.loading_more);
     }
@@ -472,7 +476,7 @@ mod tests {
     #[test]
     fn apply_error_after_load_keeps_loaded() {
         let mut m = LandingModel::new();
-        m.apply_initial(resp(vec![sample_chirp("a", "2024-01-15T12:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         m.begin_more();
         m.apply_error(AppError::Network("dropped".to_string()));
         assert!(m.loaded);
@@ -483,7 +487,7 @@ mod tests {
     #[test]
     fn begin_initial_resets_all_state() {
         let mut m = LandingModel::new();
-        m.apply_initial(resp(vec![sample_chirp("a", "2024-01-15T12:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         m.begin_initial();
         assert!(!m.loaded);
         assert!(m.chirps.is_empty());
@@ -544,8 +548,8 @@ mod tests {
         let mut m = LandingModel::new();
         m.apply_initial(resp(
             vec![
-                sample_chirp("id-3", "2024-01-15T12:00:00Z"),
-                sample_chirp("id-2", "2024-01-14T12:00:00Z"),
+                sample_chirp(3, 1700000000000i64),
+                sample_chirp(2, 1699900000000i64),
             ],
             true,
         ));
@@ -564,10 +568,7 @@ mod tests {
     #[test]
     fn last_page_renders_end_note_not_load_more() {
         let mut m = LandingModel::new();
-        m.apply_initial(resp(
-            vec![sample_chirp("id-1", "2024-01-15T12:00:00Z")],
-            false,
-        ));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], false));
         let tree = view_tree(&m, noop(), noop());
         let content = text_content(&tree);
         assert!(

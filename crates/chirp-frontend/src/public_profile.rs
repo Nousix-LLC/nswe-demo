@@ -68,8 +68,8 @@ struct ProfileModel {
     user_info: Option<PublicUserInfo>,
     /// Accumulated chirps.
     chirps: Vec<PublicUserChirp>,
-    /// ISO 8601 `created_at` of the last chirp; passed as `before` for the next page.
-    before_cursor: Option<String>,
+    /// `created_at` timestamp (ms since Unix epoch) of the last chirp; passed as `before` for the next page.
+    before_cursor: Option<i64>,
     /// Whether there are more pages (from the last response's `has_more`).
     has_more: bool,
     /// Whether a "load more" continuation is in flight.
@@ -110,7 +110,7 @@ impl ProfileModel {
     }
 
     fn apply_initial(&mut self, resp: PublicUserResponse) {
-        self.before_cursor = resp.chirps.last().map(|c| c.created_at.clone());
+        self.before_cursor = resp.chirps.last().map(|c| c.created_at);
         self.user_info = Some(resp.user);
         self.chirps = resp.chirps;
         self.has_more = resp.has_more;
@@ -121,7 +121,7 @@ impl ProfileModel {
 
     fn apply_more(&mut self, resp: PublicUserResponse) {
         if let Some(last) = resp.chirps.last() {
-            self.before_cursor = Some(last.created_at.clone());
+            self.before_cursor = Some(last.created_at);
         }
         self.chirps.extend(resp.chirps);
         self.has_more = resp.has_more;
@@ -236,14 +236,15 @@ fn request_load(ctx: AppContext, handle: String, kind: LoadKind) {
         let m = model.borrow();
         match kind {
             LoadKind::Initial => (None, Some(PAGE_LIMIT)),
-            LoadKind::More => (m.before_cursor.clone(), Some(PAGE_LIMIT)),
+            LoadKind::More => (m.before_cursor, Some(PAGE_LIMIT)),
         }
     });
 
     wasm_bindgen_futures::spawn_local(async move {
+        let before_str = before.map(|ts| ts.to_string());
         let result = ctx
             .client()
-            .public_user_profile(&handle, before.as_deref(), limit)
+            .public_user_profile(&handle, before_str.as_deref(), limit)
             .await;
         // Guard: if the user navigated to a different profile, discard this result.
         let still_current =
@@ -393,7 +394,7 @@ fn chirp_list(chirps: &[PublicUserChirp]) -> VNode {
 
 fn profile_chirp_item(chirp: &PublicUserChirp) -> VNode {
     VElement::new("li")
-        .key(chirp.id.clone())
+        .key(chirp.id.to_string())
         .attr("class", "chirp")
         .child(
             VElement::new("p")
@@ -411,7 +412,7 @@ fn profile_chirp_item(chirp: &PublicUserChirp) -> VNode {
                 .child(
                     VElement::new("span")
                         .attr("class", "chirp-time")
-                        .child(text(chirp.created_at.as_str())),
+                        .child(text(chirp.created_at.to_string())),
                 ),
         )
         .into()
@@ -467,11 +468,11 @@ fn error_banner(message: &str) -> VNode {
 mod tests {
     use super::*;
 
-    fn sample_chirp(id: &str, created_at: &str) -> PublicUserChirp {
+    fn sample_chirp(id: u64, created_at: i64) -> PublicUserChirp {
         PublicUserChirp {
-            id: id.to_string(),
+            id,
             content: format!("content of {id}"),
-            created_at: created_at.to_string(),
+            created_at,
             like_count: 0,
         }
     }
@@ -532,10 +533,7 @@ mod tests {
     #[test]
     fn reset_for_clears_all_prior_state() {
         let mut m = make_model("alice");
-        m.apply_initial(resp(
-            vec![sample_chirp("c1", "2024-01-15T00:00:00Z")],
-            false,
-        ));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], false));
         m.reset_for("bob".to_string());
         assert_eq!(m.handle.as_deref(), Some("bob"));
         assert!(matches!(m.phase, LoadPhase::Loading));
@@ -546,23 +544,20 @@ mod tests {
     #[test]
     fn apply_initial_transitions_to_loaded() {
         let mut m = make_model("alice");
-        m.apply_initial(resp(vec![sample_chirp("c1", "2024-01-15T00:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         assert!(matches!(m.phase, LoadPhase::Loaded));
         assert_eq!(m.chirps.len(), 1);
         assert!(m.user_info.is_some());
         assert!(m.has_more);
-        assert_eq!(m.before_cursor.as_deref(), Some("2024-01-15T00:00:00Z"));
+        assert_eq!(m.before_cursor, Some(1700000000000i64));
     }
 
     #[test]
     fn apply_more_appends_chirps() {
         let mut m = make_model("alice");
-        m.apply_initial(resp(vec![sample_chirp("c1", "2024-01-15T00:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         m.begin_more();
-        m.apply_more(resp(
-            vec![sample_chirp("c2", "2024-01-10T00:00:00Z")],
-            false,
-        ));
+        m.apply_more(resp(vec![sample_chirp(2, 1699000000000i64)], false));
         assert_eq!(m.chirps.len(), 2);
         assert!(!m.has_more);
     }
@@ -586,7 +581,7 @@ mod tests {
     #[test]
     fn apply_error_on_more_sets_continuation_error() {
         let mut m = make_model("alice");
-        m.apply_initial(resp(vec![sample_chirp("c1", "2024-01-15T00:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         m.begin_more();
         m.apply_error(AppError::Network("dropped".to_string()), LoadKind::More);
         assert!(matches!(m.phase, LoadPhase::Loaded));
@@ -661,7 +656,7 @@ mod tests {
     #[test]
     fn loaded_with_chirps_renders_list_and_load_more() {
         let mut m = make_model("alice");
-        m.apply_initial(resp(vec![sample_chirp("c1", "2024-01-15T00:00:00Z")], true));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], true));
         let tree = view_tree(&m, noop(), noop());
         assert!(find_class(&tree, "chirp-list").is_some());
         let content = text_content(&tree);
@@ -674,10 +669,7 @@ mod tests {
     #[test]
     fn end_of_list_renders_end_note() {
         let mut m = make_model("alice");
-        m.apply_initial(resp(
-            vec![sample_chirp("c1", "2024-01-15T00:00:00Z")],
-            false,
-        ));
+        m.apply_initial(resp(vec![sample_chirp(1, 1700000000000i64)], false));
         let tree = view_tree(&m, noop(), noop());
         let content = text_content(&tree);
         assert!(
