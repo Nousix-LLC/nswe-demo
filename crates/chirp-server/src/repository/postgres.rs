@@ -581,8 +581,34 @@ impl ChirpRepository for PostgresRepository {
         .await
     }
 
-    async fn public_timeline(&self, _query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
-        todo!("public_timeline not yet implemented")
+    async fn public_timeline(&self, query: TimelineQuery) -> Result<Page<Chirp>, ServerError> {
+        let limit = clamp_limit(query.limit);
+        let cursor = decode_cursor(query.cursor.as_ref());
+        self.with_transaction(move |conn| {
+            Box::pin(async move {
+                let rows: Vec<mapping::ChirpRow> = sqlx::query_as(
+                    "SELECT id, author_id, text, created_at, like_count, reply_to, removed, \
+                     removed_at FROM chirps \
+                     WHERE removed = FALSE \
+                       AND ($1::BIGINT IS NULL OR id < $1) \
+                     ORDER BY id DESC LIMIT $2",
+                )
+                .bind(cursor)
+                .bind(fetch_limit(limit))
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|error| {
+                    ServerError::Internal(format!("failed to read the public timeline: {error}"))
+                })?;
+
+                let chirps = rows
+                    .into_iter()
+                    .map(mapping::ChirpRow::into_chirp)
+                    .collect::<Result<Vec<Chirp>, ServerError>>()?;
+                Ok(paginate(chirps, limit, |chirp| chirp.id.get()))
+            })
+        })
+        .await
     }
 
     /// Durably makes `follower` follow `followee`, maintaining the denormalized follow counts in the
