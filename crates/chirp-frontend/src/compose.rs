@@ -41,8 +41,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
 use chirp_types::prelude::{
-    ChirpText, CreateChirpRequest, LoginRequest, Username, ValidationError,
+    ChirpText, CreateChirpRequest, CreateUserRequest, LoginRequest, Username, ValidationError,
 };
+use ferric_router::prelude::link;
 
 use crate::app::{AppContext, Session};
 
@@ -50,6 +51,10 @@ use crate::app::{AppContext, Session};
 const LOGIN_FIELD_ID: &str = "chirp-login-handle";
 /// DOM `id` of the compose chirp `<textarea>`.
 const COMPOSE_FIELD_ID: &str = "chirp-compose-text";
+/// DOM `id` of the sign-up handle `<input>`.
+const SIGNUP_HANDLE_ID: &str = "chirp-signup-handle";
+/// DOM `id` of the sign-up display-name `<input>`.
+const SIGNUP_DISPLAY_NAME_ID: &str = "chirp-signup-display-name";
 
 // =====================================================================================
 // Transient UI state (plain — see the module-level "Reactivity model" note)
@@ -74,6 +79,14 @@ struct ComposeState {
     compose_success: Option<String>,
     /// Latest known value of the compose field, mirrored for reactive enable/disable.
     compose_text_draft: String,
+    /// The sign-up request is in flight.
+    signup_busy: bool,
+    /// The last sign-up failure, shown inline until the next attempt.
+    signup_error: Option<String>,
+    /// Latest known value of the sign-up handle field.
+    signup_handle_draft: String,
+    /// Latest known value of the sign-up display-name field.
+    signup_display_name_draft: String,
 }
 
 thread_local! {
@@ -134,6 +147,26 @@ fn compose_submit_enabled(text_draft: &str, busy: bool) -> bool {
 /// A user-facing message for a construction-time `ValidationError`.
 fn validation_message(err: &ValidationError) -> String {
     err.to_string()
+}
+
+/// Validate sign-up fields into a [`CreateUserRequest`]. Returns a user-facing error string on
+/// failure (combining both fields so a single banner covers both).
+fn validate_signup(handle: &str, display_name: &str) -> Result<CreateUserRequest, String> {
+    let username = Username::parse(handle.trim()).map_err(|e| e.to_string())?;
+    let display_name = display_name.trim().to_string();
+    if display_name.is_empty() {
+        return Err("Display name must not be empty".to_string());
+    }
+    Ok(CreateUserRequest {
+        username,
+        display_name,
+        bio: None,
+    })
+}
+
+/// Whether the *Create account* control is actionable: not busy and both fields are non-blank.
+fn signup_submit_enabled(handle: &str, display_name: &str, busy: bool) -> bool {
+    !busy && !handle.trim().is_empty() && !display_name.trim().is_empty()
 }
 
 // =====================================================================================
@@ -397,6 +430,163 @@ fn submit_chirp(ctx: &AppContext) {
     });
 }
 
+/// The logged-out sign-up form: collects a handle and display name, calls
+/// [`ApiClient::create_user`](crate::api::ApiClient::create_user), then auto-logs in.
+fn render_signup(ctx: &AppContext, state: &ComposeState) -> VNode {
+    let busy = state.signup_busy;
+    let enabled = signup_submit_enabled(
+        &state.signup_handle_draft,
+        &state.signup_display_name_draft,
+        busy,
+    );
+
+    let handle_ctx = ctx.clone();
+    let on_handle_input = move || {
+        let value = read_field_value(SIGNUP_HANDLE_ID);
+        mutate(|s| {
+            s.signup_handle_draft = value;
+            s.signup_error = None;
+        });
+        request_rerender(&handle_ctx);
+    };
+
+    let name_ctx = ctx.clone();
+    let on_name_input = move || {
+        let value = read_field_value(SIGNUP_DISPLAY_NAME_ID);
+        mutate(|s| {
+            s.signup_display_name_draft = value;
+            s.signup_error = None;
+        });
+        request_rerender(&name_ctx);
+    };
+
+    let click_ctx = ctx.clone();
+    let on_submit = move || submit_signup(&click_ctx);
+
+    let mut button = VElement::new("button")
+        .attr("type", "button")
+        .attr("class", "chirp-submit chirp-signup-submit")
+        .on(EventKind::Click, on_submit)
+        .child(text(if busy {
+            "Creating account…"
+        } else {
+            "Create account"
+        }));
+    if !enabled {
+        button = button.attr("disabled", "disabled");
+    }
+
+    VElement::new("div")
+        .attr("class", "chirp-signup")
+        .child(VElement::new("h1").child(text("Create an account")))
+        .child(VElement::new("p").attr("class", "chirp-hint").child(text(
+            "Choose a unique handle and a display name to get started.",
+        )))
+        .child(
+            VElement::new("label")
+                .attr("for", SIGNUP_HANDLE_ID)
+                .child(text("Handle")),
+        )
+        .child(
+            VElement::new("input")
+                .attr("id", SIGNUP_HANDLE_ID)
+                .attr("name", "handle")
+                .attr("type", "text")
+                .attr("autocomplete", "username")
+                .attr("placeholder", "yourhandle")
+                .on(EventKind::Input, on_handle_input),
+        )
+        .child(
+            VElement::new("label")
+                .attr("for", SIGNUP_DISPLAY_NAME_ID)
+                .child(text("Display name")),
+        )
+        .child(
+            VElement::new("input")
+                .attr("id", SIGNUP_DISPLAY_NAME_ID)
+                .attr("name", "display_name")
+                .attr("type", "text")
+                .attr("autocomplete", "name")
+                .attr("placeholder", "Your Name")
+                .on(EventKind::Input, on_name_input),
+        )
+        .child(button)
+        .children(banner("chirp-error", "alert", state.signup_error.clone()))
+        .child(
+            VElement::new("p")
+                .attr("class", "chirp-hint")
+                .child(text("Already have an account? "))
+                .child(link("/signin", "Log in →")),
+        )
+        .into()
+}
+
+/// Create the account; on success, auto-login and write the [`Session`] into `ctx.session`.
+fn submit_signup(ctx: &AppContext) {
+    let handle = read_field_value(SIGNUP_HANDLE_ID);
+    let display_name = read_field_value(SIGNUP_DISPLAY_NAME_ID);
+
+    let request = match validate_signup(&handle, &display_name) {
+        Ok(request) => request,
+        Err(message) => {
+            mutate(|s| s.signup_error = Some(message));
+            request_rerender(ctx);
+            return;
+        }
+    };
+
+    mutate(|s| {
+        s.signup_busy = true;
+        s.signup_error = None;
+    });
+    request_rerender(ctx);
+
+    let ctx = ctx.clone();
+    spawn_local(async move {
+        match ctx.client().create_user(&request).await {
+            Ok(_user) => {
+                // Auto-login after successful account creation.
+                let login_req = LoginRequest {
+                    username: request.username,
+                };
+                match ctx.client().login(&login_req).await {
+                    Ok(auth) => {
+                        mutate(|s| {
+                            s.signup_busy = false;
+                            s.signup_error = None;
+                            s.signup_handle_draft.clear();
+                            s.signup_display_name_draft.clear();
+                        });
+                        // Writing the session triggers a re-render of every dependent view.
+                        ctx.session.set(Some(Session {
+                            user: auth.user,
+                            token: auth.token,
+                        }));
+                    }
+                    Err(err) => {
+                        // Account created but auto-login failed; ask the user to log in manually.
+                        mutate(|s| {
+                            s.signup_busy = false;
+                            s.signup_error = Some(format!(
+                                "Account created — please log in. ({})",
+                                err.user_message()
+                            ));
+                        });
+                        request_rerender(&ctx);
+                    }
+                }
+            }
+            Err(err) => {
+                mutate(|s| {
+                    s.signup_busy = false;
+                    s.signup_error = Some(err.user_message());
+                });
+                request_rerender(&ctx);
+            }
+        }
+    });
+}
+
 // =====================================================================================
 // Frozen entry point
 // =====================================================================================
@@ -424,6 +614,24 @@ pub fn compose_view(ctx: &AppContext) -> VNode {
     VElement::new("section")
         .attr("class", "chirp-view chirp-compose")
         .child(body)
+        .into()
+}
+
+/// `/signup` — account creation. Renders the sign-up form; on success calls
+/// `submit_signup` which creates the account and auto-logs in.
+///
+/// Reactive anchor: reads `ctx.session` so `request_rerender` (which notifies the session signal)
+/// triggers a re-render flush for this view — mirroring the pattern used by `compose_view`.
+/// Bound to `/signup` by the scaffold's route table.
+#[must_use]
+pub fn signup_view(ctx: &AppContext) -> VNode {
+    // Subscribe to the session signal as this view's render anchor; `request_rerender` bumps it.
+    let _ = ctx.session.with(|s| s.is_some());
+    let state = snapshot();
+
+    VElement::new("section")
+        .attr("class", "chirp-view chirp-signup")
+        .child(render_signup(ctx, &state))
         .into()
 }
 
@@ -503,5 +711,47 @@ mod tests {
     fn validation_message_is_the_display_form() {
         let err = ValidationError::Empty { field: "text" };
         assert_eq!(validation_message(&err), "text must not be empty");
+    }
+
+    #[test]
+    fn valid_signup_produces_a_create_user_request() {
+        let req =
+            validate_signup("alice_01", "Alice Smith").expect("valid fields produce a request");
+        assert_eq!(req.username.as_str(), "alice_01");
+        assert_eq!(req.display_name, "Alice Smith");
+        assert_eq!(req.bio, None);
+    }
+
+    #[test]
+    fn signup_trims_whitespace_from_handle() {
+        let req = validate_signup("  alice_01  ", "Alice").expect("trimmed handle is valid");
+        assert_eq!(req.username.as_str(), "alice_01");
+    }
+
+    #[test]
+    fn signup_blank_handle_is_rejected() {
+        assert!(validate_signup("   ", "Alice").is_err());
+    }
+
+    #[test]
+    fn signup_blank_display_name_is_rejected() {
+        assert!(validate_signup("alice", "   ").is_err());
+    }
+
+    #[test]
+    fn signup_enablement_requires_both_fields_non_blank_and_not_busy() {
+        assert!(signup_submit_enabled("alice", "Alice", false));
+        assert!(
+            !signup_submit_enabled("alice", "Alice", true),
+            "disabled while busy"
+        );
+        assert!(
+            !signup_submit_enabled("", "Alice", false),
+            "disabled with blank handle"
+        );
+        assert!(
+            !signup_submit_enabled("alice", "", false),
+            "disabled with blank display name"
+        );
     }
 }

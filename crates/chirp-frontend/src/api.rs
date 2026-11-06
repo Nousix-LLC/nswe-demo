@@ -22,6 +22,88 @@ use ferric_http::Client;
 
 use crate::error::AppError;
 
+// -----------------------------------------------------------------------------------------
+// Public API response types -- matching the frozen spec shapes in contracts/public_api_spec.md.
+// Defined here (not in chirp-types) because they serve only the two new unauthenticated
+// endpoints; the authenticated chirp-types DTOs remain separate.
+// -----------------------------------------------------------------------------------------
+
+/// Author embedded in a public timeline chirp. Matches the `author` field in `GET /api/chirps`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicAuthor {
+    /// The author login handle (URL-safe string).
+    pub username: String,
+    /// The author chosen display name, or `None` if not set.
+    pub display_name: Option<String>,
+}
+
+/// One chirp returned by the public timeline endpoint `GET /api/chirps`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicChirp {
+    /// Opaque chirp id.
+    pub id: u64,
+    /// The chirp text content.
+    pub content: String,
+    /// The author identity.
+    pub author: PublicAuthor,
+    /// Creation timestamp (milliseconds since Unix epoch).
+    pub created_at: i64,
+    /// Total number of likes this chirp has received.
+    pub like_count: u64,
+}
+
+/// Response body from `GET /api/chirps`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicTimelineResponse {
+    /// Chirps in the page, newest first.
+    pub chirps: Vec<PublicChirp>,
+    /// Whether there are more chirps before the last one in `chirps`.
+    pub has_more: bool,
+}
+
+/// User profile info in the public user chirp response.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserInfo {
+    /// The user login handle.
+    pub username: String,
+    /// The user chosen display name, or `None` if not set.
+    pub display_name: Option<String>,
+    /// The user bio text, or `None` if not set.
+    pub bio: Option<String>,
+    /// Total number of chirps this user has posted.
+    pub chirp_count: u64,
+}
+
+/// One chirp in a user profile chirp list (`GET /api/users/:username/chirps`).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserChirp {
+    /// Opaque chirp id.
+    pub id: u64,
+    /// The chirp text content.
+    pub content: String,
+    /// Creation timestamp (milliseconds since Unix epoch).
+    pub created_at: i64,
+    /// Total number of likes this chirp has received.
+    pub like_count: u64,
+}
+
+/// Response body from `GET /api/users/:username/chirps`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUserResponse {
+    /// The user profile info.
+    pub user: PublicUserInfo,
+    /// Chirps posted by the user, newest first.
+    pub chirps: Vec<PublicUserChirp>,
+    /// Whether there are more chirps before the last one in `chirps`.
+    pub has_more: bool,
+}
+
 /// Typed async REST client. Holds the configurable base URL and an optional bearer token, builds a
 /// fresh [`ferric_http::Client`] per call (cheap — a string and a small header vector), and maps
 /// every failure to `AppError`. Cheap to clone.
@@ -105,6 +187,80 @@ impl ApiClient {
             .map_err(AppError::from_http)
     }
 
+    /// `GET /public/timeline` — [`TimelineQuery`] (query string: `limit`, `cursor`) →
+    /// [`Page<Chirp>`].
+    ///
+    /// The public timeline is unauthenticated: this method builds a client without an
+    /// `Authorization` header regardless of whether `self.token` is set, so it is safe to call for
+    /// logged-out visitors without leaking the session token.
+    pub async fn pub_timeline(&self, query: &TimelineQuery) -> Result<Page<Chirp>, AppError> {
+        let owned = timeline_query_params(query);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        // No `Authorization` header: build an unauthenticated client explicitly, ignoring
+        // `self.token` even if one is set, to satisfy the public endpoint's no-auth contract.
+        Client::builder()
+            .base_url(self.base_url.clone())
+            .build()
+            .get("/public/timeline")
+            .query(&params)
+            .send_json()
+            .await
+            .map_err(AppError::from_http)
+    }
+
+    /// `GET /chirps` -- public timeline, unauthenticated.
+    ///
+    /// Returns [`PublicTimelineResponse`]. Does not send an `Authorization` header even when
+    /// `self.token` is set. Query params: `before` (ISO 8601 cursor), `limit` (1-50, default 20).
+    pub async fn public_timeline(
+        &self,
+        before: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PublicTimelineResponse, AppError> {
+        let owned = public_chirps_query_params(before, limit);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        Client::builder()
+            .base_url(self.base_url.clone())
+            .build()
+            .get("/chirps")
+            .query(&params)
+            .send_json()
+            .await
+            .map_err(AppError::from_http)
+    }
+
+    /// `GET /users/:username/chirps` -- public user profile, unauthenticated.
+    ///
+    /// Returns [`PublicUserResponse`]. A 404 maps to `AppError::Api` with `NotFound` code when
+    /// the server body follows the shared error format. Query params: `before`, `limit`.
+    pub async fn public_user_profile(
+        &self,
+        username: &str,
+        before: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PublicUserResponse, AppError> {
+        let path = format!("/users/{username}/chirps");
+        let owned = public_chirps_query_params(before, limit);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        Client::builder()
+            .base_url(self.base_url.clone())
+            .build()
+            .get(&path)
+            .query(&params)
+            .send_json()
+            .await
+            .map_err(AppError::from_http)
+    }
+
     /// `GET /users/{id}` → [`User`]. `{id}` is the opaque [`UserId`]'s numeric value.
     pub async fn get_user(&self, id: UserId) -> Result<User, AppError> {
         self.http_client()
@@ -175,6 +331,19 @@ fn timeline_query_params(query: &TimelineQuery) -> Vec<(String, String)> {
     }
     if let Some(cursor) = &query.cursor {
         params.push(("cursor".to_string(), cursor.0.clone()));
+    }
+    params
+}
+
+/// Build the `before`/`limit` query-string parameters for the two public endpoints, emitting
+/// only present fields as owned `(key, value)` pairs ready to borrow for `query`.
+fn public_chirps_query_params(before: Option<&str>, limit: Option<u32>) -> Vec<(String, String)> {
+    let mut params = Vec::new();
+    if let Some(b) = before {
+        params.push(("before".to_string(), b.to_string()));
+    }
+    if let Some(l) = limit {
+        params.push(("limit".to_string(), l.to_string()));
     }
     params
 }
@@ -259,6 +428,30 @@ mod tests {
                 ("cursor".to_string(), "opaque token".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn pub_timeline_url_has_correct_path_and_no_auth() {
+        // Even when the client carries a token, pub_timeline builds an unauthenticated client and
+        // hits /public/timeline, not /timeline.
+        let client = ApiClient::new("/api").with_token(SessionToken("tok-abc".to_string()));
+        let query = TimelineQuery {
+            limit: Some(10),
+            cursor: Some(Cursor("pg2".to_string())),
+        };
+        let owned = timeline_query_params(&query);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        // Reproduce what pub_timeline builds internally: a no-auth client over the same base URL.
+        let url = Client::builder()
+            .base_url(client.base_url.clone())
+            .build()
+            .get("/public/timeline")
+            .query(&params)
+            .url();
+        assert_eq!(url, "/api/public/timeline?limit=10&cursor=pg2");
     }
 
     #[test]

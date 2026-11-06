@@ -30,6 +30,7 @@
 //! | [`resolve_token`](ChirpRepository::resolve_token) | authenticate a bearer token | [`Unauthorized`](crate::error::ServerError::Unauthorized) |
 //! | [`create_chirp`](ChirpRepository::create_chirp) | post a chirp | [`NotFound`](crate::error::ServerError::NotFound) for an absent author/reply target |
 //! | [`timeline`](ChirpRepository::timeline) | home timeline page | [`NotFound`](crate::error::ServerError::NotFound) for an absent viewer |
+//! | [`public_timeline`](ChirpRepository::public_timeline) | unauthenticated global feed | — |
 //! | [`follow`](ChirpRepository::follow) / [`unfollow`](ChirpRepository::unfollow) | follow graph | [`Forbidden`](crate::error::ServerError::Forbidden) on self-follow |
 //! | [`like`](ChirpRepository::like) / [`unlike`](ChirpRepository::unlike) | likes | [`NotFound`](crate::error::ServerError::NotFound) for an absent chirp |
 //!
@@ -290,6 +291,15 @@ pub trait ChirpRepository: Send + Sync {
         query: TimelineQuery,
     ) -> Result<Page<Chirp>, ServerError>;
 
+    /// Returns one reverse-chronological page of all public chirps across all authors, newest-first.
+    ///
+    /// No viewer argument — the feed is global and unauthenticated. Soft-removed chirps are
+    /// excluded. Pagination uses the same opaque cursor scheme as [`timeline`](Self::timeline): a
+    /// present `cursor` is the last-seen chirp id; a malformed cursor fails safe to the first page.
+    /// The page size is `query.limit` clamped to `1..=`[`MAX_TIMELINE_LIMIT`], defaulting to
+    /// [`DEFAULT_TIMELINE_LIMIT`] when absent.
+    async fn public_timeline(&self, query: TimelineQuery) -> Result<Page<Chirp>, ServerError>;
+
     /// Makes `follower` follow `followee`. Idempotent: following an already-followed user succeeds
     /// and leaves the counts unchanged.
     ///
@@ -526,4 +536,30 @@ pub trait ChirpRepository: Send + Sync {
     /// [`Unavailable`](ServerError::Unavailable) if the store is out of capacity;
     /// [`Internal`](ServerError::Internal) if the cleanup cannot be durably committed.
     async fn sweep_expired_transient_state(&self) -> Result<TransientSweep, ServerError>;
+
+    /// Returns one reverse-chronological page of public chirps joined with their authors.
+    ///
+    /// Each item is `(chirp, author_user)`. Soft-removed chirps are excluded. The `before`
+    /// cursor, when present, is a millisecond timestamp — only chirps with `created_at` strictly
+    /// before that value are returned. `limit` is clamped to `1..=50`, defaulting to 20 when 0.
+    async fn public_chirps_with_authors(
+        &self,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<(Chirp, User)>, bool), ServerError>;
+
+    /// Returns the user's profile and a page of their chirps, looked up by username
+    /// (case-insensitive). Also returns the user's total chirp count and whether more chirps
+    /// follow the page. Soft-removed chirps are excluded. The `before` cursor is a millisecond
+    /// timestamp.
+    ///
+    /// # Errors
+    ///
+    /// [`NotFound`](ServerError::NotFound) if no user has that username.
+    async fn get_user_chirps_by_username(
+        &self,
+        username: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<(User, u64, Vec<Chirp>, bool), ServerError>;
 }
