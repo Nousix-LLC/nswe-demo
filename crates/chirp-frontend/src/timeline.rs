@@ -40,7 +40,7 @@ use std::cell::{Cell, RefCell};
 use chirp_types::prelude::{Chirp, Cursor, Page, TimelineQuery};
 use ferric::prelude::*;
 use ferric::vdom::text;
-use ferric_router::prelude::current_path;
+use ferric_router::prelude::{current_path, link};
 
 use crate::app::AppContext;
 use crate::error::AppError;
@@ -215,7 +215,7 @@ fn request_load(ctx: AppContext, kind: LoadKind) {
     });
 
     wasm_bindgen_futures::spawn_local(async move {
-        let result = ctx.client().timeline(&query).await;
+        let result = ctx.client().pub_timeline(&query).await;
         apply_result(kind, result);
     });
 }
@@ -324,10 +324,26 @@ fn loading_view() -> VNode {
 }
 
 /// The empty state shown when the first page loaded but contained no chirps.
+///
+/// For logged-out visitors this is the first screen they see, so it explains what Chirp is and
+/// offers visible Sign up / Sign in entry points rather than a blank "No chirps yet." dead end.
 fn empty_view() -> VNode {
-    VElement::new("p")
+    VElement::new("div")
         .attr("class", "chirp-empty")
-        .child(text("No chirps yet."))
+        .child(
+            VElement::new("p")
+                .attr("class", "chirp-empty-description")
+                .child(text(
+                "Chirp is a place to share short thoughts and follow people you find interesting.",
+            )),
+        )
+        .child(
+            VElement::new("div")
+                .attr("class", "chirp-empty-actions")
+                .child(link("/compose", "Create account"))
+                .child(text(" · "))
+                .child(link("/compose", "Sign in")),
+        )
         .into()
 }
 
@@ -357,7 +373,10 @@ fn chirp_item(chirp: &Chirp) -> VNode {
         .child(
             VElement::new("div")
                 .attr("class", "chirp-author")
-                .child(text(chirp.author_id.to_string())),
+                .child(link(
+                    &format!("/user/{}", chirp.author_id.get()),
+                    &chirp.author_id.to_string(),
+                )),
         )
         .child(
             VElement::new("p")

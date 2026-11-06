@@ -82,12 +82,19 @@ fn api_base_url() -> String {
 }
 
 /// The persistent navigation bar rendered above the reactive outlet.
+///
+/// "Sign up" and "Sign in" both link to `/compose` (the current app entry point for account
+/// creation and login) so logged-out visitors have a visible path into the authenticated flow.
 fn nav_bar() -> VNode {
     VElement::new("nav")
         .attr("class", "chirp-nav")
         .child(link("/", "Timeline"))
         .child(text(" · "))
         .child(link("/compose", "Compose"))
+        .child(text(" · "))
+        .child(link("/compose", "Sign up"))
+        .child(text(" · "))
+        .child(link("/compose", "Sign in"))
         .into()
 }
 

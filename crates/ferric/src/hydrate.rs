@@ -185,8 +185,7 @@ fn adopt_children(
     }
 
     // VNode children with no corresponding DOM node — mismatch recovery: append client-rendered.
-    for missing_idx in vnode_idx..vnode_children.len() {
-        let vnode = &vnode_children[missing_idx];
+    for (missing_idx, vnode) in vnode_children.iter().enumerate().skip(vnode_idx) {
         let mut child_path = parent_path.to_vec();
         child_path.push(missing_idx);
         emit_mismatch_warning(&child_path, &vnode_label(vnode), "absent");

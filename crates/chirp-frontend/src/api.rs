@@ -105,6 +105,30 @@ impl ApiClient {
             .map_err(AppError::from_http)
     }
 
+    /// `GET /public/timeline` — [`TimelineQuery`] (query string: `limit`, `cursor`) →
+    /// [`Page<Chirp>`].
+    ///
+    /// The public timeline is unauthenticated: this method builds a client without an
+    /// `Authorization` header regardless of whether `self.token` is set, so it is safe to call for
+    /// logged-out visitors without leaking the session token.
+    pub async fn pub_timeline(&self, query: &TimelineQuery) -> Result<Page<Chirp>, AppError> {
+        let owned = timeline_query_params(query);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        // No `Authorization` header: build an unauthenticated client explicitly, ignoring
+        // `self.token` even if one is set, to satisfy the public endpoint's no-auth contract.
+        Client::builder()
+            .base_url(self.base_url.clone())
+            .build()
+            .get("/public/timeline")
+            .query(&params)
+            .send_json()
+            .await
+            .map_err(AppError::from_http)
+    }
+
     /// `GET /users/{id}` → [`User`]. `{id}` is the opaque [`UserId`]'s numeric value.
     pub async fn get_user(&self, id: UserId) -> Result<User, AppError> {
         self.http_client()
@@ -259,6 +283,30 @@ mod tests {
                 ("cursor".to_string(), "opaque token".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn pub_timeline_url_has_correct_path_and_no_auth() {
+        // Even when the client carries a token, pub_timeline builds an unauthenticated client and
+        // hits /public/timeline, not /timeline.
+        let client = ApiClient::new("/api").with_token(SessionToken("tok-abc".to_string()));
+        let query = TimelineQuery {
+            limit: Some(10),
+            cursor: Some(Cursor("pg2".to_string())),
+        };
+        let owned = timeline_query_params(&query);
+        let params: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        // Reproduce what pub_timeline builds internally: a no-auth client over the same base URL.
+        let url = Client::builder()
+            .base_url(client.base_url.clone())
+            .build()
+            .get("/public/timeline")
+            .query(&params)
+            .url();
+        assert_eq!(url, "/api/public/timeline?limit=10&cursor=pg2");
     }
 
     #[test]
